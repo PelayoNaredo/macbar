@@ -347,14 +347,19 @@ fn make_format(dw: &IDWriteFactory, family: PCWSTR, size: f32, weight: DWRITE_FO
 }
 
 // ---------------------------------------------------------------- AppBar
+/// Todas las peticiones del hueco de la barra van DIRECTAS al Explorador (ver `trayhost::direct`).
+fn appbar(msg: u32, abd: &mut APPBARDATA) -> usize {
+    trayhost::direct(|| unsafe { SHAppBarMessage(msg, abd) })
+}
+
 fn position_appbar(hwnd: HWND) {
     unsafe {
         let h = (BAR_H * scale_of(hwnd)).round() as i32;
         let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: ABE_TOP, ..Default::default() };
         abd.rc = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
-        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        appbar(ABM_QUERYPOS, &mut abd);
         abd.rc.bottom = abd.rc.top + h;
-        SHAppBarMessage(ABM_SETPOS, &mut abd);
+        appbar(ABM_SETPOS, &mut abd);
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, h, SWP_NOACTIVATE);
         GFX.with(|g| {
             if let Some(g) = g.borrow_mut().as_mut() {
@@ -371,8 +376,8 @@ fn position_appbar(hwnd: HWND) {
 fn reserve(hwnd: HWND) {
     unsafe {
         let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uCallbackMessage: WM_APPBAR, ..Default::default() };
-        SHAppBarMessage(ABM_REMOVE, &mut abd);
-        SHAppBarMessage(ABM_NEW, &mut abd);
+        appbar(ABM_REMOVE, &mut abd);
+        appbar(ABM_NEW, &mut abd);
     }
     position_appbar(hwnd);
     fix_maximized(hwnd);
@@ -2256,7 +2261,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_WINDOWPOSCHANGED => {
                 let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
-                SHAppBarMessage(ABM_WINDOWPOSCHANGED, &mut abd);
+                appbar(ABM_WINDOWPOSCHANGED, &mut abd);
                 DefWindowProcW(hwnd, msg, wp, lp)
             }
             WM_APPBAR => {
@@ -2286,7 +2291,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_DESTROY => {
                 let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
-                SHAppBarMessage(ABM_REMOVE, &mut abd);
+                appbar(ABM_REMOVE, &mut abd);
                 PostQuitMessage(0);
                 LRESULT(0)
             }
@@ -2474,7 +2479,7 @@ fn main() {
         }));
 
         let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uCallbackMessage: WM_APPBAR, ..Default::default() };
-        SHAppBarMessage(ABM_NEW, &mut abd);
+        appbar(ABM_NEW, &mut abd);
         position_appbar(hwnd);
         // Soltar archivos en la barra (bandeja del notch) y avisos al copiar
         DragAcceptFiles(hwnd, true);

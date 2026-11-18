@@ -109,9 +109,30 @@ fn broadcast() {
     std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(1500)); OWN_BROADCAST.store(false, Ordering::Relaxed); });
 }
 
+/// Llamadas en curso que deben llegar al Explorador sin pasar por nuestra ventana.
+static DIRECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Ejecuta `f` con el Explorador como primera "Shell_TrayWnd". `SHAppBarMessage` habla con la primera
+/// que encuentra y, si es la nuestra, el reenvío de las peticiones del hueco de la barra (ABM_SETPOS…)
+/// se acepta pero el Explorador no lo aplica: tras suspender, la barra perdía su hueco para siempre.
+pub fn direct<R>(f: impl FnOnce() -> R) -> R {
+    let own = own();
+    if own.0.is_null() { return f(); }
+    DIRECT.fetch_add(1, Ordering::SeqCst);
+    unsafe {
+        let fl = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let _ = SetWindowPos(own, Some(HWND_NOTOPMOST), 0, 0, 0, 0, fl);
+        let _ = SetWindowPos(own, Some(HWND_BOTTOM), 0, 0, 0, 0, fl);
+    }
+    let r = f();
+    if DIRECT.fetch_sub(1, Ordering::SeqCst) == 1 { raise(own); }
+    r
+}
+
 /// Nos pone por delante de la barra del Explorador (las apps eligen la primera que encuentran)
 /// y copia su posición, para quien pregunte dónde está la barra de tareas.
 fn raise(hwnd: HWND) {
+    if DIRECT.load(Ordering::SeqCst) > 0 { return; }
     unsafe {
         let Some(ex) = explorer_tray() else { return };
         let first = FindWindowW(w!("Shell_TrayWnd"), None).unwrap_or_default();
