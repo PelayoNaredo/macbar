@@ -1,0 +1,69 @@
+# macbar — macOS-style menu bar for Windows 11
+
+**macbar** is a lightweight, native **macOS-style top menu bar for Windows 11**, written in **Rust** with **Win32 + Direct2D** (no Electron, no WebView). It adds a translucent top bar with app menus, a Dynamic Island–style media pill, a Control Center, Wi‑Fi and weather panels, a calendar and a system tray — all smoothly animated and using almost no CPU when idle.
+
+![macbar: macOS-like menu bar on Windows 11](docs/macbar-menu-bar-windows-11.png)
+
+![macbar: Dynamic Island style now playing pill on Windows](docs/macbar-dynamic-island-now-playing.png)
+
+> 🇪🇸 Barra superior estilo macOS para Windows 11, nativa y ligera, hecha en Rust. La interfaz está en español.
+
+## Features
+
+- **macOS-like top bar** that reserves its own space on screen (AppBar), so maximized windows never cover it — it even recovers after sleep, lock/unlock, display or DPI changes and Explorer restarts.
+- **Global app menu** (File, Edit, View, Go, Window, Help) acting on the active window, with macOS-style menu hopping.
+- **Dynamic Island for Windows**: a central pill that shows now-playing music (album-art colors, live equalizer, progress), timers, volume/brightness HUDs and low-memory alerts.
+- **Media controls** for Spotify, YouTube Music and any app using Windows media sessions.
+- **Control Center**: Wi‑Fi, Bluetooth, volume, brightness and quick toggles.
+- **Wi‑Fi panel**: nearby networks with signal strength and one-click connect to saved networks.
+- **Weather panel** powered by [Open‑Meteo](https://open-meteo.com) (no API key): current conditions, hourly and 6‑day forecast, animated icons.
+- **Calendar & clock** with month navigation and a quick timer.
+- **System tray** icons, battery, user avatar and Windows Search.
+- **Auto-hides with fullscreen apps** (games, video, F11) and comes back afterwards.
+- **Native & tiny**: a single small `.exe`, Direct2D/DirectWrite rendering, per-monitor DPI aware, near-zero idle CPU.
+
+## Download
+
+Grab `macbar.exe` from the [latest release](https://github.com/PelayoNaredo/macbar/releases/latest) and run it. No installer, no dependencies.
+
+To start it with Windows, put a shortcut to `macbar.exe` in `shell:startup`.
+
+Requirements: Windows 11 (Windows 10 may work but is untested), x64.
+
+## Configuration
+
+Optional file `%APPDATA%\macbar\config.ini`:
+
+```ini
+; weather location (otherwise it is detected automatically)
+ciudad = Madrid
+; or exact coordinates
+; lat = 40.42
+; lon = -3.70
+```
+
+## Build from source
+
+```bash
+git clone https://github.com/PelayoNaredo/macbar.git
+cd macbar
+cargo build --release
+```
+
+The binary ends up in `target/release/macbar.exe`. Needs a recent stable Rust toolchain (edition 2024) for `x86_64-pc-windows-msvc` or `-gnu`.
+
+## FAQ
+
+**How do I get a Mac menu bar on Windows 11?** Run macbar: it docks to the top of your primary monitor and reserves its space like the taskbar does.
+
+**Does it replace the Windows taskbar?** No, it sits at the top and works alongside it. You can auto-hide the taskbar for a cleaner, more Mac-like desktop.
+
+**Is it heavy?** No. It is plain Win32 + Direct2D and only redraws while something is animating.
+
+## Disclaimer
+
+macbar is an independent open-source project. It is not affiliated with or endorsed by Apple, Microsoft or Anthropic. macOS is a trademark of Apple Inc.; Windows is a trademark of Microsoft Corporation.
+
+## License
+
+[MIT](LICENSE) © Pelayo Naredo
