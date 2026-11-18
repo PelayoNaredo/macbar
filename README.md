@@ -1,6 +1,6 @@
 # macbar — macOS-style menu bar for Windows 11
 
-**macbar** is a lightweight, native **macOS-style top menu bar for Windows 11**, written in **Rust** with **Win32 + Direct2D** (no Electron, no WebView). It adds a translucent top bar with app menus, a Dynamic Island–style media pill, a Control Center, Wi‑Fi and weather panels, a calendar and a system tray — all smoothly animated and using almost no CPU when idle.
+**macbar** is a lightweight, native **macOS-style top menu bar for Windows 11**, written in **Rust** with **Win32 + Direct2D** (no Electron, no WebView). It adds a translucent top bar with app menus, a Dynamic Island–style media pill, a Control Center, Wi‑Fi and weather panels, a calendar, a system tray and its own Spotlight-like search, plus large animated **desktop widgets** rendered on the GPU — all using almost no CPU when idle.
 
 ![macbar: macOS-like menu bar on Windows 11](docs/macbar-menu-bar-windows-11.png)
 
@@ -30,15 +30,29 @@
 - **Wi‑Fi panel**: nearby networks with signal strength and one-click connect to saved networks.
 - **Weather panel** powered by [Open‑Meteo](https://open-meteo.com) (no API key): current conditions, hourly and 6‑day forecast, animated icons.
 - **Calendar & clock** with month navigation and a quick timer.
-- **System tray** icons, battery, user avatar and Windows Search.
+- **Search** (the magnifier): Start-menu apps (Store apps too), files and folders from the Windows Search index, Settings pages, a calculator and web search. Keyboard driven: type, ↑/↓, Enter; Ctrl+Enter opens a file's folder.
+- **System tray** icons, battery and user avatar. macbar's own icon in the hidden-icons panel opens its menu.
+- **Cascading entrance animations** in the panels.
 - **Auto-hides with fullscreen apps** (games, video, F11) and comes back afterwards.
 - **Native & tiny**: a single small `.exe`, Direct2D/DirectWrite rendering, per-monitor DPI aware, near-zero idle CPU.
+
+### Desktop widgets
+
+Large, animated widgets that sit on the desktop (under your windows), rendered with Direct2D + DirectComposition on the GPU. Drag them anywhere — their positions are saved — and pick floating (no background) or glass-card style. Turn each one on or off from the bar's right-click menu.
+
+- **Calendar** with timers and day details.
+- **Weather** with an animated hourly curve, sunrise/sunset and 6-day forecast.
+- **Music**: album art, seekable timeline, controls and your real **YouTube Music queue**.
+- **System**: live CPU, RAM and network graphs plus top apps.
+- **Storage & recycle bin**: drives, what's taking space in the bin, empty it or run Storage Sense.
+- **Projects**: local Git repos and your GitHub repos, opened in Explorer, VS Code or a terminal.
+- **Phone (Phone Link)**: a Phone Link–style header (phone frame with your wallpaper, name, battery, connection), shortcuts to messages, calls and photos, your phone's 3 latest photos and the phone notifications Phone Link mirrors to Windows.
 
 ## Download
 
 Grab `macbar.exe` from the [latest release](https://github.com/PelayoNaredo/macbar/releases/latest) and run it. No installer, no dependencies.
 
-To start it with Windows, put a shortcut to `macbar.exe` in `shell:startup`.
+To start it with Windows, right-click the bar (or click macbar's icon in the hidden-icons panel) and tick **Iniciar con Windows**.
 
 Requirements: Windows 11 (Windows 10 may work but is untested), x64.
 
@@ -52,7 +66,13 @@ ciudad = Madrid
 ; or exact coordinates
 ; lat = 40.42
 ; lon = -3.70
+; image shown inside the phone widget (set it by clicking the phone drawing)
+; fondo_movil = C:\Users\you\Pictures\wallpaper.jpg
 ```
+
+Widget positions and which widgets are on live in `%APPDATA%\macbar\widgets.ini`.
+
+**Phone widget notes.** It needs Phone Link linked to your phone. Phone Link's own databases are encrypted, so the widget only uses what Windows exposes: the notifications Phone Link mirrors as Windows toasts, the phone's files under `%USERPROFILE%\CrossDevice` (for the latest photos), and the battery shown in the Phone Link window (read while that window is open, then remembered). The wallpaper isn't readable anywhere, so you pick the image yourself.
 
 ## Build from source
 
@@ -72,7 +92,9 @@ The binary ends up in `target/release/macbar.exe`. Needs a recent stable Rust to
 
 **Does it replace the Windows taskbar?** No, it sits at the top and works alongside it. You can auto-hide the taskbar for a cleaner, more Mac-like desktop.
 
-**Is it heavy?** No. It is plain Win32 + Direct2D and only redraws while something is animating.
+**Is it heavy?** No. It is plain Win32 + Direct2D and only redraws while something is animating. Widgets pause when your windows cover the desktop.
+
+**Does the search replace Windows Search?** It opens from macbar's magnifier; Win+S still opens Windows' own search.
 
 ## Disclaimer
 
