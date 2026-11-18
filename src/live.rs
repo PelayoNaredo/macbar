@@ -567,6 +567,15 @@ pub fn clipboard_changed(hwnd: HWND) {
         let mut desc = String::new();
         for _ in 0..3 {
             if OpenClipboard(Some(hwnd)).is_ok() {
+                // Gestores de contraseñas y apps sensibles marcan lo copiado como privado: ni se lee ni se avisa
+                let private = [
+                    windows::core::w!("ExcludeClipboardContentFromMonitorProcessing"),
+                    windows::core::w!("CanIncludeInClipboardHistory"),
+                    windows::core::w!("Clipboard Viewer Ignore"),
+                ]
+                .iter()
+                .any(|f| { let id = RegisterClipboardFormatW(*f); id != 0 && IsClipboardFormatAvailable(id).is_ok() });
+                if private { let _ = CloseClipboard(); return; }
                 if let Ok(h) = GetClipboardData(13 /* CF_UNICODETEXT */) {
                     let p = GlobalLock(HGLOBAL(h.0)) as *const u16;
                     if !p.is_null() {
