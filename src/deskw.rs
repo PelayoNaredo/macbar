@@ -1542,18 +1542,18 @@ const NROW: f32 = 66.0;
 /// Corta un texto en dos líneas de `n` caracteres como mucho (por palabras).
 fn two_lines(s: &str, n: usize) -> (String, String) {
     if s.chars().count() <= n { return (s.to_string(), String::new()); }
-    let mut a = String::new();
-    let mut rest = s;
-    for w in s.split_whitespace() {
-        if a.chars().count() + w.chars().count() + 1 > n { break; }
-        if !a.is_empty() { a.push(' '); }
+    let words: Vec<&str> = s.split_whitespace().collect();
+    let (mut a, mut used) = (String::new(), 0);
+    for w in &words {
+        let extra = if a.is_empty() { 0 } else { 1 };
+        if a.chars().count() + w.chars().count() + extra > n { break; }
+        if extra == 1 { a.push(' '); }
         a.push_str(w);
-        rest = &s[s.find(w).map(|i| i + w.len()).unwrap_or(s.len())..];
+        used += 1;
     }
-    if a.is_empty() { return (trunc(s, n), String::new()); }
-    (a, trunc(rest.trim(), n))
+    if used == 0 { return (trunc(s, n), String::new()); }
+    (a, trunc(&words[used..].join(" "), n))
 }
-
 impl Widget for PhoneW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, _dt: f32) {
         let (W, H) = size(Kind::Phone);

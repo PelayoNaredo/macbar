@@ -38,6 +38,14 @@
 
 ### Desktop widgets
 
+![macbar desktop widgets for Windows 11: system, music with YouTube Music queue, phone, calendar, projects, weather and storage](docs/macbar-desktop-widgets.png)
+
+<p align="center">
+  <img src="docs/macbar-search.png" alt="macbar search panel: apps, settings, files and web search" width="460">
+  &nbsp;
+  <img src="docs/macbar-phone-widget.png" alt="macbar phone widget for Phone Link: battery, latest photos and phone notifications" width="200">
+</p>
+
 Large, animated widgets that sit on the desktop (under your windows), rendered with Direct2D + DirectComposition on the GPU. Drag them anywhere — their positions are saved — and pick floating (no background) or glass-card style. Turn each one on or off from the bar's right-click menu.
 
 - **Calendar** with timers and day details.

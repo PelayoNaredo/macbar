@@ -207,6 +207,7 @@ fn cat_code(c: Cat) -> char { match c { Cat::App => 'a', Cat::File => 'f', Cat::
 fn code_cat(c: &str) -> Option<Cat> { Some(match c { "a" => Cat::App, "f" => Cat::File, "d" => Cat::Folder, "s" => Cat::Setting, _ => return None }) }
 
 fn load_recent() -> Vec<(Cat, String, String)> {
+    if sys::demo() { return vec![(Cat::Setting, "Pantalla".into(), "ms-settings:display".into())]; }
     std::fs::read_to_string(recent_path()).unwrap_or_default().lines().filter_map(|l| {
         let mut p = l.splitn(3, '\t');
         Some((code_cat(p.next()?)?, p.next()?.to_string(), p.next()?.to_string()))
@@ -414,7 +415,12 @@ fn worker(rx: std::sync::mpsc::Receiver<Job>) {
         std::thread::sleep(Duration::from_millis(60));
         if LATEST.load(Ordering::Relaxed) != ver { continue; }
         if conn.is_none() { conn = connect(); }
-        let files = match &conn { Some(c) => index_files(c, q.trim()), None => Vec::new() };
+        let files = if sys::demo() {
+            // Archivos inventados (los de verdad son del usuario)
+            let home = std::env::var("USERPROFILE").unwrap_or_default();
+            ["Presupuesto 2026.xlsx", "Notas de la reunión.docx", "Fotos del viaje"].iter()
+                .filter(|n| fold(n).split_whitespace().any(|w| w.starts_with(&fold(q.trim())))).map(|n| (format!("{home}\\Documents\\{n}"), n.to_string())).collect()
+        } else { match &conn { Some(c) => index_files(c, q.trim()), None => Vec::new() } };
         if files.is_empty() && conn.is_some() && LATEST.load(Ordering::Relaxed) == ver {
             // La conexión pudo caerse (servicio reiniciado): se rehace la próxima vez
             conn = None;

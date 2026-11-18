@@ -585,7 +585,26 @@ fn media_thread(rx: Receiver<Cmd>) {
         }
         if std::env::var_os("MACBAR_DEMO").is_some() {
             // Modo demo para revisar el diseño sin reproducir nada
-            *MEDIA.lock().unwrap() = Some(MediaInfo { title: "Tumblr Girls (feat. Christoph Andersson)".into(), artist: "G-Eazy".into(), playing: true, art_ver: 0, app: "Spotify.exe".into(), can_prev: true, can_next: true, album: "These Things Happen".into() });
+            // Carátula inventada: un degradado cálido con un círculo, para que se vea el color de la isla
+            if ART.lock().unwrap().is_none() {
+                let art = |n: u32| -> Vec<u8> {
+                    let mut v = vec![0u8; (n * n * 4) as usize];
+                    for y in 0..n { for x in 0..n {
+                        let (fx, fy) = (x as f32 / n as f32, y as f32 / n as f32);
+                        let d = ((fx - 0.62).powi(2) + (fy - 0.4).powi(2)).sqrt();
+                        let sun = (1.0 - (d / 0.22)).clamp(0.0, 1.0).powf(0.6);
+                        let r = (0.95 - 0.35 * fy + 0.05 * sun).min(1.0);
+                        let g = (0.45 - 0.25 * fy + 0.45 * sun).min(1.0);
+                        let b = (0.35 + 0.35 * fy + 0.2 * sun).min(1.0);
+                        let i = ((y * n + x) * 4) as usize;
+                        v[i] = (b * 255.0) as u8; v[i + 1] = (g * 255.0) as u8; v[i + 2] = (r * 255.0) as u8; v[i + 3] = 255;
+                    } }
+                    v
+                };
+                *ART.lock().unwrap() = Some((1, Arc::new(art(ART_PX))));
+                *ART_BIG.lock().unwrap() = Some((1, Arc::new(art(ART_BIG_PX))));
+            }
+            *MEDIA.lock().unwrap() = Some(MediaInfo { title: "Tumblr Girls (feat. Christoph Andersson)".into(), artist: "G-Eazy".into(), playing: true, art_ver: 1, app: "Spotify.exe".into(), can_prev: true, can_next: true, album: "These Things Happen".into() });
             *WEATHER.lock().unwrap() = Some(Weather { temp: 18.0, is_day: false, code: 0 });
             unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_MEDIA, WPARAM(0), LPARAM(0)); }
             continue;

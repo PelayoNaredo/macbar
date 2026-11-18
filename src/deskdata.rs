@@ -147,6 +147,16 @@ fn play_in_queue(uia: &windows::Win32::UI::Accessibility::IUIAutomation, h: HWND
 
 fn queue_thread() {
     use windows::Win32::UI::Accessibility::*;
+    if sys::demo() {
+        // Cola inventada (la canción de la demo y lo que viene detrás)
+        let q = |t: &str, a: &str, d: &str| QItem { title: t.into(), artists: a.into(), dur: d.into() };
+        *QUEUE.lock().unwrap() = vec![
+            q("Tumblr Girls (feat. Christoph Andersson)", "G-Eazy", "4:01"), q("Midnight City", "M83", "4:03"),
+            q("Electric Feel", "MGMT", "3:49"), q("Breezeblocks", "alt-J", "3:47"), q("Sweater Weather", "The Neighbourhood", "4:00"),
+        ];
+        YTM_OPEN.store(true, Ordering::Relaxed);
+        return;
+    }
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return };
@@ -257,6 +267,16 @@ fn push(v: &mut Vec<f32>, x: f32) { v.push(x); if v.len() > HIST { v.remove(0); 
 fn sys_thread() {
     use windows::Win32::System::SystemInformation::{GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut d = SysData::default();
+    if sys::demo() {
+        // Un minuto de historia inventada, para que la gráfica no salga vacía al arrancar
+        for i in 0..HIST {
+            let x = i as f32;
+            push(&mut d.cpu, 14.0 + 9.0 * (x * 0.31).sin() + 6.0 * (x * 0.83).sin().max(0.0));
+            push(&mut d.ram, 82.0 + 1.5 * (x * 0.12).sin());
+            push(&mut d.down, 180_000.0 * ((x * 0.4).sin() + 1.2).max(0.0));
+            push(&mut d.up, 40_000.0 * ((x * 0.55 + 1.0).sin() + 1.1).max(0.0));
+        }
+    }
     let mut last_cpu = sys_times();
     let mut last_net = net_bytes();
     let mut last_t = Instant::now();
@@ -322,6 +342,7 @@ fn sys_thread() {
             procs_cpu = c2;
         }
         d.at = Some(Instant::now());
+        if sys::demo() { d.top = vec![("Navegador".into(), 6.2), ("Visual Studio Code".into(), 3.1), ("Spotify".into(), 1.4)]; }
         *SYS.lock().unwrap() = Some(d.clone());
     }
 }
@@ -378,6 +399,11 @@ fn bin_biggest(drives: &[Drive]) -> Vec<(String, u64)> {
 }
 
 pub fn read_store() -> StoreData {
+    if sys::demo() {
+        let gb = 1u64 << 30;
+        return StoreData { drives: vec![Drive { root: "C:\\".into(), label: "Windows".into(), total: 952 * gb, free: 318 * gb }, Drive { root: "D:\\".into(), label: "Datos".into(), total: 1863 * gb, free: 1204 * gb }],
+            bin_size: 2 * gb + 380 * (1 << 20), bin_items: 14, bin_big: vec![("vacaciones-2025.mp4".into(), 1_400 << 20), ("instalador-antiguo.exe".into(), 640 << 20), ("borrador-final.psd".into(), 212 << 20)] };
+    }
     let drives = drives();
     let mut q = SHQUERYRBINFO { cbSize: size_of::<SHQUERYRBINFO>() as u32, ..Default::default() };
     unsafe { let _ = SHQueryRecycleBinW(PCWSTR::null(), &mut q); }
@@ -640,6 +666,24 @@ pub static PROJ_NOW: AtomicBool = AtomicBool::new(false);
 
 fn proj_thread() {
     let mut n = 0u32;
+    if sys::demo() {
+        let now = now_unix();
+        let r = |name: &str, br: &str, dirty, lang, color, h: u64| Repo { name: name.into(), path: format!("C:\\Proyectos\\{name}"), branch: br.into(), dirty, lang, color, modified: now - h * 3600, remote: None };
+        let g = |name: &str, private, stars, h: u64, lang: &str, color| GhRepo { name: name.into(), private, stars, pushed: now - h * 3600, url: format!("https://github.com/alex/{name}"), lang: lang.into(), color };
+        let mut p = PROJ.lock().unwrap();
+        p.local = vec![
+            r("macbar", "main", Some(3), "Rust", [0.87, 0.65, 0.52], 1), r("portfolio-web", "main", Some(0), "TypeScript", [0.19, 0.47, 0.78], 20),
+            r("api-tareas", "dev", Some(7), "Go", [0.0, 0.68, 0.85], 52), r("juego-plataformas", "main", Some(0), "C#", [0.4, 0.75, 0.3], 140),
+            r("dotfiles", "main", Some(1), "Shell", [0.54, 0.88, 0.32], 300), r("notas", "main", Some(0), "Markdown", [0.5, 0.5, 0.5], 600),
+        ];
+        p.gh = vec![
+            g("macbar", false, 128, 1, "Rust", [0.87, 0.65, 0.52]), g("portfolio-web", false, 12, 20, "TypeScript", [0.19, 0.47, 0.78]),
+            g("api-tareas", true, 0, 52, "Go", [0.0, 0.68, 0.85]), g("dotfiles", false, 4, 300, "Shell", [0.54, 0.88, 0.32]),
+        ];
+        p.gh_ok = Some(true);
+        p.scanned = true;
+        return;
+    }
     loop {
         let local = scan_local();
         { let mut p = PROJ.lock().unwrap(); p.local = local; p.scanned = true; }

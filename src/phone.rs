@@ -42,19 +42,22 @@ pub fn start() {
         let mut round = 0u32;
         let mut battery: Option<(u8, u64)> = None;
         let mut wall: (String, Option<Arc<Vec<u8>>>) = (String::new(), None);
-        let name = device_name();
+        let name = if sys::demo() { "Mi móvil".to_string() } else { device_name() };
         loop {
             let mut st = if sys::demo() { demo() } else { read() };
             st.name = name.clone();
             // La batería solo la enseña la ventana de Enlace Móvil: se lee si está abierta y se recuerda
             if st.running && round % 3 == 0 { if let Some(b) = read_battery() { battery = Some((b, deskdata::now_unix())); } }
-            st.battery = battery;
+            st.battery = if sys::demo() { Some((72, deskdata::now_unix())) } else { battery };
             // El fondo lo elige el usuario (Enlace Móvil no lo deja en ningún archivo legible)
-            let wp = sys::config_value("fondo_movil").unwrap_or_default();
-            if wp != wall.0 { wall = (wp.clone(), wic.as_ref().and_then(|w| load_wall(w, &wp)).map(Arc::new)); }
+            let wp = if sys::demo() { "demo".into() } else { sys::config_value("fondo_movil").unwrap_or_default() };
+            if wp == "demo" && wall.1.is_none() { wall = (wp.clone(), Some(Arc::new(gradient(WALL_W, WALL_H, [0.55, 0.70, 0.95], [0.12, 0.16, 0.32])))); }
+            else if wp != wall.0 { wall = (wp.clone(), wic.as_ref().and_then(|w| load_wall(w, &wp)).map(Arc::new)); }
             st.wall = wall.1.clone();
             // Las fotos, cada minuto (listar es al momento; la miniatura puede traer el archivo del móvil)
-            if round % 15 == 0 && !sys::demo() {
+            if sys::demo() {
+                if photos.is_empty() { photos = demo_photos(); }
+            } else if round % 15 == 0 {
                 if let Some(w) = &wic { photos = recent_photos(w, &mut thumbs); }
             }
             round += 1;
@@ -249,6 +252,25 @@ fn read() -> PhoneState {
     st.notifs.sort_by(|a, b| b.when.cmp(&a.when));
     st.notifs.truncate(12);
     st
+}
+
+/// Imagen de degradado vertical con unas "colinas" (para el modo demo).
+fn gradient(w: u32, h: u32, top: [f32; 3], bottom: [f32; 3]) -> Vec<u8> {
+    let mut v = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h { for x in 0..w {
+        let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+        let hill = 0.62 + 0.08 * (fx * 6.0).sin() + 0.04 * (fx * 13.0 + 1.0).sin();
+        let k = if fy > hill { 0.35 } else { 1.0 };
+        let i = ((y * w + x) * 4) as usize;
+        for c in 0..3 { let val = (top[c] + (bottom[c] - top[c]) * fy) * k; v[i + 2 - c] = (val.clamp(0.0, 1.0) * 255.0) as u8; }
+        v[i + 3] = 255;
+    } }
+    v
+}
+
+fn demo_photos() -> Vec<PPhoto> {
+    let mk = |a: [f32; 3], b: [f32; 3], video| PPhoto { path: String::new(), thumb: Some(Arc::new(gradient(THUMB, THUMB, a, b))), video };
+    vec![mk([0.98, 0.72, 0.45], [0.55, 0.25, 0.35], false), mk([0.45, 0.80, 0.75], [0.10, 0.30, 0.35], true), mk([0.70, 0.75, 0.95], [0.25, 0.25, 0.45], false)]
 }
 
 fn demo() -> PhoneState {
