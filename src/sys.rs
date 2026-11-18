@@ -166,10 +166,18 @@ fn reg_string(root: HKEY, key: &str, value: &str) -> Option<String> {
     }
 }
 
+/// Modo demostración (`MACBAR_DEMO=1`): datos ficticios en vez de los personales (nombre, foto,
+/// redes Wi-Fi), para hacer capturas sin enseñar nada privado.
+pub fn demo() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var("MACBAR_DEMO").is_ok_and(|v| v == "1"))
+}
+
 /// Ruta de la foto de la cuenta de Windows al tamaño más cercano a `px`.
 /// Primero la que muestra Configuración (UserImage.jpg, la de la cuenta Microsoft): las copias del
 /// registro, que usa la pantalla de bloqueo, a veces se quedan en la silueta por defecto sin actualizar.
 pub fn account_picture(px: u32) -> Option<String> {
+    if demo() { return None; }
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default() + "\\Microsoft\\Windows\\AccountPicture\\UserImage.jpg";
     if std::path::Path::new(&local).exists() { return Some(local); }
     let sid = user_sid()?;
@@ -185,6 +193,7 @@ pub fn account_picture(px: u32) -> Option<String> {
 /// Nombre para mostrar de la cuenta (p. ej. "Pelayo Naredo"); si no hay, el usuario.
 pub fn display_name() -> String {
     use windows::Win32::Security::Authentication::Identity::{GetUserNameExW, NameDisplay};
+    if demo() { return "Alex".into(); }
     unsafe {
         let mut buf = [0u16; 256];
         let mut n = buf.len() as u32;
@@ -231,6 +240,7 @@ pub fn config_dir() -> String { std::env::var("APPDATA").unwrap_or_default() + "
 pub fn config_path() -> String { config_dir() + "\\config.ini" }
 
 pub fn config_value(k: &str) -> Option<String> {
+    if demo() && k == "ciudad" { return Some("Madrid".into()); }
     let txt = std::fs::read_to_string(config_path()).ok()?;
     txt.lines().find_map(|l| Some(l.trim().strip_prefix(k)?.trim().strip_prefix('=')?.trim().to_string()))
 }

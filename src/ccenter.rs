@@ -204,6 +204,7 @@ fn radio_state(kind: windows::Devices::Radios::RadioKind) -> Option<bool> {
 /// SSID de la red Wi-Fi conectada (WLAN API).
 fn wifi_ssid() -> String {
     use windows::Win32::NetworkManagement::WiFi::*;
+    if sys::demo() { return "Casa".into(); }
     unsafe {
         let mut ver = 0u32;
         let mut h = HANDLE::default();
@@ -293,7 +294,7 @@ pub fn prewarm() {
     if CC.with(|c| c.borrow().is_none()) { create(); }
     let title = sys::display_name();
     let dv = read_reg_sz(windows::Win32::System::Registry::HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "DisplayVersion").unwrap_or_default();
-    let pc = std::env::var("COMPUTERNAME").unwrap_or_default();
+    let pc = if sys::demo() { "DESKTOP".into() } else { std::env::var("COMPUTERNAME").unwrap_or_default() };
     CC.with(|c| if let Some(c) = c.borrow_mut().as_mut() {
         c.title = title;
         c.subtitle = format!("{} · Windows 11 {}", title_case(&pc), dv).trim().to_string();

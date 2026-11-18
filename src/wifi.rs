@@ -44,6 +44,11 @@ fn open() -> Option<(HANDLE, windows::core::GUID)> {
 
 fn networks(h: HANDLE, g: &windows::core::GUID) -> Vec<NetItem> {
     let mut out: Vec<NetItem> = Vec::new();
+    if sys::demo() {
+        let fake = |s: &str, q, known, connected| NetItem { ssid: s.into(), profile: s.into(), quality: q, secure: true, connected, known };
+        return vec![fake("Casa", 96, true, true), fake("Oficina 5G", 78, true, false), fake("Café Central", 64, false, false),
+            fake("Biblioteca", 47, false, false), fake("Invitados", 30, false, false)];
+    }
     unsafe {
         let mut list: *mut WLAN_AVAILABLE_NETWORK_LIST = std::ptr::null_mut();
         if WlanGetAvailableNetworkList(h, g, 0, None, &mut list) != 0 || list.is_null() { return out; }

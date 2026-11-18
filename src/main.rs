@@ -605,6 +605,7 @@ fn media_thread(rx: Receiver<Cmd>) {
 // ---------------------------------------------------------------- hilo del tiempo (Open-Meteo, sin clave)
 /// %APPDATA%\macbar\config.ini admite `ciudad = Madrid` o `lat = ...` + `lon = ...`.
 fn config_location() -> Option<(f64, f64)> {
+    if sys::demo() { return Some((40.42, -3.70)); } // Madrid
     let path = std::env::var("APPDATA").ok()? + "\\macbar\\config.ini";
     let txt = std::fs::read_to_string(path).ok()?;
     let val = |k: &str| txt.lines().find_map(|l| Some(l.trim().strip_prefix(k)?.trim().strip_prefix('=')?.trim().to_string()));
@@ -2455,7 +2456,7 @@ fn main() {
             icon: make_format(&dwrite, ICONS, 14.5, DWRITE_FONT_WEIGHT_NORMAL),
             icon_s: make_format(&dwrite, ICONS, 12.5, DWRITE_FONT_WEIGHT_NORMAL),
         };
-        let user = std::env::var("USERNAME").unwrap_or_default().to_lowercase();
+        let user = if sys::demo() { "alex".into() } else { std::env::var("USERNAME").unwrap_or_default().to_lowercase() };
         menus::enable_dark_menus();
         // Si macbar se cerró con el panel de Windows transparente, se deja como estaba
         tray::repair();

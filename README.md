@@ -4,7 +4,19 @@
 
 ![macbar: macOS-like menu bar on Windows 11](docs/macbar-menu-bar-windows-11.png)
 
-![macbar: Dynamic Island style now playing pill on Windows](docs/macbar-dynamic-island-now-playing.png)
+<p align="center">
+  <img src="docs/macbar-dynamic-island-now-playing.png" alt="Dynamic Island for Windows: now playing pill with live equalizer" width="340">
+</p>
+
+## Screenshots
+
+| Control Center | Wi‑Fi | Weather | Calendar & timer |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/macbar-control-center.png" alt="macbar Control Center for Windows 11: Wi-Fi, Bluetooth, dark mode, brightness, volume, CPU and RAM" width="230"> | <img src="docs/macbar-wifi-panel.png" alt="macbar Wi-Fi panel: nearby networks and one-click connect" width="230"> | <img src="docs/macbar-weather-panel.png" alt="macbar weather panel with hourly and 6-day forecast from Open-Meteo" width="230"> | <img src="docs/macbar-calendar-timer.png" alt="macbar clock panel with month calendar and quick timer" width="200"> |
+
+<p align="center">
+  <img src="docs/macbar-tray-icons.png" alt="macbar system tray icons drop-down" width="220">
+</p>
 
 > 🇪🇸 Barra superior estilo macOS para Windows 11, nativa y ligera, hecha en Rust. La interfaz está en español.
 
@@ -49,6 +61,8 @@ git clone https://github.com/PelayoNaredo/macbar.git
 cd macbar
 cargo build --release
 ```
+
+Run it with `MACBAR_DEMO=1` to replace personal data (name, account picture, Wi‑Fi networks, city, PC name) with placeholders — handy for screenshots.
 
 The binary ends up in `target/release/macbar.exe`. Needs a recent stable Rust toolchain (edition 2024) for `x86_64-pc-windows-msvc` or `-gnu`.
 
