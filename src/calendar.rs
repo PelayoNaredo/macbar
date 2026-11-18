@@ -31,10 +31,10 @@ fn days_in(y: i32, m: u32) -> u32 {
 }
 
 /// `slide`: cambio de mes en curso (inicio, sentido: +1 = siguiente).
-pub struct Calendar { year: i32, month: u32, slide: Option<(Instant, f32)> }
+pub struct Calendar { year: i32, month: u32, slide: Option<(Instant, f32)>, opened: Instant }
 
 impl Calendar {
-    pub fn new() -> Self { let t = unsafe { GetLocalTime() }; Calendar { year: t.wYear as i32, month: t.wMonth as u32, slide: None } }
+    pub fn new() -> Self { let t = unsafe { GetLocalTime() }; Calendar { year: t.wYear as i32, month: t.wMonth as u32, slide: None, opened: Instant::now() } }
     fn rows(&self) -> u32 {
         let first = (weekday(self.year, self.month, 1) + 6) % 7; // lunes = 0
         (first + days_in(self.year, self.month)).div_ceil(7)
@@ -47,24 +47,31 @@ impl Content for Calendar {
     }
     fn shown(&mut self) { *self = Calendar::new(); }
     fn tick(&mut self) -> bool { true }
-    fn animating(&self) -> bool { self.slide.is_some_and(|(t, _)| t.elapsed().as_secs_f32() < 0.3) }
+    // Mientras entra en cascada o cambia de mes
+    fn animating(&self) -> bool { self.opened.elapsed().as_secs_f32() < 0.9 || self.slide.is_some_and(|(t, _)| t.elapsed().as_secs_f32() < 0.3) }
     fn wheel(&mut self, d: i32) -> bool { self.click(if d > 0 { ID_PREV } else { ID_NEXT }, false); true }
 
     fn paint(&mut self, ui: &mut Ui) {
         let now = unsafe { GetLocalTime() };
         let mut y = PAD;
+        // Cada bloque entra en cascada al abrir (como el panel del tiempo)
+        let since = self.opened.elapsed().as_secs_f32();
+        let rt = ui.rt;
         // ---- Hora grande y fecha larga
+        let b0 = popup::rise(rt, popup::stagger(since, 0.0, 0.32));
         let hora = format!("{}:{:02}", now.wHour, now.wMinute);
         ui.text(&ui.f.big, &hora, PAD + 2.0, y, 40.0, &ui.white);
         let fecha = format!("{}, {} de {} de {}", DIAS[now.wDayOfWeek as usize % 7], now.wDay, MESES[(now.wMonth as usize + 11) % 12], now.wYear);
         let mut f = fecha.chars();
         let fecha: String = f.next().map(|c| c.to_uppercase().collect::<String>() + f.as_str()).unwrap_or_default();
         ui.text(&ui.f.sub, &fecha, PAD + 3.0, y + 42.0, 18.0, &ui.dim);
+        popup::rise_end(rt, b0);
         y += 64.0 + 10.0;
 
         // ---- Calendario
         let rows = self.rows();
         let card_h = 40.0 + 22.0 + rows as f32 * CELL + 10.0;
+        let b1 = popup::rise(rt, popup::stagger(since, 0.06, 0.32));
         ui.sep(y - 6.0);
         let titulo = format!("{} {}", MESES[(self.month - 1) as usize], self.year);
         let mut tt = titulo.chars();
@@ -96,11 +103,14 @@ impl Content for Calendar {
             ui.text_c(&ui.f.small, "Hoy", (r.left + r.right) / 2.0, r.top, 22.0, &ui.white);
             ui.hit(r, ID_TODAY);
         }
+        popup::rise_end(rt, b1);
         let gx = PAD + (W - PAD * 2.0 - 7.0 * CELL) / 2.0;
         let gy = y + 40.0;
+        let b2 = popup::rise(rt, popup::stagger(since, 0.10, 0.32));
         for (i, d) in ["L", "M", "X", "J", "V", "S", "D"].iter().enumerate() {
             ui.text_c(&ui.f.small, d, gx + i as f32 * CELL + CELL / 2.0, gy, 18.0, &ui.faint);
         }
+        popup::rise_end(rt, b2);
         let first = (weekday(self.year, self.month, 1) + 6) % 7;
         let n = days_in(self.year, self.month);
         unsafe { ui.rt.PushAxisAlignedClip(&rect(PAD, gy + 20.0, W - PAD, gy + 22.0 + rows as f32 * CELL + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
@@ -111,17 +121,21 @@ impl Content for Calendar {
             let cx = gx + c * CELL + CELL / 2.0 + sdx;
             let cy = gy + 22.0 + r * CELL + CELL / 2.0;
             let today = is_now && d == now.wDay as u32;
+            // Fila a fila, en cascada
+            let br = popup::rise(rt, popup::stagger(since, 0.13 + r * 0.035, 0.32));
             if today {
                 unsafe { ui.rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: 15.0, radiusY: 15.0 }, &ui.on); }
             }
             let weekend = c >= 5.0;
             let b = if today || !weekend { &ui.white } else { &ui.dim };
             ui.text_c(if today { &ui.f.lbl } else { &ui.f.sub }, &d.to_string(), cx, cy - 15.0, 30.0, b);
+            popup::rise_end(rt, br);
         }
         unsafe { ui.rt.PopLayer(); ui.rt.PopAxisAlignedClip(); }
         y += card_h + 12.0;
 
         // ---- Temporizador
+        let b3 = popup::rise(rt, popup::stagger(since, 0.32, 0.32));
         ui.sep(y - 6.0);
         ui.glyph(&ui.f.icon, "\u{E916}", PAD + 10.0, y + 8.0, 20.0, 22.0, &ui.white);
         ui.text(&ui.f.lbl, "Temporizador", PAD + 34.0, y + 8.0, 22.0, &ui.white);
@@ -139,12 +153,15 @@ impl Content for Calendar {
                 }
             }
         }
+        popup::rise_end(rt, b3);
         y += 84.0 + 12.0;
 
         // ---- Accesos
+        let b4 = popup::rise(rt, popup::stagger(since, 0.38, 0.32));
         let bw = (W - PAD * 2.0 - 8.0) / 2.0;
         ui.button(rect(PAD, y, PAD + bw, y + 34.0), Some("\u{EA8F}"), "Notificaciones", ID_NOTIF, false);
         ui.button(rect(PAD + bw + 8.0, y, W - PAD, y + 34.0), Some("\u{E713}"), "Fecha y hora", ID_SETTINGS, false);
+        popup::rise_end(rt, b4);
     }
 
     fn click(&mut self, id: u32, _right: bool) -> Re {

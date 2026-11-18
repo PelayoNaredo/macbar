@@ -137,7 +137,7 @@ pub fn close(h: HWND) { unsafe { let _ = PostMessageW(Some(h), WM_CLOSE, WPARAM(
 /// Windows 11 dibuja un borde invisible alrededor: se compensa para que no quede hueco.
 
 // ---------------------------------------------------------------- cuenta de usuario
-fn user_sid() -> Option<String> {
+pub fn user_sid() -> Option<String> {
     unsafe {
         let mut tok = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok).ok()?;

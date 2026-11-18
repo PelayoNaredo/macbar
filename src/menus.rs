@@ -309,6 +309,14 @@ pub fn bar_menu() -> Menu {
     let mut m = Menu::default();
     let on = sys::autostart_enabled();
     m.check("Iniciar con Windows", on, A::Autostart(!on))
+        .check("Widgets del escritorio", crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
+    // Cada widget por separado (solo con los widgets encendidos)
+    if crate::desk::enabled() {
+        for (i, (label, on)) in crate::desk::menu_items().into_iter().enumerate() {
+            m.check(format!("      {label}"), on, A::Bar(crate::BAR_WIDGET0 + i as u32));
+        }
+    }
+    m.sep()
         .item("Editar configuración…", A::EditConfig)
         .sep()
         .item("Salir de macbar", A::Bar(crate::BAR_QUIT));

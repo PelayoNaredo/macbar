@@ -12,6 +12,27 @@ pub const WM_PANEL_DATA: u32 = WM_USER + 40;
 
 pub fn ease_out(t: f32) -> f32 { let u = 1.0 - t.clamp(0.0, 1.0); 1.0 - u * u * u }
 
+/// Avance (0..1, suavizado) de un elemento que entra `delay` segundos después de abrirse el panel.
+pub fn stagger(since: f32, delay: f32, dur: f32) -> f32 { ease_out(((since - delay) / dur).clamp(0.0, 1.0)) }
+
+/// Entrada en cascada de un bloque (la del panel del tiempo): sube 10 px mientras aparece. Devuelve la
+/// transformación de antes, para `rise_end`.
+pub fn rise(rt: &ID2D1RenderTarget, k: f32) -> Matrix3x2 {
+    let mut base = Matrix3x2::default();
+    unsafe {
+        rt.GetTransform(&mut base);
+        let mut m = base;
+        m.M32 += 10.0 * (1.0 - k) * base.M22;
+        rt.SetTransform(&m);
+    }
+    push_alpha(rt, k);
+    base
+}
+
+pub fn rise_end(rt: &ID2D1RenderTarget, base: Matrix3x2) {
+    unsafe { rt.PopLayer(); rt.SetTransform(&base); }
+}
+
 #[repr(C)]
 struct AccentPolicy { state: u32, flags: u32, color: u32, anim: u32 }
 #[repr(C)]
@@ -19,7 +40,7 @@ struct CompAttr { attr: u32, data: *mut core::ffi::c_void, size: usize }
 
 /// Vidrio de verdad: desenfoque acrílico detrás de la ventana (el mismo que usan las barras
 /// alternativas). A diferencia del "backdrop" del sistema, funciona en ventanas emergentes sin marco.
-fn set_glass(hwnd: HWND) -> bool {
+pub fn set_glass(hwnd: HWND) -> bool {
     unsafe {
         let Ok(user32) = GetModuleHandleW(w!("user32.dll")) else { return false };
         let Some(f) = windows::Win32::System::LibraryLoader::GetProcAddress(user32, windows::core::s!("SetWindowCompositionAttribute")) else { return false };
@@ -59,7 +80,7 @@ pub fn create_window(class: PCWSTR, title: PCWSTR, proc: WNDPROC) -> HWND {
 pub const TINT: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.16, g: 0.17, b: 0.19, a: 0.22 };
 
 /// Brillo de vidrio estilo Apple: un velo blanco muy sutil arriba y un borde de 1 px con luz arriba.
-pub fn glass_edge(rt: &ID2D1HwndRenderTarget, w: f32, h: f32, s: f32) {
+pub fn glass_edge(rt: &ID2D1RenderTarget, w: f32, h: f32, s: f32) {
     unsafe {
         let stops = |a: f32, b: f32| [D2D1_GRADIENT_STOP { position: 0.0, color: rgba(1.0, 1.0, 1.0, a) }, D2D1_GRADIENT_STOP { position: 1.0, color: rgba(1.0, 1.0, 1.0, b) }];
         let grad = |a: f32, b: f32, y1: f32| -> Option<ID2D1LinearGradientBrush> {
@@ -183,7 +204,7 @@ pub const IDENTITY: Matrix3x2 = Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1
 pub fn alpha(_hwnd: HWND) -> f32 { 1.0 }
 
 /// Capa con opacidad para el contenido (D2D permite capa sin objeto desde Windows 8).
-pub fn push_alpha(rt: &ID2D1HwndRenderTarget, a: f32) {
+pub fn push_alpha(rt: &ID2D1RenderTarget, a: f32) {
     use std::mem::ManuallyDrop;
     let lp = D2D1_LAYER_PARAMETERS {
         contentBounds: rect(-1e6, -1e6, 1e6, 1e6),
@@ -200,7 +221,7 @@ pub fn push_alpha(rt: &ID2D1HwndRenderTarget, a: f32) {
 /// Capa del contenido que, al abrir, se "despliega" de arriba abajo: un borde suave baja por el panel
 /// (en 260 ms) y destapa las filas en cascada, como si salieran de la barra. Fuera de la apertura es
 /// una capa normal con opacidad `a`.
-pub fn push_reveal(rt: &ID2D1HwndRenderTarget, hwnd: HWND, h: f32, a: f32) {
+pub fn push_reveal(rt: &ID2D1RenderTarget, hwnd: HWND, h: f32, a: f32) {
     use std::mem::ManuallyDrop;
     let t = REVEALS.with(|r| r.borrow().get(&(hwnd.0 as isize)).filter(|e| e.3).map(|e| e.0.elapsed().as_secs_f32() / 0.26));
     let Some(t) = t.filter(|t| *t < 1.0) else { return push_alpha(rt, a) };
@@ -232,6 +253,8 @@ pub fn push_reveal(rt: &ID2D1HwndRenderTarget, hwnd: HWND, h: f32, a: f32) {
 pub struct Fonts {
     pub big: IDWriteTextFormat, pub name: IDWriteTextFormat, pub lbl: IDWriteTextFormat, pub sub: IDWriteTextFormat,
     pub small: IDWriteTextFormat, pub val: IDWriteTextFormat, pub icon: IDWriteTextFormat, pub icon_l: IDWriteTextFormat, pub icon_xl: IDWriteTextFormat,
+    /// Texto que se escribe (buscador).
+    pub q: IDWriteTextFormat,
 }
 
 /// Lo que cada panel puede pedir al pulsar algo.
@@ -249,16 +272,22 @@ pub trait Content {
     fn wheel(&mut self, _delta: i32) -> bool { false }
     /// true mientras el contenido tenga una animación propia en marcha (pide fotogramas).
     fn animating(&self) -> bool { false }
+    /// Tecla pulsada. None = no la usa (Escape cierra el panel).
+    fn key(&mut self, _vk: u16) -> Option<Re> { None }
+    /// Carácter escrito (WM_CHAR). true = repintar.
+    fn chr(&mut self, _c: char) -> bool { false }
 }
 
 pub struct Ui<'a> {
     pub p: Painter<'a>,
-    pub rt: &'a ID2D1HwndRenderTarget,
+    pub rt: &'a ID2D1RenderTarget,
     pub f: &'a Fonts,
     #[allow(dead_code)]
     pub w: f32,
     pub s: f32,
     pub hover: Option<u32>,
+    /// Sombra bajo el texto y los iconos (widgets flotantes sin fondo, para que se lean sobre cualquier imagen)
+    pub shadow: Option<ID2D1Brush>,
     /// Brillo de "ratón encima" de cada zona (0..1): se enciende y apaga con fundido.
     pub glow: HashMap<u32, f32>,
     pub hits: Vec<(D2D_RECT_F, u32)>,
@@ -271,7 +300,18 @@ impl Ui<'_> {
     /// Texto centrado verticalmente (por su altura de mayúscula) en la caja [top, top+bh].
     pub fn text(&self, f: &IDWriteTextFormat, t: &str, x: f32, top: f32, bh: f32, b: &ID2D1Brush) {
         let cap = self.p.text_top(f) - 50.0;
+        self.halo(f, t, x, top + bh / 2.0 + cap);
         self.p.draw_at(f, t, x, top + bh / 2.0 + cap, b, None);
+    }
+    /// Sombra difusa y discreta alrededor del texto (algo más abajo que arriba): varias pasadas
+    /// muy tenues desplazadas medio píxel, que se suman en un halo suave. Solo en widgets flotantes.
+    fn halo(&self, f: &IDWriteTextFormat, t: &str, x: f32, y: f32) {
+        let Some(sh) = &self.shadow else { return };
+        let o = 1.3 / self.s.max(0.5); // algo más de un píxel físico
+        // Cuatro pasadas (antes seis): casi el mismo halo con un tercio menos de texto que dibujar
+        for (dx, dy) in [(-o, o * 0.5), (o, o * 0.5), (0.0, o), (0.0, o * 2.0)] {
+            self.p.draw_at(f, t, x + dx, y + dy, sh, None);
+        }
     }
     pub fn text_c(&self, f: &IDWriteTextFormat, t: &str, cx: f32, top: f32, bh: f32, b: &ID2D1Brush) {
         let w = self.p.width(f, t);
@@ -283,7 +323,9 @@ impl Ui<'_> {
     }
     pub fn glyph(&self, f: &IDWriteTextFormat, g: &str, x: f32, top: f32, bw: f32, bh: f32, b: &ID2D1Brush) {
         let [l, t, iw, ih] = self.p.ink(f, g);
-        self.p.draw_at(f, g, x + (bw - iw) / 2.0 - l, self.p.snap(top + bh / 2.0 - ih / 2.0 - t), b, None);
+        let (gx, gy) = (x + (bw - iw) / 2.0 - l, self.p.snap(top + bh / 2.0 - ih / 2.0 - t));
+        self.halo(f, g, gx, gy);
+        self.p.draw_at(f, g, gx, gy, b, None);
     }
     /// Zona de contenido: SIN caja (vidrio limpio, como en macOS). Solo un brillo suave al pasar el ratón.
     pub fn card(&self, r: D2D_RECT_F, hot: bool) {
@@ -323,7 +365,7 @@ impl Ui<'_> {
 
 // ---------------------------------------------------------------- ventanas de los paneles
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Kind { Calendar, Weather, Wifi }
+pub enum Kind { Calendar, Weather, Wifi, Search }
 
 struct Pw {
     hwnd: HWND,
@@ -361,11 +403,12 @@ fn new_content(k: Kind) -> Box<dyn Content> {
         Kind::Calendar => Box::new(calendar::Calendar::new()),
         Kind::Weather => Box::new(weather::WeatherPanel::new()),
         Kind::Wifi => Box::new(wifi::WifiPanel::new()),
+        Kind::Search => Box::new(search::SearchPanel::new()),
     }
 }
 
 /// Crea de antemano las ventanas (ocultas): al pulsar, el panel aparece sin esperar.
-pub fn prewarm() { for k in [Kind::Calendar, Kind::Weather, Kind::Wifi] { ensure(k); } }
+pub fn prewarm() { for k in [Kind::Calendar, Kind::Weather, Kind::Wifi, Kind::Search] { ensure(k); } }
 
 fn ensure(k: Kind) {
     if PANELS.with(|p| p.borrow().iter().any(|w| w.kind == k)) { return; }
@@ -382,6 +425,7 @@ fn ensure(k: Kind) {
         icon: mk(ICONS, 14.0, DWRITE_FONT_WEIGHT_NORMAL),
         icon_l: mk(ICONS, 16.0, DWRITE_FONT_WEIGHT_NORMAL),
         icon_xl: mk(ICONS, 30.0, DWRITE_FONT_WEIGHT_NORMAL),
+        q: mk(FONT, 19.0, DWRITE_FONT_WEIGHT_NORMAL),
     };
     HWNDS.lock().unwrap().push((k, hwnd.0 as isize));
     let pw = Pw { hwnd, kind: k, target: None, dw, cache: RefCell::new(Caches::default()), f, hits: Vec::new(), hover: None,
@@ -476,7 +520,7 @@ fn paint(hwnd: HWND) {
                 card: p.brush(rgba(1.0, 1.0, 1.0, 0.075)), card_edge: p.brush(rgba(1.0, 1.0, 1.0, 0.09)),
                 off: p.brush(rgba(1.0, 1.0, 1.0, 0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
                 hov: p.brush(rgba(1.0, 1.0, 1.0, 0.07)), track: p.brush(rgba(1.0, 1.0, 1.0, 0.14)),
-                p, rt: &rt, f: &w.f, w: pw, s, hover: w.hover, hits: Vec::new(),
+                p, rt: &rt, f: &w.f, w: pw, s, hover: w.hover, hits: Vec::new(), shadow: None,
             };
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
@@ -493,7 +537,8 @@ fn paint(hwnd: HWND) {
             rt.SetTransform(&IDENTITY);
             w.hits = std::mem::take(&mut ui.hits);
             drop(ui);
-            if rt.EndDraw(None, None).is_err() { w.target = None; }
+            // Si el fotograma no llega a la pantalla, se repite con una superficie nueva (nunca queda lo viejo)
+            if rt.EndDraw(None, None).is_err() { w.target = None; let _ = InvalidateRect(Some(hwnd), None, false); }
         });
         let _ = EndPaint(hwnd, &ps);
     }
@@ -511,7 +556,7 @@ fn resize_if_needed(hwnd: HWND) {
     let r = with_pw(hwnd, |w| {
         let n = w.content.as_ref().map(|c| c.size()).unwrap_or(w.size);
         let ch = n != w.size;
-        if ch { w.size = n; w.target = None; }
+        if ch { w.size = n; }
         (ch, n, w.anchor_right)
     });
     let Some((true, (pw, ph), ar)) = r else { return };
@@ -524,6 +569,13 @@ fn resize_if_needed(hwnd: HWND) {
         let x = (ar - wpx).clamp((8.0 * s) as i32, sw - wpx - (8.0 * s) as i32);
         let _ = SetWindowPos(hwnd, None, x, wr.top, wpx, hpx, SWP_NOZORDER | SWP_NOACTIVATE);
         REVEALS.with(|r| if let Some(e) = r.borrow_mut().get_mut(&(hwnd.0 as isize)) { e.1 = x; });
+        // La superficie se ajusta al tamaño nuevo en vez de rehacerse (rehacerla a cada tecla daba tirones
+        // y, si ese primer fotograma fallaba, se quedaba a la vista el contenido viejo)
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        let sz = D2D_SIZE_U { width: (rc.right - rc.left) as u32, height: (rc.bottom - rc.top) as u32 };
+        with_pw(hwnd, |w| if let Some(t) = &w.target { if t.Resize(&sz).is_err() { w.target = None; } });
+        let _ = InvalidateRect(Some(hwnd), None, false);
     }
 }
 
@@ -533,7 +585,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_PAINT => { paint(hwnd); LRESULT(0) }
             WM_ERASEBKGND => LRESULT(1),
             WM_ACTIVATE => { if (wp.0 & 0xFFFF) as u32 == WA_INACTIVE { hide(hwnd, false); } LRESULT(0) }
-            WM_KEYDOWN => { if wp.0 as u16 == VK_ESCAPE.0 { hide(hwnd, true); } LRESULT(0) }
+            WM_KEYDOWN => {
+                let k = wp.0 as u16;
+                let re = with_pw(hwnd, |w| w.content.as_mut().and_then(|c| c.key(k))).flatten();
+                match re {
+                    Some(Re::Close) => hide(hwnd, true),
+                    Some(Re::CloseRun(f)) => { hide(hwnd, false); f(); }
+                    Some(Re::Stay) => { resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
+                    None => if k == VK_ESCAPE.0 { hide(hwnd, true); },
+                }
+                LRESULT(0)
+            }
+            WM_CHAR => {
+                if let Some(c) = char::from_u32(wp.0 as u32) {
+                    let r = with_pw(hwnd, |w| w.content.as_mut().map(|x| x.chr(c)).unwrap_or(false)).unwrap_or(false);
+                    if r { resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
+                }
+                LRESULT(0)
+            }
             WM_TIMER => {
                 if wp.0 == TIMER_REVEAL { step(hwnd); }
                 else if wp.0 == TIMER_ANIM_P { let _ = KillTimer(Some(hwnd), TIMER_ANIM_P); let _ = InvalidateRect(Some(hwnd), None, false); }

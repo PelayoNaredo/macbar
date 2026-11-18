@@ -39,9 +39,13 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 mod calendar;
 mod ccenter;
+mod desk;
+mod deskdata;
+mod deskw;
 mod live;
 mod menus;
 mod popup;
+mod search;
 mod sys;
 mod tray;
 mod trayhost;
@@ -113,6 +117,9 @@ pub const BAR_PREV: u32 = 4;
 pub const BAR_TOGGLE: u32 = 5;
 pub const BAR_NEXT: u32 = 6;
 pub const BAR_PLAYER: u32 = 7;
+pub const BAR_WIDGETS: u32 = 8;
+/// Del 20 al 25: poner o quitar cada widget del escritorio.
+pub const BAR_WIDGET0: u32 = 20;
 static WEATHER_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Última ventana activa que no es la barra: destino de los menús y atajos.
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
@@ -166,13 +173,13 @@ fn media_progress(playing: bool) -> Option<f32> {
 }
 
 #[derive(Clone, PartialEq)]
-struct MediaInfo { title: String, artist: String, playing: bool, art_ver: u64, app: String, can_prev: bool, can_next: bool }
+struct MediaInfo { title: String, artist: String, playing: bool, art_ver: u64, app: String, can_prev: bool, can_next: bool, album: String }
 
 #[derive(Clone, Copy, PartialEq)]
 struct Weather { temp: f32, is_day: bool, code: i32 }
 
 #[derive(Clone, Copy)]
-enum Cmd { Toggle, Next, Prev }
+enum Cmd { Toggle, Next, Prev, Seek(i64) }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Act {
@@ -272,7 +279,7 @@ struct Roll { prev: String, cur: String, at: Option<Instant> }
 impl Roll {
     /// Dibuja `text` en x. Devuelve true mientras anima.
     #[allow(clippy::too_many_arguments)]
-    fn draw(&mut self, p: &Painter, rt: &ID2D1HwndRenderTarget, base: &Matrix3x2, f: &IDWriteTextFormat, text: &str, x: f32, top: f32, bottom: f32, b: &ID2D1Brush, sh: Option<&ID2D1Brush>) -> bool {
+    fn draw(&mut self, p: &Painter, rt: &ID2D1RenderTarget, base: &Matrix3x2, f: &IDWriteTextFormat, text: &str, x: f32, top: f32, bottom: f32, b: &ID2D1Brush, sh: Option<&ID2D1Brush>) -> bool {
         if self.cur.is_empty() { self.cur = text.to_string(); self.prev = text.to_string(); }
         if self.cur != text { self.prev = std::mem::replace(&mut self.cur, text.to_string()); self.at = Some(Instant::now()); }
         let roll = self.at.map(|t| ease_out(t.elapsed().as_secs_f32() / 0.42)).unwrap_or(1.0);
@@ -487,7 +494,10 @@ fn load_file_square(path: &str) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------- imágenes (WIC)
-fn wic_square(wic: &IWICImagingFactory, src: &IWICBitmapSource) -> Option<Vec<u8>> {
+fn wic_square(wic: &IWICImagingFactory, src: &IWICBitmapSource) -> Option<Vec<u8>> { wic_square_n(wic, src, ART_PX) }
+
+/// Recorte cuadrado central escalado a `px` × `px` (BGRA premultiplicado).
+fn wic_square_n(wic: &IWICImagingFactory, src: &IWICBitmapSource, px: u32) -> Option<Vec<u8>> {
     unsafe {
         let (mut w, mut h) = (0u32, 0u32);
         src.GetSize(&mut w, &mut h).ok()?;
@@ -496,24 +506,38 @@ fn wic_square(wic: &IWICImagingFactory, src: &IWICBitmapSource) -> Option<Vec<u8
         let r = WICRect { X: ((w - side) / 2) as i32, Y: ((h - side) / 2) as i32, Width: side as i32, Height: side as i32 };
         clip.Initialize(src, &r).ok()?;
         let sc = wic.CreateBitmapScaler().ok()?;
-        sc.Initialize(&clip, ART_PX, ART_PX, WICBitmapInterpolationModeHighQualityCubic).ok()?;
+        sc.Initialize(&clip, px, px, WICBitmapInterpolationModeHighQualityCubic).ok()?;
         let cv = wic.CreateFormatConverter().ok()?;
         cv.Initialize(&sc, &GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, None, 0.0, WICBitmapPaletteTypeCustom).ok()?;
-        let mut buf = vec![0u8; (ART_PX * ART_PX * 4) as usize];
-        cv.CopyPixels(std::ptr::null(), ART_PX * 4, &mut buf).ok()?;
+        let mut buf = vec![0u8; (px * px * 4) as usize];
+        cv.CopyPixels(std::ptr::null(), px * 4, &mut buf).ok()?;
         Some(buf)
     }
 }
 
-fn load_art(props: &MediaProps) -> Option<Vec<u8>> {
+/// Carátula a tamaño de la isla y, además, a tamaño grande para el widget de música.
+fn load_art(props: &MediaProps) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let s = props.Thumbnail().ok()?.OpenReadAsync().ok()?.join().ok()?;
     unsafe {
         let stream: IStream = CreateStreamOverRandomAccessStream(&s).ok()?;
         let wic: IWICImagingFactory = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok()?;
         let dec = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
         let frame: IWICBitmapSource = dec.GetFrame(0).ok()?.into();
-        wic_square(&wic, &frame)
+        Some((wic_square(&wic, &frame)?, wic_square_n(&wic, &frame, ART_BIG_PX)))
     }
+}
+
+/// Tamaño de la carátula grande (widget de música).
+const ART_BIG_PX: u32 = 256;
+static ART_BIG: Mutex<Option<(u64, Arc<Vec<u8>>)>> = Mutex::new(None);
+
+/// Posición y duración de la canción en segundos (avanzando solo mientras suena).
+fn media_secs(playing: bool) -> Option<(f32, f32)> {
+    let (pos, end, upd) = (*TIMELINE.lock().unwrap())?;
+    if end <= 0 { return None; }
+    let now = unsafe { let f = windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime(); ((f.dwHighDateTime as i64) << 32) | f.dwLowDateTime as i64 };
+    let p = if playing && upd > 0 { pos + (now - upd).max(0) } else { pos };
+    Some(((p.min(end)) as f32 / 1e7, end as f32 / 1e7))
 }
 
 // ---------------------------------------------------------------- hilo multimedia
@@ -540,6 +564,7 @@ fn media_thread(rx: Receiver<Cmd>) {
     let mut key = String::new();
     let mut ver = 0u64;
     let mut art_tries = 0;
+    let mut prev_art: Option<Arc<Vec<u8>>> = None;
     loop {
         match rx.recv_timeout(Duration::from_millis(1500)) {
             Ok(cmd) => {
@@ -548,6 +573,8 @@ fn media_thread(rx: Receiver<Cmd>) {
                         Cmd::Toggle => s.TryTogglePlayPauseAsync().and_then(|o| o.join()),
                         Cmd::Next => s.TrySkipNextAsync().and_then(|o| o.join()),
                         Cmd::Prev => s.TrySkipPreviousAsync().and_then(|o| o.join()),
+                        // Ir a un punto de la canción (en unidades de 100 ns), si el reproductor lo admite
+                        Cmd::Seek(t) => s.TryChangePlaybackPositionAsync(t).and_then(|o| o.join()),
                     };
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -557,7 +584,7 @@ fn media_thread(rx: Receiver<Cmd>) {
         }
         if std::env::var_os("MACBAR_DEMO").is_some() {
             // Modo demo para revisar el diseño sin reproducir nada
-            *MEDIA.lock().unwrap() = Some(MediaInfo { title: "Tumblr Girls (feat. Christoph Andersson)".into(), artist: "G-Eazy".into(), playing: true, art_ver: 0, app: "Spotify.exe".into(), can_prev: true, can_next: true });
+            *MEDIA.lock().unwrap() = Some(MediaInfo { title: "Tumblr Girls (feat. Christoph Andersson)".into(), artist: "G-Eazy".into(), playing: true, art_ver: 0, app: "Spotify.exe".into(), can_prev: true, can_next: true, album: "These Things Happen".into() });
             *WEATHER.lock().unwrap() = Some(Weather { temp: 18.0, is_day: false, code: 0 });
             unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_MEDIA, WPARAM(0), LPARAM(0)); }
             continue;
@@ -568,6 +595,7 @@ fn media_thread(rx: Receiver<Cmd>) {
             let title = p.Title().ok()?.to_string();
             if title.is_empty() { return None; }
             let artist = p.Artist().ok()?.to_string();
+            let album = p.AlbumTitle().map(|a| a.to_string()).unwrap_or_default();
             // Posición de la canción (para la barra de progreso de la isla)
             if let Ok(tl) = s.GetTimelineProperties() {
                 let pos = tl.Position().map(|d| d.Duration).unwrap_or(0);
@@ -581,19 +609,33 @@ fn media_thread(rx: Receiver<Cmd>) {
             let can_prev = ctl.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(true);
             let can_next = ctl.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(true);
             let app = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
-            Some((p, title, artist, playing, app, can_prev, can_next))
+            Some((p, title, artist, playing, app, can_prev, can_next, album))
         })();
         let info = match snap {
-            Some((p, title, artist, playing, app, can_prev, can_next)) => {
+            Some((p, title, artist, playing, app, can_prev, can_next, album)) => {
                 let k = format!("{title}\u{1}{artist}");
-                if k != key { key = k; ver += 1; art_tries = 0; *ART.lock().unwrap() = None; }
-                // La carátula a veces llega después del título: reintentamos unas veces
-                if ART.lock().unwrap().is_none() && art_tries < 6 {
+                if k != key {
+                    key = k; ver += 1; art_tries = 0;
+                    prev_art = ART.lock().unwrap().take().map(|a| a.1);
+                    *ART_BIG.lock().unwrap() = None;
+                }
+                // La carátula a veces llega después del título, y al principio Windows aún entrega la de la
+                // canción anterior: se vuelve a leer durante unos segundos y, si cambia, se sustituye
+                if art_tries < 8 {
                     art_tries += 1;
-                    if let Some(b) = load_art(&p) { *ART.lock().unwrap() = Some((ver, Arc::new(b))); }
+                    if let Some((b, big)) = load_art(&p) {
+                        let same = ART.lock().unwrap().as_ref().is_some_and(|a| *a.1 == b);
+                        // La de la canción anterior no vale (salvo que tras varios intentos siga siendo esa)
+                        let stale = art_tries < 5 && prev_art.as_ref().is_some_and(|pa| **pa == b);
+                        if !same && !stale {
+                            if ART.lock().unwrap().is_some() { ver += 1; }
+                            *ART.lock().unwrap() = Some((ver, Arc::new(b)));
+                            if let Some(big) = big { *ART_BIG.lock().unwrap() = Some((ver, Arc::new(big))); }
+                        }
+                    }
                 }
                 let v = ART.lock().unwrap().as_ref().map(|a| a.0).unwrap_or(0);
-                Some(MediaInfo { title, artist, playing, art_ver: v, app, can_prev, can_next })
+                Some(MediaInfo { title, artist, playing, art_ver: v, app, can_prev, can_next, album })
             }
             None => { key.clear(); None }
         };
@@ -670,7 +712,7 @@ fn json_num(s: &str, key: &str) -> Option<f64> {
 
 fn fetch_weather(lat: f64, lon: f64) -> Option<Weather> {
     // Coordenadas redondeadas a ~1 km: suficiente para el tiempo y más privado
-    let body = http_get(format!("https://api.open-meteo.com/v1/forecast?latitude={lat:.2}&longitude={lon:.2}&current=temperature_2m,is_day,weather_code&hourly=temperature_2m,weather_code,is_day&daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=6&timezone=auto"))?;
+    let body = http_get(format!("https://api.open-meteo.com/v1/forecast?latitude={lat:.2}&longitude={lon:.2}&current=temperature_2m,is_day,weather_code&hourly=temperature_2m,weather_code,is_day,precipitation_probability&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&forecast_days=6&timezone=auto"))?;
     // Previsión para el panel del tiempo (si falla, el dato actual sigue valiendo)
     if let Some(f) = weather::parse(&body) { *weather::FORECAST.lock().unwrap() = Some(f); }
     let cur = &body[body.find("\"current\":{")?..];
@@ -742,6 +784,8 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_TOGGLE => media(Cmd::Toggle),
         BAR_NEXT => media(Cmd::Next),
         BAR_PLAYER => run(Act::OpenPlayer),
+        BAR_WIDGETS => desk::toggle(),
+        i if (BAR_WIDGET0..BAR_WIDGET0 + 6).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
         _ => {}
     }
 }
@@ -751,7 +795,7 @@ fn run(a: Act) {
     match a {
         Act::Desktop => menus::toggle_desktop(),
         Act::Claude => open_claude(),
-        Act::Search => combo(&[VK_LWIN, vk(b'S')]),
+        Act::Search => search::toggle(),
         Act::TimerStop => live::timer_stop(),
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
@@ -964,11 +1008,17 @@ struct Caches {
     base: std::collections::HashMap<usize, f32>,
     /// Caja de tinta real de un glifo: (izq, arriba, ancho, alto).
     ink: std::collections::HashMap<(usize, String), [f32; 4]>,
+    /// Textos ya maquetados (maquetar en cada fotograma era lo que más CPU gastaba)
+    layouts: std::collections::HashMap<(usize, String), IDWriteTextLayout>,
+    /// Pinceles de color sólido y degradados, ligados al lienzo `rt_key` (si cambia, se tiran)
+    brushes: std::collections::HashMap<u32, ID2D1Brush>,
+    grads: std::collections::HashMap<(i32, i32, i32, i32, u32, u32), ID2D1Brush>,
+    rt_key: usize,
 }
 
-struct Painter<'a> { rt: &'a ID2D1HwndRenderTarget, dw: &'a IDWriteFactory, cache: &'a RefCell<Caches>, h: f32, s: f32 }
+struct Painter<'a> { rt: &'a ID2D1RenderTarget, dw: &'a IDWriteFactory, cache: &'a RefCell<Caches>, h: f32, s: f32 }
 
-fn draw_eq(rt: &ID2D1HwndRenderTarget, eq: &[f32; 5], x0: f32, cy: f32, b: &ID2D1Brush) {
+fn draw_eq(rt: &ID2D1RenderTarget, eq: &[f32; 5], x0: f32, cy: f32, b: &ID2D1Brush) {
     for (i, v) in eq.iter().enumerate() {
         let bh = (3.0 + v * 13.0).round(); // altura entera: barras nítidas y simétricas
         let bx = x0 + i as f32 * 4.8;
@@ -978,15 +1028,70 @@ fn draw_eq(rt: &ID2D1HwndRenderTarget, eq: &[f32; 5], x0: f32, cy: f32, b: &ID2D
 
 fn fkey(f: &IDWriteTextFormat) -> usize { use windows::core::Interface; f.as_raw() as usize }
 
+/// Tamaño visible común de los iconos de la barra (DIP, el lado mayor de la tinta).
+const ICON_PX: f32 = 16.0;
+
+/// Escala que lleva un glifo a `ICON_PX` por su lado mayor. Los muy planos (la flecha) se miden algo
+/// más grandes para que no parezcan diminutos; se limita para no deformar nada raro.
+fn icon_norm(p: &Painter, f: &IDWriteTextFormat, g: &str) -> f32 {
+    let [_, _, iw, ih] = p.ink(f, g);
+    let (iw, ih) = (iw.max(0.1), ih.max(0.1));
+    let flat = (iw / ih).max(ih / iw);
+    let side = iw.max(ih) * if flat > 1.8 { 0.88 } else { 1.0 };
+    // Ajuste óptico: la lupa, la flecha y el monitor son trazos abiertos que llenan su caja y se ven
+    // más grandes que la batería o el Wi-Fi al mismo tamaño
+    let optical = match g { "\u{E721}" | "\u{E70D}" | "\u{E7F4}" => 0.86, _ => 1.0 };
+    (ICON_PX / side).clamp(0.7, 1.5) * optical
+}
+
+/// Color empaquetado en 32 bits (8 por canal): clave de la caché de pinceles.
+fn pack(c: &D2D1_COLOR_F) -> u32 {
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (q(c.r) << 24) | (q(c.g) << 16) | (q(c.b) << 8) | q(c.a)
+}
+
 impl Painter<'_> {
-    fn brush(&self, c: D2D1_COLOR_F) -> ID2D1Brush { unsafe { self.rt.CreateSolidColorBrush(&c, None).unwrap().into() } }
+    /// Las cachés de pinceles valen solo para el lienzo con el que se crearon.
+    fn check_rt(&self) {
+        use windows::core::Interface;
+        let k = self.rt.as_raw() as usize;
+        let mut c = self.cache.borrow_mut();
+        if c.rt_key != k { c.rt_key = k; c.brushes.clear(); c.grads.clear(); }
+    }
+    fn brush(&self, c: D2D1_COLOR_F) -> ID2D1Brush {
+        self.check_rt();
+        let key = pack(&c);
+        if let Some(b) = self.cache.borrow().brushes.get(&key) { return b.clone(); }
+        let b: ID2D1Brush = unsafe { self.rt.CreateSolidColorBrush(&c, None).unwrap().into() };
+        let mut cache = self.cache.borrow_mut();
+        if cache.brushes.len() > 512 { cache.brushes.clear(); }
+        cache.brushes.insert(key, b.clone());
+        b
+    }
     fn gradient(&self, a: Vector2, b: Vector2, c0: D2D1_COLOR_F, c1: D2D1_COLOR_F) -> ID2D1Brush {
-        unsafe {
+        self.check_rt();
+        let key = ((a.X * 4.0) as i32, (a.Y * 4.0) as i32, (b.X * 4.0) as i32, (b.Y * 4.0) as i32, pack(&c0), pack(&c1));
+        if let Some(g) = self.cache.borrow().grads.get(&key) { return g.clone(); }
+        let g: ID2D1Brush = unsafe {
             let stops = [D2D1_GRADIENT_STOP { position: 0.0, color: c0 }, D2D1_GRADIENT_STOP { position: 1.0, color: c1 }];
             let col = self.rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).unwrap();
             let lp = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: a, endPoint: b };
             self.rt.CreateLinearGradientBrush(&lp, None, &col).unwrap().into()
-        }
+        };
+        let mut cache = self.cache.borrow_mut();
+        if cache.grads.len() > 128 { cache.grads.clear(); }
+        cache.grads.insert(key, g.clone());
+        g
+    }
+    /// Texto maquetado una vez y reutilizado (la maquetación no depende del lienzo).
+    fn cached_layout(&self, fmt: &IDWriteTextFormat, s: &str) -> IDWriteTextLayout {
+        let k = (fkey(fmt), s.to_string());
+        if let Some(l) = self.cache.borrow().layouts.get(&k) { return l.clone(); }
+        let l = self.layout(fmt, s);
+        let mut c = self.cache.borrow_mut();
+        if c.layouts.len() > 800 { c.layouts.clear(); }
+        c.layouts.insert(k, l.clone());
+        l
     }
     /// Degradado vertical de `top` a `bottom`.
     fn vgrad(&self, top: f32, bottom: f32, c0: D2D1_COLOR_F, c1: D2D1_COLOR_F) -> ID2D1Brush {
@@ -1056,12 +1161,13 @@ impl Painter<'_> {
     fn draw_at(&self, fmt: &IDWriteTextFormat, s: &str, x: f32, y: f32, b: &ID2D1Brush, shadow: Option<&ID2D1Brush>) {
         // Ajuste a la rejilla física: sin medios píxeles, texto más nítido
         let x = (x * self.s).round() / self.s;
-        let ws = wide(s);
+        // Misma caja que antes (4000 × 100) pero con la maquetación guardada: DrawText la rehacía cada vez
+        let lay = self.cached_layout(fmt, s);
         unsafe {
             if let Some(sb) = shadow {
-                self.rt.DrawText(&ws, fmt, &rect(x, y + 1.0, x + 4000.0, y + 101.0), sb, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                self.rt.DrawTextLayout(Vector2 { X: x, Y: y + 1.0 }, &lay, sb, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
-            self.rt.DrawText(&ws, fmt, &rect(x, y, x + 4000.0, y + 100.0), b, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            self.rt.DrawTextLayout(Vector2 { X: x, Y: y }, &lay, b, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
     }
     /// Texto con su altura de mayúscula centrada en la barra: todos comparten línea base.
@@ -1428,7 +1534,8 @@ fn paint(hwnd: HWND) {
                         let t = open_t(Mode::Media);
                         let ax = ix + 4.0;
                         match &g.art {
-                            Some((_, bmp)) => { let s = 22.0 * art_pop; p.art(bmp, ax + (22.0 - s) / 2.0, cy - s / 2.0, s, Some(6.0 * art_pop)) }
+                            // Carátula redonda (como un disco), que entra con su "pop" al cambiar de canción
+                            Some((_, bmp)) => { let s = 22.0 * art_pop; p.art(bmp, ax + (22.0 - s) / 2.0, cy - s / 2.0, s, None) }
                             None => yt_logo(ax + 11.0, cy, 10.0),
                         }
                         // En compacta: ecualizador (o la cuenta atrás si hay temporizador); se desvanece al abrirse
@@ -1767,7 +1874,8 @@ fn paint(hwnd: HWND) {
                     // Logotipo oficial de Claude (trazado del SVG), a 17 DIP
                     if g.claude_geo.is_none() { g.claude_geo = claude_geometry(&g.factory); }
                     if let Some(geo) = &g.claude_geo {
-                        let size = 17.0_f32;
+                        // Relleno y con picos: a 15,5 DIP pesa a la vista lo mismo que los glifos de 16
+                        let size = ICON_PX - 0.5;
                         let k = size / 125.0;
                         let (cx, cyy) = (rx + 17.0, cy);
                         let tx = p.snap(cx - 63.5 * k);
@@ -1782,6 +1890,9 @@ fn paint(hwnd: HWND) {
                 } else {
                     // Pulsado: el icono se encoge un poco, como un botón físico
                     let mut sc = if g.pressed == Some(act) && g.hover == Some(act) { 0.86 } else { 1.0 };
+                    // Mismo tamaño visible para todos: cada glifo de Segoe Fluent tiene su propia caja
+                    // (la flecha es pequeña, la batería ancha…), así que se escala por su tinta real
+                    sc *= icon_norm(&p, &g.f.icon, &gl);
                     // Si el icono cambia (batería que sube, señal Wi-Fi, sin conexión…), el viejo se funde
                     // y el nuevo entra con un pequeño "pop"
                     let mo = g.morph.entry(act).or_insert_with(|| Morph { prev: gl.clone(), cur: gl.clone(), at: now - Duration::from_secs(5) });
@@ -1924,11 +2035,14 @@ fn paint_eq() -> bool {
         let (Some(rt), Some(r)) = (g.target.clone(), g.eq_rect) else { return false };
         unsafe {
             let black: ID2D1Brush = rt.CreateSolidColorBrush(&rgba(0.0, 0.0, 0.0, 1.0), None).unwrap().into();
-            let white: ID2D1Brush = rt.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 0.96), None).unwrap().into();
+            // Mismo color que en el pintado completo (el de la carátula): antes este repintado rápido lo
+            // dibujaba blanco y el ecualizador parpadeaba entre los dos colores
+            let tn = g.tint_now;
+            let bars: ID2D1Brush = rt.CreateSolidColorBrush(&rgba(tn[0], tn[1], tn[2], 0.96), None).unwrap().into();
             rt.BeginDraw();
             rt.PushAxisAlignedClip(&r, D2D1_ANTIALIAS_MODE_ALIASED);
             rt.FillRectangle(&r, &black);
-            draw_eq(&rt, &g.eq, r.left + 1.0, BAR_H / 2.0, &white);
+            draw_eq(&rt, &g.eq, r.left + 1.0, BAR_H / 2.0, &bars);
             rt.PopAxisAlignedClip();
             if rt.EndDraw(None, None).is_err() { g.target = None; return false; }
         }
@@ -2016,6 +2130,8 @@ fn sync_fullscreen(hwnd: HWND) {
 fn keep_visible() {
     // Con una app a pantalla completa la barra se queda oculta: nunca competir por estar encima
     if FULLSCREEN.load(Ordering::Relaxed) { return; }
+    // "Mostrar escritorio" también esconde los widgets: vuelven a su sitio sobre el fondo
+    desk::restack();
     let bar = bar_hwnd();
     unsafe {
         let vis = IsWindowVisible(bar).as_bool();
@@ -2407,6 +2523,7 @@ fn read_usage() -> Option<(f32, u64)> {
 
 fn main() {
     if std::env::args().any(|a| a == "--statusline") { statusline_mode(); return; }
+    if let Ok(q) = std::env::var("MACBAR_SEARCHTEST") { search::selftest(&q); return; }
     unsafe {
         // Una sola instancia
         let _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));
@@ -2503,6 +2620,8 @@ fn main() {
         popup::prewarm();
         ccenter::prewarm();
         tray::prewarm();
+        // Widgets del escritorio (si están activados)
+        desk::start();
         // Reloj, batería e idioma: un timer lento
         SetTimer(Some(hwnd), TIMER_TICK, 10_000, None);
         SetTimer(Some(hwnd), TIMER_GUARD, 2_000, None);

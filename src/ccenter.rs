@@ -49,6 +49,8 @@ struct Cc {
     /// Valores que se mueven con suavidad hacia su objetivo (brillos, colores, deslizadores, cifras).
     anim: HashMap<String, f32>,
     last_paint: Instant,
+    /// Al abrir: los bloques entran en cascada (como el panel del tiempo).
+    opened: Instant,
 }
 
 const TIMER_ANIM_CC: usize = 93;
@@ -339,7 +341,7 @@ fn create() {
             hits: Vec::new(), hover: None, drag: None,
             avatar_px: None, avatar: None, title: String::new(), subtitle: String::new(),
             vol: 0.0, mute: false, dark: true, cpu: 0.0, ram: 0.0, disk: 0.0, cpu_prev: None, bright_drag: None,
-            height: 400.0, hidden_at: None, anim: HashMap::new(), last_paint: Instant::now(),
+            height: 400.0, hidden_at: None, anim: HashMap::new(), last_paint: Instant::now(), opened: Instant::now(),
         };
         CC.with(|c| *c.borrow_mut() = Some(cc));
         // El canal existe ANTES de lanzar el hilo: así el primer trabajo nunca se pierde
@@ -367,6 +369,7 @@ fn show(bar: HWND) {
             c.anim.clear();
             for k in ["CPU", "RAM", "Disco"] { c.anim.insert(k.to_string(), 0.0); }
             c.last_paint = Instant::now();
+            c.opened = Instant::now();
             let has_bright = SYS.lock().unwrap().bright.is_some();
             c.height = layout_height(has_bright);
             c.target = None;
@@ -491,7 +494,13 @@ fn paint(hwnd: HWND) {
             let _ = &hov;
             let sep_at = |y: f32| { let px = 1.0 / s; rt.FillRectangle(&rect(PAD + 4.0, y, w - PAD - 4.0, y + px), &card_edge); };
 
+            // Cascada de entrada: cada bloque sube y aparece con un pequeño retraso
+            let since = c.opened.elapsed().as_secs_f32();
+            if since < 0.9 { moving = true; }
+            let enter = |delay: f32| popup::rise(&rt, popup::stagger(since, delay, 0.32));
+
             // ---- Cabecera: avatar, nombre, equipo + Windows; engranaje a la derecha
+            let b0 = enter(0.0);
             let mut y = PAD;
             let av = 36.0;
             match &c.avatar {
@@ -506,7 +515,9 @@ fn paint(hwnd: HWND) {
             // El engranaje gira un poco al pasar el ratón
             let ang = gk * std::f32::consts::FRAC_PI_3;
             let (gcx, gcy) = ((gear.left + gear.right) / 2.0, (gear.top + gear.bottom) / 2.0);
-            let cm = popup::content_matrix(hwnd, w);
+            // La transformación actual (incluye el desplazamiento de la cascada)
+            let mut cm = Matrix3x2::default();
+            rt.GetTransform(&mut cm);
             if ang > 0.001 {
                 let (cs, sn) = (ang.cos(), ang.sin());
                 let rot = Matrix3x2 { M11: cs, M12: sn, M21: -sn, M22: cs, M31: gcx - cs * gcx + sn * gcy, M32: gcy - sn * gcx - cs * gcy };
@@ -516,6 +527,7 @@ fn paint(hwnd: HWND) {
             rt.SetTransform(&cm);
             hits.push((gear, Hit::Settings));
             hits.push((rect(PAD, y, gear.left - 6.0, y + HEADER_H), Hit::User));
+            popup::rise_end(&rt, b0);
             y += HEADER_H + 12.0;
             sep_at(y - 6.0);
 
@@ -533,6 +545,7 @@ fn paint(hwnd: HWND) {
                 let cx = PAD + (i % 2) as f32 * (cw + GAP);
                 let cy0 = y + (i / 2) as f32 * (CARD_H + GAP);
                 let r = rect(cx, cy0, cx + cw, cy0 + CARD_H);
+                let bt = enter(0.06 + i as f32 * 0.04);
                 card_at(r, glow(&mut anim, *hit, &mut moving));
                 // El círculo pasa de gris a azul (y al revés) con fundido, y da un pequeño "pop" al cambiar
                 let ak = ease_to(&mut anim, &format!("a{hit:?}"), if *active { 1.0 } else { 0.0 }, 0.09, dt, &mut moving);
@@ -548,6 +561,7 @@ fn paint(hwnd: HWND) {
                 let tx = cx + 10.0 + cr * 2.0 + 9.0;
                 text_in(&c.f_lbl, lbl, tx, cy0 + 9.0, 18.0, &white);
                 text_in(&c.f_sub, &trunc(sub, 14), tx, cy0 + 27.0, 17.0, &dim);
+                popup::rise_end(&rt, bt);
                 hits.push((r, *hit));
             }
             y += CARD_H * 2.0 + GAP + 12.0;
@@ -580,8 +594,14 @@ fn paint(hwnd: HWND) {
                 hits.push((rect(tl - 6.0, *y + 20.0, tr + 6.0, *y + SLIDER_H), hit));
                 *y += SLIDER_H + GAP;
             };
-            if let Some(b) = c.bright_drag.or(st.bright) { slider(&mut y, "\u{E706}", "Brillo", b, Hit::Bright, &mut anim, &mut moving); }
+            if let Some(b) = c.bright_drag.or(st.bright) {
+                let bs = enter(0.22);
+                slider(&mut y, "\u{E706}", "Brillo", b, Hit::Bright, &mut anim, &mut moving);
+                popup::rise_end(&rt, bs);
+            }
+            let bs = enter(0.26);
             slider(&mut y, if c.mute || c.vol == 0.0 { "\u{E74F}" } else { "\u{E995}" }, "Volumen", if c.mute { 0.0 } else { c.vol }, Hit::Vol, &mut anim, &mut moving);
+            popup::rise_end(&rt, bs);
             y += 12.0 - GAP;
             sep_at(y - 6.0);
 
@@ -591,6 +611,7 @@ fn paint(hwnd: HWND) {
             let colw = (w - PAD * 2.0) / 3.0;
             for (i, (v, l)) in [(c.cpu, "CPU"), (c.ram, "RAM"), (c.disk, "Disco")].iter().enumerate() {
                 let x0 = PAD + i as f32 * colw;
+                let bc = enter(0.32 + i as f32 * 0.03);
                 // Las cifras cuentan hasta su valor nuevo
                 let v = ease_to(&mut anim, l, *v, 0.25, dt, &mut moving);
                 let vt = format!("{}%", v.round() as i32);
@@ -598,6 +619,7 @@ fn paint(hwnd: HWND) {
                 text_in(&c.f_val, &vt, x0 + (colw - vw) / 2.0, y + 8.0, 22.0, &white);
                 let lw = p.width(&c.f_sub, l);
                 text_in(&c.f_sub, l, x0 + (colw - lw) / 2.0, y + 31.0, 16.0, &dim);
+                popup::rise_end(&rt, bc);
             }
             y += STATS_H + 12.0;
             sep_at(y - 6.0);
@@ -606,11 +628,13 @@ fn paint(hwnd: HWND) {
             let pw = (w - PAD * 2.0) / 4.0;
             for (i, (gl, hit)) in [("\u{E72E}", Hit::Lock), ("\u{E708}", Hit::Sleep), ("\u{E72C}", Hit::Restart), ("\u{E7E8}", Hit::Shutdown)].iter().enumerate() {
                 let cx = PAD + i as f32 * pw + pw / 2.0;
+                let bp = enter(0.40 + i as f32 * 0.035);
                 let e = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: y + POWER_H / 2.0 }, radiusX: 19.0, radiusY: 19.0 };
                 let hk = glow(&mut anim, *hit, &mut moving);
                 rt.FillEllipse(&e, &p.brush(rgba(1.0, 1.0, 1.0, 0.075 + 0.055 * hk)));
                 let _ = &card;
                 glyph_in(&c.f_icon_l, gl, cx - 19.0, y + POWER_H / 2.0 - 19.0, 38.0, 38.0, &white);
+                popup::rise_end(&rt, bp);
                 hits.push((rect(cx - 20.0, y + 2.0, cx + 20.0, y + POWER_H - 2.0), *hit));
             }
 

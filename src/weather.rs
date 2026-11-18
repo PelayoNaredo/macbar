@@ -14,6 +14,11 @@ pub struct Forecast {
     pub hours: Vec<(u32, f32, i32, bool)>,
     /// (día de la semana 0=domingo, código, mínima, máxima)
     pub days: Vec<(u32, i32, f32, f32)>,
+    /// Probabilidad de lluvia (%) de cada hora de `hours`.
+    pub rain: Vec<f32>,
+    /// Hora de amanecer y de anochecer de hoy.
+    pub sun: Option<(String, String)>,
+    #[allow(dead_code)]
     pub at: Instant,
 }
 
@@ -46,7 +51,10 @@ pub fn parse(body: &str) -> Option<Forecast> {
     // Desde la hora actual
     let now_prefix = cur_time.get(..13).unwrap_or("").to_string();
     let start = times.iter().position(|t| t.get(..13) == Some(now_prefix.as_str())).unwrap_or(0);
-    let hours = (start..(start + 7).min(times.len())).filter_map(|i| {
+    let rainp = nums(h, "precipitation_probability");
+    let range = start..(start + 25).min(times.len());
+    let rain = range.clone().map(|i| rainp.get(i).copied().filter(|v| v.is_finite()).unwrap_or(0.0)).collect();
+    let hours = range.filter_map(|i| {
         let hr: u32 = times[i].get(11..13)?.parse().ok()?;
         Some((hr, *temps.get(i)?, *codes.get(i)? as i32, isday.get(i).copied().unwrap_or(1.0) > 0.5))
     }).collect();
@@ -60,7 +68,10 @@ pub fn parse(body: &str) -> Option<Forecast> {
         let (y, m, dd) = (t.get(0..4)?.parse().ok()?, t.get(5..7)?.parse().ok()?, t.get(8..10)?.parse().ok()?);
         Some((calendar::weekday(y, m, dd), *dc.get(i)? as i32, *dmin.get(i)?, *dmax.get(i)?))
     }).collect();
-    Some(Forecast { hours, days, at: Instant::now() })
+    // Amanecer y anochecer de hoy ("2026-11-18T08:12" → "08:12")
+    let hm = |k: &str| arr(d, k).first().and_then(|s| s.get(11..16)).map(str::to_string);
+    let sun = hm("sunrise").zip(hm("sunset"));
+    Some(Forecast { hours, days, rain, sun, at: Instant::now() })
 }
 
 fn arr_str_field(sec: &str, key: &str) -> String {
@@ -69,13 +80,13 @@ fn arr_str_field(sec: &str, key: &str) -> String {
 }
 
 /// Icono del tiempo: el glifo (sol, luna o nube) y, encima, lluvia, nieve, niebla o rayo dibujados.
-pub fn draw_icon(rt: &ID2D1HwndRenderTarget, p: &Painter, f: &IDWriteTextFormat, x: f32, top: f32, bw: f32, bh: f32, code: i32, day: bool, b: &ID2D1Brush) {
+pub fn draw_icon(rt: &ID2D1RenderTarget, p: &Painter, f: &IDWriteTextFormat, x: f32, top: f32, bw: f32, bh: f32, code: i32, day: bool, b: &ID2D1Brush) {
     draw_icon_anim(rt, p, f, x, top, bw, bh, code, day, b, None);
 }
 
 /// Como `draw_icon`, pero con `anim = Some(segundos)` el icono se mueve: el sol gira despacio,
 /// la lluvia y la nieve caen, la niebla se desliza y el rayo destella.
-pub fn draw_icon_anim(rt: &ID2D1HwndRenderTarget, p: &Painter, f: &IDWriteTextFormat, x: f32, top: f32, bw: f32, bh: f32, code: i32, day: bool, b: &ID2D1Brush, anim: Option<f32>) {
+pub fn draw_icon_anim(rt: &ID2D1RenderTarget, p: &Painter, f: &IDWriteTextFormat, x: f32, top: f32, bw: f32, bh: f32, code: i32, day: bool, b: &ID2D1Brush, anim: Option<f32>) {
     let size = unsafe { f.GetFontSize() };
     let extra = matches!(code, 45 | 48 | 51..=67 | 71..=86 | 95..=99);
     let base = match code { 0 | 1 => if day { "\u{E706}" } else { "\u{E708}" }, _ => "\u{E753}" };
@@ -222,9 +233,9 @@ impl Content for WeatherPanel {
             if !f.days.is_empty() {
                 // ---- Próximas horas
                 ui.sep(y - 6.0);
-                let n = f.hours.len().max(1) as f32;
+                let n = f.hours.len().clamp(1, 7) as f32;
                 let cw = (W - PAD * 2.0 - 12.0) / n;
-                for (i, (hr, t, code, day)) in f.hours.iter().enumerate() {
+                for (i, (hr, t, code, day)) in f.hours.iter().take(7).enumerate() {
                     // Columnas en cascada de izquierda a derecha: suben 10 px con fundido
                     let k = stagger(since, 0.08 + i as f32 * 0.04, 0.32);
                     let y = y + 10.0 * (1.0 - k);
