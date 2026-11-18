@@ -478,9 +478,15 @@ fn git_safe(repo: &std::path::Path) -> bool {
     const SECTIONS: [&str; 8] = ["core", "remote", "branch", "user", "pull", "push", "fetch", "init"];
     const CORE: [&str; 12] = ["repositoryformatversion", "filemode", "bare", "logallrefupdates", "symlinks", "ignorecase",
         "autocrlf", "safecrlf", "eol", "longpaths", "precomposeunicode", "checkstat"];
+    // git se salta la BOM de UTF-8 al principio: aquí también, o "\u{feff}[filter …]" colaría como clave suelta
+    let cfg = cfg.trim_start_matches('\u{feff}');
+    // Una clave de git: letra y luego letras, números o guiones. Cualquier otra cosa no se entiende → se rechaza
+    let key_ok = |k: &str| k.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     let mut section = String::new();
     for line in cfg.lines() {
         let l = line.trim();
+        // Caracteres invisibles o de control a la izquierda (otra BOM, NUL…): git podría leer ahí una cabecera
+        if l.starts_with(|c: char| c.is_control() || c == '\u{feff}' || c == '\u{200b}') { return false; }
         if l.is_empty() || l.starts_with('#') || l.starts_with(';') { continue; }
         let mut l = l;
         if let Some(h) = l.strip_prefix('[') {
@@ -492,6 +498,8 @@ fn git_safe(repo: &std::path::Path) -> bool {
             if l.is_empty() || l.starts_with('#') || l.starts_with(';') { continue; }
         }
         let key = l.split('=').next().unwrap_or("").trim().to_lowercase();
+        // Una línea que no es cabecera ni "clave = valor" (o fuera de toda sección): no se sabe qué hará git con ella
+        if section.is_empty() || !key_ok(&key) { return false; }
         if section == "core" && !CORE.contains(&key.as_str()) { return false; }
         // En remote/branch/pull… solo lo de siempre (url, fetch, merge, rebase…), nada que lance un programa
         if ["uploadpack", "receivepack", "proxy", "vcs", "sshcommand"].iter().any(|k| key.contains(k)) { return false; }
@@ -673,5 +681,32 @@ pub fn ago(unix: u64) -> String {
         172800..=604799 => format!("hace {} días", d / 86400),
         604800..=2591999 => { let w = d / 604800; if w == 1 { "hace 1 semana".into() } else { format!("hace {w} semanas") } }
         _ => { let m = d / 2592000; if m <= 1 { "hace 1 mes".into() } else if m < 12 { format!("hace {m} meses") } else { format!("hace {} años", m / 12) } }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_safe;
+    fn repo(cfg: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("macbar-gs-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::write(d.join(".git").join("config"), cfg).unwrap();
+        d
+    }
+    #[test]
+    fn normal_repo_passes() {
+        assert!(git_safe(&repo("[core]\n\trepositoryformatversion = 0\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/a/b.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n")));
+    }
+    #[test]
+    fn bom_filter_rejected() {
+        assert!(!git_safe(&repo("\u{feff}[filter \"x\"]\n\tclean = calc.exe\n")));
+        assert!(!git_safe(&repo("[core]\n\tbare = false\n\u{feff}[filter \"x\"]\n\tclean = calc.exe\n")));
+    }
+    #[test]
+    fn junk_lines_rejected() {
+        assert!(!git_safe(&repo("clean = calc.exe\n")));
+        assert!(!git_safe(&repo("[core]\n\tbare = false\n\t[weird stuff\n")));
+        assert!(!git_safe(&repo("[filter \"x\"]\n\tclean = calc.exe\n")));
+        assert!(!git_safe(&repo("[core]\n\tfsmonitor = calc.exe\n")));
     }
 }
