@@ -44,6 +44,7 @@ mod deskdata;
 mod deskw;
 mod live;
 mod menus;
+mod phone;
 mod popup;
 mod search;
 mod sys;
@@ -773,6 +774,21 @@ fn open_claude() {
     sys::open("shell:AppsFolder\\Claude_pzs8sxrjxfjjc!Claude");
 }
 
+/// Menú de macbar (el de clic derecho en la barra), donde esté el ratón: lo abre su icono en "Iconos ocultos".
+fn macbar_menu() {
+    let hwnd = bar_hwnd();
+    unsafe {
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let none: Box<dyn Fn(POINT) -> Option<usize>> = Box::new(|_| None);
+        let fg = last_fg();
+        if let menus::Outcome::Picked(a) = menus::track(hwnd, menus::bar_menu(), pt.x, pt.y, false, usize::MAX, none) {
+            if let Some(id) = menus::perform(hwnd, fg, a) { bar_action(hwnd, id); }
+        }
+        give_back_focus(hwnd, fg);
+    }
+}
+
 fn media(cmd: Cmd) { if let Some(tx) = CMD_TX.get() { let _ = tx.send(cmd); } }
 
 fn bar_action(hwnd: HWND, id: u32) {
@@ -785,7 +801,7 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_NEXT => media(Cmd::Next),
         BAR_PLAYER => run(Act::OpenPlayer),
         BAR_WIDGETS => desk::toggle(),
-        i if (BAR_WIDGET0..BAR_WIDGET0 + 6).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
+        i if (BAR_WIDGET0..BAR_WIDGET0 + 7).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
         _ => {}
     }
 }
@@ -2524,6 +2540,7 @@ fn read_usage() -> Option<(f32, u64)> {
 fn main() {
     if std::env::args().any(|a| a == "--statusline") { statusline_mode(); return; }
     if let Ok(q) = std::env::var("MACBAR_SEARCHTEST") { search::selftest(&q); return; }
+    if std::env::var("MACBAR_PHONETEST").is_ok() { phone::selftest(); return; }
     unsafe {
         // Una sola instancia
         let _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));

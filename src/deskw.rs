@@ -109,6 +109,7 @@ pub fn new(k: Kind) -> Box<dyn Widget> {
         Kind::System => Box::new(SystemW { bars: [0.0; 3], disp: [0.0; 4], apps: HashMap::new(), moving: false, graph: None, live: None, layer_at: None, probe_a: 0.0, probe_x: 0.0, probe_on: false }),
         Kind::Storage => Box::new(StorageW::default()),
         Kind::Projects => Box::new(ProjectsW { tab: 0, scroll: 0, tab_at: None, pill: 0.0 }),
+        Kind::Phone => { crate::phone::start(); Box::new(PhoneW::default()) }
     }
 }
 
@@ -1497,4 +1498,284 @@ pub(crate) fn copy_text(s: &str) {
         }
         let _ = CloseClipboard();
     }
+}
+
+// ---------------------------------------------------------------- móvil (Enlace Móvil)
+/// `born`: cuándo apareció cada aviso (los nuevos entran deslizándose); `seen`: si ya se pintó una vez
+/// (los que había al abrir entran en la cascada normal, no como "nuevos").
+#[derive(Default)]
+struct PhoneW { born: HashMap<u32, Instant>, seen: bool, moving: bool, bmps: HashMap<String, ID2D1Bitmap>, bmp_rt: usize, sync_at: Option<Instant> }
+
+impl PhoneW {
+    /// Miniatura como imagen de Direct2D (se rehace si cambia el lienzo).
+    fn bmp(&mut self, rt: &ID2D1RenderTarget, key: &str, px: &Arc<Vec<u8>>) -> Option<ID2D1Bitmap> {
+        let raw = windows::core::Interface::as_raw(rt) as usize;
+        if raw != self.bmp_rt { self.bmps.clear(); self.bmp_rt = raw; }
+        if self.bmps.len() > 12 { self.bmps.clear(); }
+        if let Some(b) = self.bmps.get(key) { return Some(b.clone()); }
+        let b = bitmap(rt, px, crate::phone::THUMB)?;
+        self.bmps.insert(key.to_string(), b.clone());
+        Some(b)
+    }
+    /// Igual, para imágenes que no son cuadradas (el fondo del móvil). La clave lleva la dirección de los
+    /// datos: al elegir otro fondo cambia y se rehace.
+    fn bmp_wh(&mut self, rt: &ID2D1RenderTarget, key: &str, px: &Arc<Vec<u8>>, w: u32, h: u32) -> Option<ID2D1Bitmap> {
+        let raw = windows::core::Interface::as_raw(rt) as usize;
+        if raw != self.bmp_rt { self.bmps.clear(); self.bmp_rt = raw; }
+        let key = format!("{key}:{:x}", Arc::as_ptr(px) as usize);
+        if let Some(b) = self.bmps.get(&key) { return Some(b.clone()); }
+        let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
+        let b = unsafe { rt.CreateBitmap(D2D_SIZE_U { width: w, height: h }, Some(px.as_ptr() as _), w * 4, &bp).ok()? };
+        self.bmps.insert(key, b.clone());
+        Some(b)
+    }
+}
+
+const G_PHONE: &str = "\u{E8EA}";
+const G_CHAT: &str = "\u{E8BD}";
+const G_CALL: &str = "\u{E717}";
+const G_PHOTO: &str = "\u{E91B}";
+const G_BELL: &str = "\u{EA8F}";
+const G_CLOSE: &str = "\u{E711}";
+const NROW: f32 = 66.0;
+
+/// Corta un texto en dos líneas de `n` caracteres como mucho (por palabras).
+fn two_lines(s: &str, n: usize) -> (String, String) {
+    if s.chars().count() <= n { return (s.to_string(), String::new()); }
+    let mut a = String::new();
+    let mut rest = s;
+    for w in s.split_whitespace() {
+        if a.chars().count() + w.chars().count() + 1 > n { break; }
+        if !a.is_empty() { a.push(' '); }
+        a.push_str(w);
+        rest = &s[s.find(w).map(|i| i + w.len()).unwrap_or(s.len())..];
+    }
+    if a.is_empty() { return (trunc(s, n), String::new()); }
+    (a, trunc(rest.trim(), n))
+}
+
+impl Widget for PhoneW {
+    fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, _dt: f32) {
+        let (W, H) = size(Kind::Phone);
+        let st = crate::phone::PHONE.lock().unwrap().clone();
+        self.moving = false;
+
+        // ---- Cabecera como la de Enlace Móvil: el móvil con su fondo, nombre, estado y batería
+        let (fx, fy, fw, fh) = (PAD, PAD, 66.0, 138.0);
+        let k0 = ez(t, 0.0, 0.5);
+        let hk = ui.heat(14);
+        let base = cur_transform(ui);
+        unsafe { ui.rt.SetTransform(&mul(&scale_at((0.94 + 0.06 * k0) * (1.0 + 0.03 * hk), fx + fw / 2.0, fy + fh / 2.0), &base)); }
+        popup::push_alpha(ui.rt, k0);
+        let fr = rrect(rect(fx, fy, fx + fw, fy + fh), 11.0);
+        match st.wall.as_ref().and_then(|px| self.bmp_wh(ui.rt, "wall", px, crate::phone::WALL_W, crate::phone::WALL_H)) {
+            Some(b) => unsafe {
+                if let Ok(br) = ui.rt.CreateBitmapBrush(&b, None, None) {
+                    br.SetTransform(&Matrix3x2 { M11: fw / crate::phone::WALL_W as f32, M12: 0.0, M21: 0.0, M22: fh / crate::phone::WALL_H as f32, M31: fx, M32: fy });
+                    ui.rt.FillRoundedRectangle(&fr, &br);
+                }
+            },
+            None => unsafe {
+                // Sin fondo elegido: un degradado suave y una pista de que se puede poner uno
+                let g = ui.p.vgrad(fy, fy + fh, rgba(0.36, 0.45, 0.62, 0.55), rgba(0.10, 0.12, 0.18, 0.55));
+                ui.rt.FillRoundedRectangle(&fr, &g);
+                ui.glyph(&ui.f.icon_l, G_PHOTO, fx, fy + fh / 2.0 - 24.0, fw, 28.0, &ui.wa(0.55));
+                ui.text_c(&ui.f.small, "Fondo", fx + fw / 2.0, fy + fh / 2.0 + 6.0, 16.0, &ui.wa(0.55));
+            },
+        }
+        unsafe {
+            ui.rt.DrawRoundedRectangle(&fr, &ui.wa(0.55), 2.0, None);
+            // Cámara arriba, como en el dibujo de Enlace Móvil
+            ui.rt.FillEllipse(&ellipse(fx + fw / 2.0, fy + 7.0, 2.2), &ui.brush(rgba(0.0, 0.0, 0.0, 0.7)));
+        }
+        ui.rt_pop();
+        unsafe { ui.rt.SetTransform(&base); }
+        ui.hit(rect(fx, fy, fx + fw, fy + fh), 14);
+
+        let x0 = fx + fw + 18.0;
+        let k1 = ez(t, 0.08, 0.45);
+        popup::push_alpha(ui.rt, k1);
+        let name = if st.name.is_empty() { "Tu móvil".to_string() } else { st.name.clone() };
+        ui.text(&d.title, &trunc(&name, 20), x0 + 8.0 * (1.0 - k1), fy + 4.0, 26.0, &ui.white);
+        // Iconos de estado: conexión y batería (la batería solo si se conoce)
+        let iy = fy + 36.0;
+        let mut ix = x0;
+        let on = if st.running { ui.white.clone() } else { ui.wa(0.35) };
+        ui.glyph(&ui.f.icon, "\u{E701}", ix, iy, 18.0, 22.0, &on);
+        ix += 26.0;
+        if let Some((pct, _)) = st.battery {
+            // Pila dibujada: el relleno es la carga
+            unsafe {
+                let r = rect(ix, iy + 6.0, ix + 22.0, iy + 16.0);
+                ui.rt.DrawRoundedRectangle(&rrect(r, 2.5), &ui.white, 1.4, None);
+                ui.rt.FillRectangle(&rect(ix + 22.5, iy + 9.0, ix + 24.5, iy + 13.0), &ui.white);
+                let fillc = if pct <= 15 { ui.brush(rgba(1.0, 0.45, 0.4, 1.0)) } else { ui.white.clone() };
+                ui.rt.FillRoundedRectangle(&rrect(rect(ix + 2.0, iy + 8.0, ix + 2.0 + 18.0 * pct as f32 / 100.0, iy + 14.0), 1.2), &fillc);
+            }
+            ui.text(&ui.f.name, &format!("{pct} %"), ix + 32.0, iy, 22.0, &ui.white);
+        }
+        // Estado: "Conectado" con su marca y, a la derecha, actualizar
+        let py = fy + 72.0;
+        let pr = rect(x0, py, W - PAD, py + 40.0);
+        unsafe { ui.rt.FillRoundedRectangle(&rrect(pr, 10.0), &ui.wa(0.08)); }
+        let (okc, okg) = if st.running { (rgba(0.33, 0.78, 0.42, 1.0), "\u{E73E}") } else { (rgba(1.0, 1.0, 1.0, 0.3), "\u{E711}") };
+        unsafe { ui.rt.FillEllipse(&ellipse(x0 + 22.0, py + 20.0, 10.0), &ui.brush(okc)); }
+        ui.glyph(&ui.f.small, okg, x0 + 12.0, py + 10.0, 20.0, 20.0, &ui.brush(rgba(0.0, 0.0, 0.0, 0.85)));
+        ui.text(&ui.f.name, if st.running { "Conectado" } else { "Sin conectar" }, x0 + 40.0, py, 40.0, &ui.white);
+        unsafe { ui.rt.FillRectangle(&rect(W - PAD - 44.0, py + 8.0, W - PAD - 43.0, py + 32.0), &ui.wa(0.15)); }
+        // El botón de actualizar gira un poco mientras se busca de nuevo
+        let spin = self.sync_at.map(|s| s.elapsed().as_secs_f32()).filter(|s| *s < 0.8);
+        let (scx, scy) = (W - PAD - 22.0, py + 20.0);
+        if let Some(s) = spin {
+            self.moving = true;
+            let a = popup::ease_out(s / 0.8) * std::f32::consts::TAU;
+            let (c, sn) = (a.cos(), a.sin());
+            unsafe { ui.rt.SetTransform(&mul(&Matrix3x2 { M11: c, M12: sn, M21: -sn, M22: c, M31: scx - c * scx + sn * scy, M32: scy - sn * scx - c * scy }, &base)); }
+        }
+        round_btn(ui, &ui.f.icon.clone(), "\u{E72C}", scx, scy, 16.0, 15, false);
+        unsafe { ui.rt.SetTransform(&base); }
+        let sub = match st.battery { Some((_, when)) if !st.running || deskdata::now_unix().saturating_sub(when) > 120 => format!("Batería vista {}", ago(when)), _ => String::new() };
+        if !sub.is_empty() { ui.text(&ui.f.small, &sub, x0 + 2.0, py + 44.0, 18.0, &ui.faint); }
+        ui.rt_pop();
+
+        // ---- Accesos: botones anchos como los de Enlace Móvil
+        let ay = fy + fh + 16.0;
+        let gap = 8.0;
+        let bw = (W - PAD * 2.0 - gap * 3.0) / 4.0;
+        for (i, g) in [G_CHAT, G_CALL, G_PHOTO, G_OPEN].iter().enumerate() {
+            let id = 10 + i as u32;
+            let k = ez(t, 0.15 + i as f32 * 0.05, 0.4);
+            let hk = ui.heat(id);
+            let p = desk::press(id);
+            let x = PAD + i as f32 * (bw + gap);
+            let r = rect(x, ay + 6.0 * (1.0 - k), x + bw, ay + 44.0 + 6.0 * (1.0 - k));
+            let base = cur_transform(ui);
+            if p > 0.0 { unsafe { ui.rt.SetTransform(&mul(&scale_at(1.0 - 0.06 * p, x + bw / 2.0, ay + 22.0), &base)); } }
+            popup::push_alpha(ui.rt, k);
+            unsafe {
+                ui.rt.FillRoundedRectangle(&rrect(r, 9.0), &ui.wa(0.08 + 0.08 * hk));
+                ui.rt.DrawRoundedRectangle(&rrect(r, 9.0), &ui.wa(0.10), 1.0, None);
+            }
+            ui.glyph(&ui.f.icon_l, g, r.left, r.top, bw, 44.0, &ui.white);
+            ui.hit(r, id);
+            ui.rt_pop();
+            if p > 0.0 { unsafe { ui.rt.SetTransform(&base); } }
+        }
+
+        // ---- Fotos recientes (las 3 últimas de la cámara, capturas e Imágenes del móvil)
+        let mut ny = ay + 44.0 + 24.0;
+        if !st.photos.is_empty() {
+            ui.sep(ny - 8.0);
+            ui.text(&ui.f.small, "FOTOS RECIENTES", PAD, ny, 18.0, &ui.faint);
+            let gap = 8.0;
+            let side = (W - PAD * 2.0 - gap * 2.0) / 3.0;
+            let py = ny + 24.0;
+            for (i, ph) in st.photos.iter().enumerate() {
+                let id = 30 + i as u32;
+                let k = ez(t, 0.22 + i as f32 * 0.07, 0.45);
+                let hk = ui.heat(id);
+                let x = PAD + i as f32 * (side + gap);
+                // Entra creciendo un poco; al pasar el ratón se acerca
+                let sc = (0.92 + 0.08 * k) * (1.0 + 0.04 * hk);
+                let (cx, cy) = (x + side / 2.0, py + side / 2.0);
+                let base = cur_transform(ui);
+                unsafe { ui.rt.SetTransform(&mul(&scale_at(sc, cx, cy), &base)); }
+                popup::push_alpha(ui.rt, k);
+                let key = format!("ph:{}", ph.path);
+                match ph.thumb.as_ref().and_then(|px| self.bmp(ui.rt, &key, px)) {
+                    Some(b) => draw_art(ui.rt, &b, crate::phone::THUMB, x, py, side, 12.0),
+                    None => unsafe {
+                        ui.rt.FillRoundedRectangle(&rrect(rect(x, py, x + side, py + side), 12.0), &ui.wa(0.08));
+                        ui.glyph(&ui.f.icon_l, G_PHOTO, x, py, side, side, &ui.wa(0.4));
+                    },
+                }
+                if ph.video {
+                    unsafe { ui.rt.FillEllipse(&ellipse(cx, cy, 15.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.45))); }
+                    ui.glyph(&ui.f.icon, G_PLAY, cx - 15.0, cy - 15.0, 30.0, 30.0, &ui.white);
+                }
+                ui.rt_pop();
+                unsafe { ui.rt.SetTransform(&base); }
+                ui.hit(rect(x, py, x + side, py + side), id);
+            }
+            ny = py + side + 22.0;
+        }
+
+        // ---- Notificaciones del móvil
+        ui.sep(ny - 8.0);
+        ui.text(&ui.f.small, "NOTIFICACIONES", PAD, ny, 18.0, &ui.faint);
+        if !st.notifs.is_empty() { ui.text_r(&ui.f.small, &st.notifs.len().to_string(), W - PAD, ny, 18.0, &ui.faint); }
+        let ly = ny + 26.0;
+        if st.ready && !st.access {
+            ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 30.0, W, 50.0, &ui.wa(0.4));
+            ui.text_c(&ui.f.sub, "Para ver aquí los avisos del móvil,", W / 2.0, ly + 88.0, 18.0, &ui.dim);
+            ui.text_c(&ui.f.sub, "macbar necesita leer las notificaciones", W / 2.0, ly + 106.0, 18.0, &ui.dim);
+            pbutton(ui, rect(W / 2.0 - 70.0, ly + 136.0, W / 2.0 + 70.0, ly + 168.0), None, "Dar permiso", 20, false);
+            return;
+        }
+        if st.ready && st.notifs.is_empty() {
+            let k = ez(t, 0.3, 0.5);
+            popup::push_alpha(ui.rt, k);
+            ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 40.0, W, 50.0, &ui.wa(0.3));
+            ui.text_c(&ui.f.sub, "Sin notificaciones del móvil", W / 2.0, ly + 98.0, 18.0, &ui.dim);
+            ui.rt_pop();
+            return;
+        }
+        // Los avisos que llegan con el widget abierto entran desde la derecha
+        let now = Instant::now();
+        for n in &st.notifs {
+            self.born.entry(n.id).or_insert(if self.seen { now } else { now - Duration::from_secs(5) });
+        }
+        self.born.retain(|id, _| st.notifs.iter().any(|n| n.id == *id));
+        self.seen = st.ready;
+        let mut yy = ly;
+        for (i, n) in st.notifs.iter().enumerate() {
+            if yy + NROW > H - PAD + 6.0 { break; }
+            let fresh = self.born.get(&n.id).map(|b| b.elapsed().as_secs_f32()).unwrap_or(9.0);
+            let kn = if fresh < 1.0 { self.moving = true; popup::ease_out(fresh / 0.45) } else { 1.0 };
+            let k = ez(t, 0.3 + i as f32 * 0.06, 0.4).min(kn);
+            let dx = if fresh < 1.0 { 40.0 * (1.0 - kn) } else { 0.0 };
+            let dy = 8.0 * (1.0 - ez(t, 0.3 + i as f32 * 0.06, 0.4));
+            let id = 100 + i as u32;
+            let hk = ui.heat(id).max(ui.heat(300 + i as u32));
+            popup::push_alpha(ui.rt, k);
+            let r = rect(PAD - 8.0 + dx, yy - 4.0 + dy, W - PAD + 8.0 + dx, yy + NROW - 8.0 + dy);
+            unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 12.0), &ui.wa(0.05 + 0.05 * hk)); }
+            let x = PAD + 4.0 + dx;
+            ui.text(&ui.f.lbl, &trunc(&n.title, 26), x, yy + 2.0 + dy, 20.0, &ui.white);
+            let (l1, l2) = two_lines(&n.body, 38);
+            ui.text(&ui.f.sub, &l1, x, yy + 21.0 + dy, 17.0, &ui.dim);
+            if !l2.is_empty() { ui.text(&ui.f.sub, &l2, x, yy + 37.0 + dy, 17.0, &ui.dim); }
+            ui.hit(r, id);
+            if hk > 0.05 {
+                // Al pasar el ratón: una cruz para quitarlo (también de Windows)
+                round_btn(ui, &ui.f.icon.clone(), G_CLOSE, W - PAD - 6.0 + dx, yy + 12.0 + dy, 12.0, 300 + i as u32, false);
+            } else {
+                ui.text_r(&ui.f.small, &ago(n.when), W - PAD + dx, yy + 2.0 + dy, 20.0, &ui.faint);
+            }
+            ui.rt_pop();
+            yy += NROW;
+        }
+    }
+    fn click(&mut self, id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
+        match id? {
+            10 => Some(Box::new(|| sys::open("sms:"))),
+            11 => Some(Box::new(|| sys::open("tel:"))),
+            12 | 13 | 100..=199 => Some(Box::new(|| sys::open("ms-phone:"))),
+            14 => Some(Box::new(crate::phone::pick_wallpaper)),
+            15 => { self.sync_at = Some(Instant::now()); crate::phone::PHONE_NOW.store(true, Ordering::Relaxed); None }
+            20 => Some(Box::new(crate::phone::ask_access)),
+            i @ 30..=32 => {
+                let p = crate::phone::PHONE.lock().unwrap().photos.get((i - 30) as usize).map(|p| p.path.clone())?;
+                Some(Box::new(move || sys::open(&p)))
+            }
+            i @ 300..=399 => {
+                let nid = crate::phone::PHONE.lock().unwrap().notifs.get((i - 300) as usize).map(|n| n.id)?;
+                Some(Box::new(move || crate::phone::dismiss(nid)))
+            }
+            _ => None,
+        }
+    }
+    fn animating(&self, t: f32) -> bool { t < 1.3 || self.moving || crate::phone::PHONE.lock().unwrap().running }
+    fn frame_ms(&self) -> u32 { 50 }
+    fn smooth(&self) -> bool { self.moving }
 }

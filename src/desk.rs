@@ -13,15 +13,15 @@ const TIMER_FRAME: usize = 2;
 const TIMER_FADE: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Calendar, Weather, Music, System, Storage, Projects }
-const ALL: [Kind; 6] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects];
+pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone }
+const ALL: [Kind; 7] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone];
 
 impl Kind {
     fn key(self) -> &'static str {
-        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos" }
+        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil" }
     }
     fn label(self) -> &'static str {
-        match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música y letra", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos" }
+        match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)" }
     }
 }
 
@@ -314,6 +314,8 @@ fn place(k: Kind, order: usize) {
         Kind::Calendar => (x3, y0), Kind::Storage => (x3, y0 + h_of(Kind::Calendar) + gap),
         Kind::Music => (x2, y0), Kind::Weather => (x2, y0 + h_of(Kind::Music) + gap),
         Kind::System => (x1, y0), Kind::Projects => (x1, y0 + h_of(Kind::System) + gap),
+        // El del móvil, vertical: una columna más a la izquierda
+        Kind::Phone => (x1 - gap - w_of(Kind::Phone), y0),
     };
     let (x, y) = ini_get(&ini(), &pos_key(k)).and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).unwrap_or(def);
     create(k, x, y, w_of(k), h_of(k), order);
@@ -328,6 +330,7 @@ pub fn size(k: Kind) -> (f32, f32) {
         Kind::Weather => (640.0, 344.0),
         Kind::System => (540.0, 360.0),
         Kind::Projects => (540.0, 460.0),
+        Kind::Phone => (330.0, 780.0),
     }
 }
 

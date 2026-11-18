@@ -21,7 +21,13 @@ const WM_TRAY_READY: u32 = WM_USER + 30;
 
 /// Icono tal como lo ve la barra: nombre (tooltip) y su dibujo (bitmap del ejecutable o glifo del sistema).
 #[derive(Clone)]
-struct Item { name: String, short: String, icon: Option<Arc<Vec<u8>>>, glyph: Option<&'static str>, host: Option<trayhost::TrayIcon> }
+struct Item { name: String, short: String, icon: Option<Arc<Vec<u8>>>, glyph: Option<&'static str>, host: Option<trayhost::TrayIcon>, own: bool }
+
+/// El icono de la propia macbar va siempre el primero: abre su menú (widgets, inicio con Windows, configuración, salir).
+fn with_own(mut v: Vec<Item>) -> Vec<Item> {
+    v.insert(0, Item { name: "macbar".into(), short: "macbar".into(), icon: None, glyph: Some("\u{E713}"), host: None, own: true });
+    v
+}
 
 /// Iconos ocultos desde el receptor propio: instantáneo, con su dibujo y su clic reales.
 fn host_items() -> Option<Vec<Item>> {
@@ -35,7 +41,7 @@ fn host_items() -> Option<Vec<Item>> {
             if name.is_empty() { name = h.exe.rsplit('\\').next().unwrap_or("").trim_end_matches(".exe").to_string(); }
         }
         let glyph = if h.px.is_none() { system_glyph(&name).or(Some("\u{E71D}")) } else { None };
-        Item { short: short_name(&name), name, icon: h.px.clone(), glyph, host: Some(h) }
+        Item { short: short_name(&name), name, icon: h.px.clone(), glyph, host: Some(h), own: false }
     }).collect())
 }
 
@@ -252,16 +258,16 @@ fn worker(rx: std::sync::mpsc::Receiver<TJob>) {
                     let icon = if glyph.is_some() { None } else {
                         icon_cache.entry(short.clone()).or_insert_with(|| exe_for(n, &procs).and_then(|p| exe_icon(&p)).map(Arc::new)).clone()
                     };
-                    Item { name: n.clone(), short, icon, glyph: glyph.or(Some("\u{E71D}")), host: None }
+                    Item { name: n.clone(), short, icon, glyph: glyph.or(Some("\u{E71D}")), host: None, own: false }
                 }).collect();
-                *ITEMS.lock().unwrap() = items;
+                *ITEMS.lock().unwrap() = with_own(items);
                 unsafe { let _ = PostMessageW(Some(HWND(TR_HWND.load(Ordering::Relaxed) as _)), WM_TRAY_READY, WPARAM(0), LPARAM(0)); }
             }
             TJob::Click(idx, right) => {
                 let Some(els) = open_invisible(&uia) else { close_invisible(Duration::from_millis(800)); continue };
                 // Se busca por posición y se confirma por nombre (los iconos pueden haber cambiado)
                 let want = ITEMS.lock().unwrap().get(idx).map(|i| i.name.clone()).unwrap_or_default();
-                let el = els.iter().find(|(n, _)| *n == want).or_else(|| els.get(idx)).map(|(_, e)| e.clone());
+                let el = els.iter().find(|(n, _)| *n == want).or_else(|| els.get(idx.saturating_sub(1))) /* el 0 es el de macbar */.map(|(_, e)| e.clone());
                 if let Some(el) = el {
                     unsafe {
                         if right {
@@ -298,7 +304,7 @@ pub fn toggle(anchor_right: i32) {
     TR.with(|t| if let Some(t) = t.borrow_mut().as_mut() { t.anchor_right = anchor_right; t.return_to = last_fg(); });
     // Con el receptor propio los iconos ya están aquí: se abre al instante
     if let Some(items) = host_items() {
-        *ITEMS.lock().unwrap() = items;
+        *ITEMS.lock().unwrap() = with_own(items);
         show_now();
         return;
     }
@@ -474,6 +480,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_LBUTTONUP | WM_RBUTTONUP => {
                 if let Some(i) = item_at(hwnd, lp) {
                     let right = msg == WM_RBUTTONUP;
+                    if ITEMS.lock().unwrap().get(i).is_some_and(|it| it.own) {
+                        hide_ex(false);
+                        crate::macbar_menu();
+                        return LRESULT(0);
+                    }
                     let host = ITEMS.lock().unwrap().get(i).and_then(|it| it.host.clone());
                     match host {
                         // Icono del receptor propio: el clic va directo a la app, como desde la barra de tareas
