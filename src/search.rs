@@ -620,6 +620,13 @@ impl SearchPanel {
             if let Some(s) = search_extra::timer_secs(&q) {
                 list.push((Item { cat: Cat::Cmd, title: i18n::tf("Temporizador de {}", &[&live::mmss(s)]), sub: i18n::t("Intro para empezar").into(), target: format!("timer:{s}"), icon: None, score: 0 }, Sec::Best));
             }
+            // uuid, contraseña, b64, ts, ip, lorem
+            for (title, sub, copy) in search_extra::dev_tools(&q) {
+                list.push((Item { cat: Cat::Calc, title, sub, target: copy, icon: None, score: 0 }, Sec::Best));
+            }
+            if let Some(s) = search_extra::caffeine_secs(&q) {
+                list.push((Item { cat: Cat::Cmd, title: i18n::tf("Cafeína durante {}", &[&live::mmss(s)]), sub: i18n::t("El equipo no se dormirá hasta entonces").into(), target: format!("caf:{s}"), icon: None, score: 0 }, Sec::Best));
+            }
             if let Some(c) = search_extra::color_of(&q) {
                 let hex = format!("#{:02X}{:02X}{:02X}", c.0, c.1, c.2);
                 list.push((Item { cat: Cat::Color, title: hex.clone(), sub: format!("rgb({}, {}, {})", c.0, c.1, c.2), target: hex, icon: Some(Arc::new(search_extra::swatch(c, ICON_PX))), score: 0 }, Sec::Best));

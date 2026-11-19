@@ -301,6 +301,132 @@ pub fn timer_secs(q: &str) -> Option<u32> {
     (total > 0 && total <= 24 * 3600).then_some(total as u32)
 }
 
+/// «cafeína 2 h», «despierto 30 min»: segundos que hay que mantener el equipo despierto.
+pub fn caffeine_secs(q: &str) -> Option<u32> {
+    let q = q.trim().to_lowercase();
+    let rest = ["cafeína", "cafeina", "caffeine", "despierto"].iter().find_map(|k| q.strip_prefix(k))?.trim();
+    if rest.is_empty() { return None; }
+    timer_secs(&format!("timer {rest}")).filter(|s| *s >= 60)
+}
+
+// ---------------------------------------------------------------- utilidades de desarrollador
+/// Bytes aleatorios del generador criptográfico del sistema (contraseñas y UUID).
+fn os_random(buf: &mut [u8]) {
+    use windows::Win32::Security::Cryptography::*;
+    unsafe { let _ = BCryptGenRandom(None, buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG); }
+}
+
+fn rand64() -> u64 { let mut b = [0u8; 8]; os_random(&mut b); u64::from_le_bytes(b) }
+
+fn uuid4() -> String {
+    let (a, b) = (rand64(), rand64());
+    let a = (a & 0xFFFF_FFFF_FFFF_0FFF) | 0x4000;
+    let b = (b & 0x3FFF_FFFF_FFFF_FFFF) | 0x8000_0000_0000_0000;
+    format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xFFFF, a & 0xFFFF, b >> 48, b & 0xFFFF_FFFF_FFFF)
+}
+
+fn password(n: usize) -> String {
+    // Sin caracteres que se confunden (0/O, 1/l/I)
+    const CH: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789-_.!?#";
+    loop {
+        // Muestreo por rechazo: sin sesgo hacia los primeros caracteres
+        let lim = (256 / CH.len() * CH.len()) as u8;
+        let p: String = (0..n).map(|_| loop { let mut b = [0u8; 1]; os_random(&mut b); if b[0] < lim { break CH[b[0] as usize % CH.len()] as char; } }).collect();
+        // Que tenga de todo: minúscula, mayúscula, cifra y símbolo
+        if p.chars().any(|c| c.is_ascii_lowercase()) && p.chars().any(|c| c.is_ascii_uppercase()) && p.chars().any(|c| c.is_ascii_digit()) && p.chars().any(|c| !c.is_alphanumeric()) { return p; }
+    }
+}
+
+const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 { if i <= c.len() { out.push(B64[(n >> (18 - 6 * i) & 63) as usize] as char); } else { out.push('='); } }
+    }
+    out
+}
+
+pub fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    let s: Vec<u8> = s.trim().bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let s = s.iter().map(|&b| match b { b'-' => b'+', b'_' => b'/', x => x }).collect::<Vec<u8>>();
+    let body: Vec<u8> = s.iter().copied().take_while(|&b| b != b'=').collect();
+    if body.is_empty() || s[body.len()..].iter().any(|&b| b != b'=') || body.len() % 4 == 1 { return None; }
+    let mut out = Vec::new();
+    for c in body.chunks(4) {
+        let mut n = 0u32;
+        for (i, &b) in c.iter().enumerate() { n |= (B64.iter().position(|&x| x == b)? as u32) << (18 - 6 * i); }
+        for i in 0..c.len() - 1 { out.push((n >> (16 - 8 * i)) as u8); }
+    }
+    Some(out)
+}
+
+/// Días desde 1970-01-01 a (año, mes, día) (algoritmo de Howard Hinnant).
+fn civil(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+pub fn ts_text(secs: i64) -> String {
+    let (y, m, d) = civil(secs.div_euclid(86_400));
+    let r = secs.rem_euclid(86_400);
+    format!("{d:02}/{m:02}/{y} {:02}:{:02}:{:02} UTC", r / 3600, r / 60 % 60, r % 60)
+}
+
+fn local_ip() -> Option<String> {
+    // Conectar un socket UDP no manda nada: solo elige la interfaz de salida
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("8.8.8.8:80").ok()?;
+    Some(s.local_addr().ok()?.ip().to_string())
+}
+
+/// Utilidades al estilo de Raycast: (título, subtítulo, texto que se copia con Intro).
+pub fn dev_tools(q: &str) -> Vec<(String, String, String)> {
+    let t = q.trim();
+    let low = t.to_lowercase();
+    let (cmd, arg) = match low.split_once(' ') { Some((c, _)) => (c.to_string(), t[c.len()..].trim().to_string()), None => (low.clone(), String::new()) };
+    let mut out = Vec::new();
+    let copy = i18n::t("Intro para copiar").to_string();
+    match cmd.as_str() {
+        "uuid" | "guid" if arg.is_empty() => { let u = uuid4(); out.push((u.clone(), format!("UUID v4 · {copy}"), u)); }
+        "contraseña" | "contrasena" | "password" | "pass" | "clave" => {
+            let n = arg.parse::<usize>().unwrap_or(20).clamp(8, 64);
+            let p = password(n);
+            out.push((p.clone(), i18n::tf("Contraseña de {} caracteres · no se guarda en el historial", &[&n]), p));
+        }
+        "b64" | "base64" if !arg.is_empty() => {
+            let e = b64_encode(arg.as_bytes());
+            out.push((e.clone(), format!("Base64 · {copy}"), e));
+            if let Some(d) = b64_decode(&arg).and_then(|v| String::from_utf8(v).ok()).filter(|d| !d.chars().any(|c| c.is_control() && c != '\n')) {
+                out.push((d.clone(), format!("{} · {copy}", i18n::t("Base64 decodificado")), d));
+            }
+        }
+        "ts" | "timestamp" | "unix" => match arg.parse::<i64>() {
+            Ok(n) => { let secs = if n.abs() > 100_000_000_000 { n / 1000 } else { n }; let txt = ts_text(secs); out.push((txt.clone(), format!("{} · {copy}", i18n::t("Fecha del timestamp")), txt)); }
+            Err(_) if arg.is_empty() => {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+                out.push((now.to_string(), format!("{} · {}", i18n::t("Timestamp de ahora"), ts_text(now)), now.to_string()));
+            }
+            _ => {}
+        },
+        "ip" if arg.is_empty() => if let Some(ip) = local_ip() { out.push((ip.clone(), format!("{} · {copy}", i18n::t("IP local")), ip)); },
+        "lorem" => {
+            let l = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
+            out.push(("Lorem ipsum dolor sit amet…".into(), format!("{} · {copy}", i18n::t("Texto de relleno")), l.into()));
+        }
+        _ => {}
+    }
+    out
+}
+
 // ---------------------------------------------------------------- comandos del sistema
 /// (código, nombre, palabras clave en español, en inglés, glifo)
 pub const CMDS: &[(&str, &str, &str, &str, &str)] = &[
@@ -311,6 +437,9 @@ pub const CMDS: &[(&str, &str, &str, &str, &str)] = &[
     ("shot", "Recortar la pantalla", "captura recorte pantallazo recortes", "screenshot snip capture", "\u{E722}"),
     ("desktop", "Mostrar el escritorio", "escritorio minimizar todo", "show desktop", "\u{E7F4}"),
     ("trash", "Vaciar la papelera", "papelera vaciar", "empty trash recycle bin", "\u{E74D}"),
+    ("caffeine", "Cafeína: mantener el equipo despierto", "cafeina despierto no dormir suspension pantalla encendida", "caffeine keep awake amphetamine", "\u{EC32}"),
+    ("pomodoro", "Pomodoro: 25 min de concentración", "pomodoro concentracion foco estudiar trabajar", "pomodoro focus study", "\u{E916}"),
+    ("picker", "Cuentagotas: copiar un color de la pantalla", "cuentagotas color pipeta hex selector", "color picker eyedropper hex", "\u{E790}"),
     ("present", "Modo presentación", "presentacion no molestar silencio", "presentation do not disturb", "\u{E7F4}"),
     ("taskmgr", "Administrador de tareas", "administrador tareas procesos", "task manager processes", "\u{E9D9}"),
     ("restart", "Reiniciar el equipo…", "reiniciar", "restart reboot", "\u{E72C}"),
@@ -319,6 +448,8 @@ pub const CMDS: &[(&str, &str, &str, &str, &str)] = &[
 
 pub fn run_cmd(code: &str) {
     if let Some(s) = code.strip_prefix("timer:") { if let Ok(n) = s.parse() { live::timer_start(n); } return; }
+    // «cafeína 2 h»: despierto durante ese rato
+    if let Some(s) = code.strip_prefix("caf:") { if let Ok(n) = s.parse::<u32>() { live::caffeine_set(true, Some(n / 60)); } return; }
     match code {
         "lock" => sys::lock(),
         "sleep" => sys::sleep(),
@@ -329,6 +460,9 @@ pub fn run_cmd(code: &str) {
         // Sin «no preguntar»: Windows pide confirmación antes de vaciarla
         "trash" => unsafe { let _ = windows::Win32::UI::Shell::SHEmptyRecycleBinW(Some(bar_hwnd()), windows::core::PCWSTR::null(), 0); },
         "present" => crate::profiles::toggle_present(),
+        "caffeine" => live::caffeine_toggle(),
+        "pomodoro" => live::pomodoro_start(),
+        "picker" => crate::pick_color(),
         "taskmgr" => sys::open_args("taskmgr.exe", ""),
         "restart" => if sys::ask(bar_hwnd(), i18n::t("¿Reiniciar el equipo ahora?")) { sys::restart(); },
         "shutdown" => if sys::ask(bar_hwnd(), i18n::t("¿Apagar el equipo ahora?")) { sys::shutdown(); },
@@ -425,6 +559,32 @@ mod tests {
         assert!(convert("10 km a kg").is_none());
         assert!(convert("hola a todos").is_none());
     }
+    #[test]
+    fn dev_utilities() {
+        assert_eq!(b64_encode(b"hola"), "aG9sYQ==");
+        assert_eq!(b64_encode(b"macbar!"), "bWFjYmFyIQ==");
+        assert_eq!(b64_decode("aG9sYQ==").unwrap(), b"hola");
+        assert_eq!(b64_decode("aG9sYQ").unwrap(), b"hola");
+        assert!(b64_decode("a").is_none());
+        assert_eq!(ts_text(0), "01/01/1970 00:00:00 UTC");
+        assert_eq!(ts_text(1_700_000_000), "14/11/2023 22:13:20 UTC");
+        let u = uuid4();
+        assert_eq!(u.len(), 36);
+        assert_eq!(&u[14..15], "4");
+        assert!(looks_secret(&password(20)));
+        assert_eq!(dev_tools("ts 1700000000000")[0].0, "14/11/2023 22:13:20 UTC");
+        assert!(dev_tools("uuid algo").is_empty());
+    }
+
+    #[test]
+    fn caffeine_durations() {
+        assert_eq!(caffeine_secs("cafeína 2h"), Some(7200));
+        assert_eq!(caffeine_secs("despierto 30 min"), Some(1800));
+        assert_eq!(caffeine_secs("cafeina 45"), Some(2700));
+        assert_eq!(caffeine_secs("cafeína"), None);
+        assert_eq!(caffeine_secs("caf 2h"), None);
+    }
+
     #[test]
     fn timers_and_colors() {
         assert_eq!(timer_secs("5 min"), Some(300));

@@ -47,6 +47,7 @@ mod i18n_tabla;
 mod live;
 mod menus;
 mod phone;
+mod picker;
 mod popup;
 mod search;
 mod search_extra;
@@ -81,6 +82,7 @@ impl Mode {
             Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
+            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34,
         }
     }
 }
@@ -120,6 +122,9 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         Saver(on) => ("\u{EBB6}", if on { i18n::t("Ahorro de batería activado").into() } else { i18n::t("Ahorro de batería desactivado").into() }, false),
         Wifi => ("\u{E701}", trunc(&i18n::tf("Conectado a {}", &[&*live::WIFI_NAME.lock().unwrap()]), 34), false),
         Disk(_) => ("\u{EDA2}", i18n::t("Disco casi lleno").into(), true),
+        Pomo(focus, m) => (if focus { "\u{E916}" } else { "\u{EC32}" }, if focus { i18n::tf("A concentrarse · {} min", &[&m]) } else { i18n::tf("Descanso · {} min", &[&m]) }, false),
+        Caffeine(on) => ("\u{EC32}", if on { match live::caffeine_left() { Some(m) => i18n::tf("Cafeína: despierto {} min", &[&m]), None => i18n::t("Cafeína: el equipo no se dormirá").into() } } else { i18n::t("Cafeína desactivada").into() }, false),
+        Color(c) => ("\u{E790}", i18n::tf("{} copiado", &[&format!("#{:06X}", c & 0xFF_FFFF)]), false),
         Present(on) => ("\u{E7F4}", if on { i18n::t("Modo presentación: sin avisos").into() } else { i18n::t("Modo presentación desactivado").into() }, false),
         Usb(on) => { let l = live::USB_LETTER.load(Ordering::Relaxed) as char; ("\u{E88E}", if on { i18n::tf("USB conectado · {}:", &[&l]) } else { i18n::t("USB expulsado").into() }, false) }
     }
@@ -150,6 +155,9 @@ pub const BAR_THEME_IMPORT: u32 = 71;
 pub const BAR_PROFILE0: u32 = 80;
 pub const BAR_PROFILES_DIR: u32 = 84;
 pub const BAR_PRESENT: u32 = 85;
+pub const BAR_CAFFEINE: u32 = 88;
+pub const BAR_PICKER: u32 = 89;
+pub const BAR_POMODORO: u32 = 90;
 /// Posición: arriba 86, abajo 87
 pub const BAR_POS_TOP: u32 = 86;
 pub const BAR_POS_BOTTOM: u32 = 87;
@@ -347,7 +355,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine,
 }
 
 impl Act {
@@ -428,6 +436,7 @@ struct Gfx {
     round_cap: Option<ID2D1StrokeStyle>,
     glide: (D2D_RECT_F, f32),
     clock_roll: Roll,
+    timer_roll: std::cell::RefCell<Roll>,
     temp_roll: Roll,
     morph: HashMap<Act, Morph>,
     play_state: (bool, Instant),
@@ -1023,11 +1032,29 @@ fn bar_action(hwnd: HWND, id: u32) {
         i if (BAR_PROFILE0..BAR_PROFILE0 + 3).contains(&i) => profiles::choose((i - BAR_PROFILE0) as usize),
         BAR_PROFILES_DIR => profiles::open_folder(),
         BAR_PRESENT => profiles::toggle_present(),
+        BAR_CAFFEINE => live::caffeine_toggle(),
+        BAR_PICKER => pick_color(),
+        BAR_POMODORO => if live::POMO.load(Ordering::Relaxed) != 0 { live::timer_stop() } else { live::pomodoro_start() },
         BAR_POS_TOP => set_bar_bottom(false),
         BAR_POS_BOTTOM => set_bar_bottom(true),
         i if (BAR_LANG0..BAR_LANG0 + 3).contains(&i) => { i18n::set_mode((i - BAR_LANG0) as i8); desk::repaint_all(); unsafe { let _ = InvalidateRect(Some(hwnd), None, false); } }
         _ => {}
     }
+}
+
+/// Cuentagotas: elige un color de la pantalla, lo copia en hexadecimal y lo enseña en la isla.
+pub(crate) fn pick_color() {
+    std::thread::spawn(|| {
+        // Un respiro para que se cierre el buscador o el menú que lo lanzó
+        std::thread::sleep(Duration::from_millis(160));
+        if let Some((r, g, b)) = picker::pick() {
+            let c = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+            deskw::copy_text(&format!("#{c:06X}"));
+            // Después del aviso de «Copiado», para que se quede el del color
+            std::thread::sleep(Duration::from_millis(60));
+            live::show(live::Hud::Color(c), 2600);
+        }
+    });
 }
 
 /// Acciones directas (sin menú).
@@ -1037,6 +1064,7 @@ fn run(a: Act) {
         Act::Claude => open_claude(),
         Act::Search => search::toggle(),
         Act::TimerStop => live::timer_stop(),
+        Act::Caffeine => live::caffeine_toggle(),
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
         Act::ShelfShare => {
@@ -1712,7 +1740,10 @@ fn paint(hwnd: HWND) {
             };
             let media_compact = if timer.is_some() { 4.0 + 22.0 + 12.0 + count_w + 13.0 } else { 4.0 + 22.0 + 12.0 + 22.0 + 13.0 };
             let timer_compact = 12.0 + 16.0 + 10.0 + count_w + 14.0;
-            let timer_full = timer_compact + p.width(&g.f.small, i18n::t("Temporizador")) + 8.0 + 30.0;
+            let pomo = live::POMO.load(Ordering::Relaxed);
+            let timer_lbl = match pomo { 1 => i18n::t("Concentración"), 2 => i18n::t("Descanso"), _ => i18n::t("Temporizador") };
+            let pomo_dots = if pomo != 0 { 4.0 * 7.0 + 6.0 } else { 0.0 };
+            let timer_full = timer_compact + p.width(&g.f.small, timer_lbl) + 8.0 + pomo_dots + 30.0;
             const HUD_W: f32 = 250.0;
             // Bandeja de archivos: iconos subidos a la GPU solo cuando cambia
             let shelf_n = live::SHELF.lock().unwrap().len();
@@ -1781,10 +1812,22 @@ fn paint(hwnd: HWND) {
                     let tn = g.tint_now;
                     let te = p.vgrad(py, pb, rgba(tn[0], tn[1], tn[2], 0.42), rgba(tn[0], tn[1], tn[2], 0.08));
                     p.pill(ir_draw, &black, Some(&te));
+                } else if let Some(col) = match mode {
+                    Mode::Hud(live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true)) => Some((1.0, 0.36, 0.33)),
+                    Mode::Hud(live::Hud::TimerDone | live::Hud::Mem(_) | live::Hud::Disk(_)) => Some((1.0, 0.62, 0.22)),
+                    Mode::Timer if timer.is_some_and(|(l, _)| l <= 10) && live::POMO.load(Ordering::Relaxed) == 0 => Some((1.0, 0.36, 0.33)),
+                    _ => None,
+                } {
+                    // Alertas: el borde respira con el color del aviso
+                    animating = true;
+                    let beat = 0.5 + 0.5 * (g.t0.elapsed().as_secs_f32() * 3.2).sin();
+                    let eb = p.vgrad(py, pb, rgba(col.0, col.1, col.2, 0.30 + 0.40 * beat), rgba(col.0, col.1, col.2, 0.10 + 0.15 * beat));
+                    p.pill(ir_draw, &black, Some(&eb));
                 } else { p.pill(ir_draw, &black, Some(&isl_edge)); }
                 rt.PopLayer();
             }
             rt.PushAxisAlignedClip(&rect(ix + 1.0, py, ix + iw - 1.0, pb), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            let animating_cell = std::cell::Cell::new(false);
             let draw_mode = |m: Mode, a: f32, live: bool, hits: &mut Vec<(D2D_RECT_F, Act)>, eq_rect: &mut Option<D2D_RECT_F>| {
                 if a <= 0.01 { return; }
                 popup::push_alpha(&rt, a);
@@ -1860,7 +1903,11 @@ fn paint(hwnd: HWND) {
                         let t = open_t(Mode::Timer);
                         // Anillo de progreso (como el temporizador de la Dynamic Island): se vacía según pasa el tiempo
                         let (rcx, rr) = (ix + 20.0, 7.5);
-                        let ring_bg = p.brush(rgba(1.0, 0.62, 0.22, 0.25));
+                        // Descanso en verde; los últimos 10 s de un temporizador normal, en rojo
+                        let last10 = pomo == 0 && timer.is_some_and(|(l, _)| l <= 10);
+                        let tc = if pomo == 2 { (0.30, 0.85, 0.45) } else if last10 { (1.0, 0.36, 0.33) } else { (1.0, 0.62, 0.22) };
+                        let orange = p.brush(rgba(tc.0, tc.1, tc.2, 1.0));
+                        let ring_bg = p.brush(rgba(tc.0, tc.1, tc.2, 0.25));
                         rt.DrawEllipse(&D2D1_ELLIPSE { point: Vector2 { X: rcx, Y: cy }, radiusX: rr, radiusY: rr }, &ring_bg, 2.2, None);
                         if let Some((left, total)) = timer {
                             let fr = (left as f32 / total.max(1) as f32).clamp(0.0, 1.0);
@@ -1880,11 +1927,25 @@ fn paint(hwnd: HWND) {
                                 }
                             }
                         }
-                        p.text(&g.f.title, &count, ix + iw - 14.0 - count_w, &orange, None);
+                        // Los segundos ruedan hacia arriba al cambiar, como en el temporizador del iPhone
+                        if g.timer_roll.borrow_mut().draw(&p, &rt, &cmat, &g.f.title, &count, ix + iw - 14.0 - count_w, sy, sb, &orange, None) { animating_cell.set(true); }
                         if t > 0.3 {
                             let k = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
                             let da = p.brush(rgba(1.0, 1.0, 1.0, 0.6 * k));
-                            p.text(&g.f.small, i18n::t("Temporizador"), ix + 12.0 + 16.0 + 10.0, &da, None);
+                            let lx = ix + 12.0 + 16.0 + 10.0;
+                            p.text(&g.f.small, timer_lbl, lx, &da, None);
+                            // Pomodoro: cuatro puntos, uno por bloque de concentración de la tanda
+                            if pomo != 0 {
+                                let done = live::POMO_DONE.load(Ordering::Relaxed) % 4;
+                                let x0 = lx + p.width(&g.f.small, timer_lbl) + 10.0;
+                                for j in 0..4u8 {
+                                    let on = j < done || (j == done && pomo == 1);
+                                    let al = if j == done && pomo == 1 { 0.55 + 0.45 * (g.t0.elapsed().as_secs_f32() * 2.0).sin().abs() } else if on { 1.0 } else { 0.22 };
+                                    if j == done && pomo == 1 { animating_cell.set(true); }
+                                    let e = D2D1_ELLIPSE { point: Vector2 { X: x0 + j as f32 * 7.0, Y: cy }, radiusX: 2.4, radiusY: 2.4 };
+                                    rt.FillEllipse(&e, &p.brush(rgba(tc.0, tc.1, tc.2, al * k)));
+                                }
+                            }
                             let sx = ix + iw - 14.0 - count_w - 8.0 - 26.0;
                             let wa = p.brush(rgba(1.0, 1.0, 1.0, 0.96 * k));
                             p.glyph(&g.f.icon_s, "\u{E711}", sx, 26.0, &wa, None);
@@ -1926,7 +1987,8 @@ fn paint(hwnd: HWND) {
                         let (icon_b, fill_b) = match hh {
                             live::Hud::TimerDone => (&orange, &orange),
                             live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn => (&green, &green),
-                            live::Hud::MicOn | live::Hud::Disk(_) | live::Hud::Saver(true) => (&orange, &orange),
+                            live::Hud::MicOn | live::Hud::Disk(_) | live::Hud::Saver(true) | live::Hud::Pomo(true, _) | live::Hud::Caffeine(true) => (&orange, &orange),
+                            live::Hud::Pomo(false, _) => (&green, &green),
                             live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true) => (&red, &red),
                             live::Hud::Claude(pc) if pc >= 90 => (&orange, &orange),
                             live::Hud::Mem(_) => (&orange, &orange),
@@ -1941,6 +2003,28 @@ fn paint(hwnd: HWND) {
                         if let Some(bmp) = shot_bmp {
                             rt.SetTransform(&cmat);
                             p.art(&bmp, ix + 8.0, cy - 11.0, 22.0, Some(5.0));
+                        } else if let live::Hud::Color(c) = hh {
+                            // Cuentagotas: una gota del color elegido con un aro fino
+                            let (r, gg, b) = (((c >> 16) & 255) as f32 / 255.0, ((c >> 8) & 255) as f32 / 255.0, (c & 255) as f32 / 255.0);
+                            let e = D2D1_ELLIPSE { point: Vector2 { X: icx, Y: icy }, radiusX: 8.0, radiusY: 8.0 };
+                            rt.FillEllipse(&e, &p.brush(rgba(r, gg, b, 1.0)));
+                            rt.DrawEllipse(&e, &p.brush(rgba(1.0, 1.0, 1.0, 0.35)), 1.2, None);
+                        } else if matches!(hh, live::Hud::Copied) {
+                            // Copiado: un círculo verde y una marca que se dibuja de un trazo
+                            let e = D2D1_ELLIPSE { point: Vector2 { X: icx, Y: icy }, radiusX: 8.5, radiusY: 8.5 };
+                            rt.FillEllipse(&e, &green);
+                            let k = if live { ((g.isl_mode_at.elapsed().as_secs_f32() - 0.08) / 0.30).clamp(0.0, 1.0) } else { 1.0 };
+                            if k < 1.0 { animating_cell.set(true); }
+                            let pts = [(icx - 4.0, icy + 0.2), (icx - 1.2, icy + 3.0), (icx + 4.2, icy - 3.0)];
+                            let l1 = ((pts[1].0 - pts[0].0).powi(2) + (pts[1].1 - pts[0].1).powi(2)).sqrt();
+                            let l2 = ((pts[2].0 - pts[1].0).powi(2) + (pts[2].1 - pts[1].1).powi(2)).sqrt();
+                            let d = ease_out(k) * (l1 + l2);
+                            let v = |a: (f32, f32)| Vector2 { X: a.0, Y: a.1 };
+                            let lerp = |a: (f32, f32), b: (f32, f32), t: f32| (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                            if d > 0.01 {
+                                rt.DrawLine(v(pts[0]), v(lerp(pts[0], pts[1], (d / l1).min(1.0))), &black, 2.0, g.round_cap.as_ref());
+                                if d > l1 { rt.DrawLine(v(pts[1]), v(lerp(pts[1], pts[2], ((d - l1) / l2).min(1.0))), &black, 2.0, g.round_cap.as_ref()); }
+                            }
                         } else if matches!(hh, live::Hud::Claude(_)) {
                             if let Some(geo) = &g.claude_geo {
                                 let k = 15.0 / 125.0;
@@ -1984,7 +2068,8 @@ fn paint(hwnd: HWND) {
                             }
                         }
                         if has_bar {
-                            let pct = format!("{}%", (hud_target * 100.0).round() as i32);
+                            // El número acompaña a la barra mientras se desliza (cuenta en vez de saltar)
+                            let pct = format!("{}%", (g.hud_val.clamp(0.0, 1.0) * 100.0).round() as i32);
                             let pw = p.width(&g.f.title, "100%");
                             let tr = ix + iw - 14.0;
                             p.text(&g.f.title, &pct, tr - p.width(&g.f.title, &pct), &white, None);
@@ -2025,6 +2110,7 @@ fn paint(hwnd: HWND) {
             // El contenido anterior se desvanece mientras entra el nuevo
             if let Some(pm) = g.isl_prev { draw_mode(pm, 1.0 - mode_k, false, &mut hits, &mut eq_rect); }
             draw_mode(mode, mode_k, true, &mut hits, &mut eq_rect);
+            if animating_cell.get() { animating = true; }
             rt.PopAxisAlignedClip();
             // Puntos de privacidad (como en macOS), junto a la isla: verde = cámara, naranja = micrófono
             let mut dx = ir.right + 9.0;
@@ -2121,6 +2207,8 @@ fn paint(hwnd: HWND) {
                 ("\u{E721}".into(), Act::Search, true),
                 (String::new(), Act::Claude, CLAUDE_UP.load(Ordering::Relaxed)),
             ]);
+            // Cafeína encendida: una taza a la izquierda de todo (clic = apagarla)
+            if live::caffeine_on() { icons.push(("\u{EC32}".into(), Act::Caffeine, true)); }
             // Uso semanal de Claude, en texto pegado a la derecha de su icono (p. ej. "36%")
             // El porcentaje "cuenta" hasta el valor nuevo en vez de saltar
             if let Some((pct, _)) = g.usage {
@@ -2167,6 +2255,8 @@ fn paint(hwnd: HWND) {
                     // Mismo tamaño visible para todos: cada glifo de Segoe Fluent tiene su propia caja
                     // (la flecha es pequeña, la batería ancha…), así que se escala por su tinta real
                     sc *= icon_norm(&p, &g.f.icon, &gl);
+                    // La taza de la cafeína entra creciendo con un pequeño rebote
+                    if act == Act::Caffeine { let k = appear("caffeine", &mut animating); sc *= 0.4 + 0.6 * ease_back(k); }
                     // Si el icono cambia (batería que sube, señal Wi-Fi, sin conexión…), el viejo se funde
                     // y el nuevo entra con un pequeño "pop"
                     let mo = g.morph.entry(act).or_insert_with(|| Morph { prev: gl.clone(), cur: gl.clone(), at: now - Duration::from_secs(5) });
@@ -2834,6 +2924,8 @@ fn restart_storm() -> bool {
 
 fn main() {
     if std::env::args().any(|a| a == "--statusline") { statusline_mode(); return; }
+    // Prueba del cuentagotas: `macbar --picker` lo abre y escribe el color elegido (nada si se cancela)
+    if std::env::args().any(|a| a == "--picker") { if let Some((r, g, b)) = picker::pick() { println!("#{r:02X}{g:02X}{b:02X}"); } return; }
     // Si algo falla (panic), queda escrito dónde, antes de que el proceso se cierre
     std::panic::set_hook(Box::new(|info| {
         let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
@@ -2942,7 +3034,7 @@ fn main() {
             app_prev: String::new(), app_at: Instant::now() - Duration::from_secs(5),
             isl_mode: Mode::Idle, isl_prev: None, isl_mode_at: Instant::now() - Duration::from_secs(5),
             last_hud: None, hud_val: 0.0, count_on: false, eq_visible: false, last_ac: battery().map(|b| b.1), isl_v: 0.0, tray_rot: 0.0, shelf_bmps: (u64::MAX, Vec::new()), hud_bmp: None, usage_disp: 0.0, low_warned: 100, full_warned: true, saver: None, disk_warned: false,
-            art_tint: [1.0; 3], tint_now: [1.0; 3], art_at: Instant::now() - Duration::from_secs(5), desk_x: -1.0, glide: (D2D_RECT_F::default(), 0.0), clock_roll: Roll::default(), temp_roll: Roll::default(), morph: HashMap::new(), play_state: (false, Instant::now() - Duration::from_secs(5)),
+            art_tint: [1.0; 3], tint_now: [1.0; 3], art_at: Instant::now() - Duration::from_secs(5), desk_x: -1.0, glide: (D2D_RECT_F::default(), 0.0), clock_roll: Roll::default(), timer_roll: Default::default(), temp_roll: Roll::default(), morph: HashMap::new(), play_state: (false, Instant::now() - Duration::from_secs(5)),
             round_cap,
         }));
 
@@ -2980,10 +3072,20 @@ fn main() {
             std::thread::spawn(|| {
                 *live::PHONE_NOTE.lock().unwrap() = ("WhatsApp".into(), "Mamá: ¿vienes a cenar?".into());
                 *live::WIFI_NAME.lock().unwrap() = "MiCasa_5G".into();
-                for h in [live::Hud::Phone, live::Hud::CamOn, live::Hud::MicOn, live::Hud::Wifi, live::Hud::Full, live::Hud::Saver(true), live::Hud::Disk(96), live::Hud::Volume(0.4, false), live::Hud::Bright(0.7), live::Hud::Power(80, true), live::Hud::Power(80, false), live::Hud::LowBat(9), live::Hud::Claude(68)] {
+                *live::CLIP.lock().unwrap() = "Hola mundo".into();
+                for h in [live::Hud::Copied, live::Hud::Color(0x4F8CFF), live::Hud::Pomo(true, 25), live::Hud::Pomo(false, 5), live::Hud::LowBat(9), live::Hud::Volume(0.4, false)] {
                     std::thread::sleep(Duration::from_secs(4));
                     live::show(h, 3000);
                 }
+                std::thread::sleep(Duration::from_secs(4));
+                live::caffeine_set(true, None);
+                std::thread::sleep(Duration::from_secs(4));
+                live::pomodoro_start();
+                std::thread::sleep(Duration::from_secs(6));
+                live::timer_start(14);
+                std::thread::sleep(Duration::from_secs(8));
+                live::timer_stop();
+                live::caffeine_set(false, None);
             });
         }
         // Reloj, batería e idioma: un timer lento

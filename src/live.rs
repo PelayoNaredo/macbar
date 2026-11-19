@@ -14,7 +14,10 @@ pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(b
     Mic(bool), Num(bool), Lang, Desk(u8, u8), Mem(u8), Profile(u8), Present(bool),
     /// Notificación nueva del móvil, cámara o micrófono que empiezan a usarse, batería llena, ahorro de
     /// batería, red Wi-Fi a la que se conecta y disco casi lleno
-    Phone, CamOn, MicOn, Full, Saver(bool), Wifi, Disk(u8) }
+    Phone, CamOn, MicOn, Full, Saver(bool), Wifi, Disk(u8),
+    /// Pomodoro: empieza un bloque (true = concentración, false = descanso) de tantos minutos;
+    /// cafeína encendida o apagada; color copiado con el cuentagotas
+    Pomo(bool, u8), Caffeine(bool), Color(u32) }
 
 /// Última notificación del móvil que se enseñó: (app, título)
 pub static PHONE_NOTE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
@@ -63,29 +66,128 @@ pub fn dismiss() { *HUD.lock().unwrap() = None; }
 /// (fin, duración total en segundos)
 static TIMER: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
 
-pub fn timer_start(secs: u32) {
+fn timer_set(secs: u32) {
     *TIMER.lock().unwrap() = Some((Instant::now() + Duration::from_secs(secs as u64), secs));
     unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
 }
 
+pub fn timer_start(secs: u32) {
+    POMO.store(0, Ordering::Relaxed);
+    timer_set(secs);
+}
+
 pub fn timer_stop() {
+    POMO.store(0, Ordering::Relaxed);
     *TIMER.lock().unwrap() = None;
     unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
 }
 
-/// Segundos que quedan y duración total. Si acaba de terminar, lo avisa y lo quita.
+// ---------------------------------------------------------------- pomodoro
+/// Fase del temporizador: 0 = normal, 1 = concentración, 2 = descanso.
+pub static POMO: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Bloques de concentración terminados en esta tanda (cada 4, descanso largo).
+pub static POMO_DONE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+pub const POMO_FOCUS: u32 = 25;
+pub const POMO_SHORT: u32 = 5;
+pub const POMO_LONG: u32 = 15;
+
+/// Minutos del descanso que toca tras terminar `done` bloques de concentración.
+pub fn pomo_break(done: u8) -> u32 { if done > 0 && done % 4 == 0 { POMO_LONG } else { POMO_SHORT } }
+
+pub fn pomodoro_start() {
+    POMO_DONE.store(0, Ordering::Relaxed);
+    POMO.store(1, Ordering::Relaxed);
+    timer_set(POMO_FOCUS * 60);
+    show(Hud::Pomo(true, POMO_FOCUS as u8), 2600);
+}
+
+/// Segundos que quedan y duración total. Si acaba de terminar, lo avisa y lo quita
+/// (o, en un pomodoro, pasa al bloque siguiente).
 pub fn timer_left() -> Option<(u32, u32)> {
     let mut t = TIMER.lock().unwrap();
     let (end, total) = (*t)?;
     let now = Instant::now();
     if now >= end {
+        let beep = || unsafe { let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK); };
+        match POMO.load(Ordering::Relaxed) {
+            1 => {
+                let done = POMO_DONE.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                let m = pomo_break(done);
+                POMO.store(2, Ordering::Relaxed);
+                *t = Some((now + Duration::from_secs(m as u64 * 60), m * 60));
+                drop(t);
+                show(Hud::Pomo(false, m as u8), 6000);
+                beep();
+                return Some((m * 60, m * 60));
+            }
+            2 => {
+                POMO.store(1, Ordering::Relaxed);
+                *t = Some((now + Duration::from_secs(POMO_FOCUS as u64 * 60), POMO_FOCUS * 60));
+                drop(t);
+                show(Hud::Pomo(true, POMO_FOCUS as u8), 6000);
+                beep();
+                return Some((POMO_FOCUS * 60, POMO_FOCUS * 60));
+            }
+            _ => {}
+        }
         *t = None;
         drop(t);
         show(Hud::TimerDone, 8000);
-        unsafe { let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONASTERISK); }
+        beep();
         return None;
     }
     Some(((end - now).as_secs_f32().ceil() as u32, total))
+}
+
+// ---------------------------------------------------------------- cafeína
+/// None = apagada; Some(None) = sin límite; Some(Some(fin)) = hasta esa hora.
+static CAFFEINE: Mutex<Option<Option<Instant>>> = Mutex::new(None);
+
+pub fn caffeine_on() -> bool { CAFFEINE.lock().unwrap().is_some() }
+
+/// Minutos que le quedan (None si no tiene límite o está apagada).
+pub fn caffeine_left() -> Option<u32> {
+    (*CAFFEINE.lock().unwrap()).flatten().map(|end| (end.saturating_duration_since(Instant::now()).as_secs_f32() / 60.0).ceil() as u32)
+}
+
+/// Enciende la cafeína (con límite en minutos o sin él) o la apaga con `None` en `on`.
+pub fn caffeine_set(on: bool, mins: Option<u32>) {
+    *CAFFEINE.lock().unwrap() = on.then(|| mins.map(|m| Instant::now() + Duration::from_secs(m as u64 * 60)));
+    caffeine_thread();
+    show(Hud::Caffeine(on), 2400);
+}
+
+pub fn caffeine_toggle() { caffeine_set(!caffeine_on(), None); }
+
+/// Un hilo propio mantiene el estado de ejecución (es por hilo) mientras dure la cafeína.
+fn caffeine_thread() {
+    use windows::Win32::System::Power::*;
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            let mut held = false;
+            loop {
+                let want = {
+                    let mut c = CAFFEINE.lock().unwrap();
+                    if matches!(*c, Some(Some(end)) if Instant::now() >= end) {
+                        *c = None;
+                        drop(c);
+                        show(Hud::Caffeine(false), 2400);
+                        false
+                    } else { c.is_some() }
+                };
+                if want != held {
+                    held = want;
+                    unsafe {
+                        if want { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED); }
+                        else { SetThreadExecutionState(ES_CONTINUOUS); }
+                        let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+        });
+    });
 }
 
 pub fn mmss(s: u32) -> String { if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) } }

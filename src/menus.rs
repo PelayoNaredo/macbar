@@ -336,6 +336,9 @@ pub fn bar_menu() -> Menu {
     }
     m.item(format!("      {}", t("Abrir la carpeta de perfiles…")), A::Bar(crate::BAR_PROFILES_DIR));
     m.check(t("Modo presentación (sin avisos ni widgets)"), crate::profiles::presenting(), A::Bar(crate::BAR_PRESENT));
+    m.check(t("Cafeína (no dejar que el equipo se duerma)"), crate::live::caffeine_on(), A::Bar(crate::BAR_CAFFEINE));
+    m.check(t("Pomodoro (25 min de concentración)"), crate::live::POMO.load(std::sync::atomic::Ordering::Relaxed) != 0, A::Bar(crate::BAR_POMODORO));
+    m.item(t("Cuentagotas de color"), A::Bar(crate::BAR_PICKER));
     // Tema: color de acento, y un archivo para compartirlo
     m.sep().info(t("Color de acento"));
     let ai = crate::profiles::accent_index();
