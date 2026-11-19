@@ -22,7 +22,7 @@ pub fn clip_start() {
             if private_clip() { continue; }
             let Some(t) = clip_text(4000) else { continue };
             let t = t.trim().to_string();
-            if t.is_empty() { continue; }
+            if t.is_empty() || looks_secret(&t) { continue; }
             let mut c = CLIPS.lock().unwrap();
             c.retain(|x| x.0 != t);
             c.insert(0, (t, deskdata::now_unix()));
@@ -31,7 +31,22 @@ pub fn clip_start() {
     }).ok();
 }
 
-pub fn clips() -> Vec<(String, u64)> { CLIPS.lock().unwrap().clone() }
+/// Lo copiado, salvo en modo presentación (la pantalla se está enseñando a otros).
+pub fn clips() -> Vec<(String, u64)> {
+    if crate::profiles::presenting() { return Vec::new(); }
+    CLIPS.lock().unwrap().clone()
+}
+
+/// ¿Parece una contraseña, clave o token? (una sola «palabra» de 16 a 200 caracteres que mezcla
+/// letras y cifras o símbolos, sin pinta de dirección ni de ruta): esas no se guardan nunca.
+fn looks_secret(s: &str) -> bool {
+    let n = s.chars().count();
+    if s.contains(char::is_whitespace) || !(16..=200).contains(&n) { return false; }
+    if s.contains("://") || s.starts_with("www.") || s.contains(":\\") || s.starts_with("\\\\") { return false; }
+    let has = |f: fn(&char) -> bool| s.chars().any(|c| f(&c));
+    let classes = [has(|c| c.is_ascii_lowercase()), has(|c| c.is_ascii_uppercase()), has(|c| c.is_ascii_digit()), has(|c| !c.is_alphanumeric())].iter().filter(|x| **x).count();
+    classes >= 3 || (classes == 2 && has(|c| c.is_ascii_digit()) && n >= 24)
+}
 
 /// ¿Lo copiado pide no entrar en historiales? (formatos estándar que ponen KeePass, 1Password, Proton Pass…)
 fn private_clip() -> bool {
@@ -425,6 +440,16 @@ mod tests {
         assert_eq!(color_of("#zzz"), None);
         let f = |s: &str| s.to_lowercase();
         assert!(emoji_matches("fue", f).iter().any(|e| e.0 == "🔥"));
+    }
+    #[test]
+    fn secrets() {
+        assert!(looks_secret("ghp_A1b2C3d4E5f6G7h8I9j0KlMnOpQr"));
+        assert!(looks_secret("sk-proj-9fK2mQx7Lp0aZ3vB8nC1"));
+        assert!(looks_secret("Contraseña#2026Segura!"));
+        assert!(!looks_secret("hola qué tal"));
+        assert!(!looks_secret("https://github.com/PelayoNaredo/macbar"));
+        assert!(!looks_secret("C:\\Users\\nared\\Desktop\\macbar"));
+        assert!(!looks_secret("supercalifragilistico"));
     }
     #[test]
     fn links() {
