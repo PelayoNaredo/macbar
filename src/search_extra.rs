@@ -388,6 +388,9 @@ fn local_ip() -> Option<String> {
     Some(s.local_addr().ok()?.ip().to_string())
 }
 
+/// Prefijo del texto a copiar que pide copiarlo como privado (fuera de cualquier historial).
+pub const SECRET: &str = "\u{1}secreto:";
+
 /// Utilidades al estilo de Raycast: (título, subtítulo, texto que se copia con Intro).
 pub fn dev_tools(q: &str) -> Vec<(String, String, String)> {
     let t = q.trim();
@@ -400,7 +403,7 @@ pub fn dev_tools(q: &str) -> Vec<(String, String, String)> {
         "contraseña" | "contrasena" | "password" | "pass" | "clave" => {
             let n = arg.parse::<usize>().unwrap_or(20).clamp(8, 64);
             let p = password(n);
-            out.push((p.clone(), i18n::tf("Contraseña de {} caracteres · no se guarda en el historial", &[&n]), p));
+            out.push((p.clone(), i18n::tf("Contraseña de {} caracteres · no se guarda en el historial", &[&n]), format!("{SECRET}{p}")));
         }
         "b64" | "base64" if !arg.is_empty() => {
             let e = b64_encode(arg.as_bytes());

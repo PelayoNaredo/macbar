@@ -1486,8 +1486,14 @@ impl Widget for ProjectsW {
     }
 }
 
+/// Copia texto marcado como privado: no entra en el historial de Windows (Win+V), ni en el portapapeles
+/// en la nube, ni lo leen los gestores de portapapeles que respetan la marca (el de macbar incluido).
+pub(crate) fn copy_secret(s: &str) { copy_with(s, true) }
+
 /// Copia texto al portapapeles (CF_UNICODETEXT).
-pub(crate) fn copy_text(s: &str) {
+pub(crate) fn copy_text(s: &str) { copy_with(s, false) }
+
+fn copy_with(s: &str, private: bool) {
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::*;
     let w: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1500,6 +1506,17 @@ pub(crate) fn copy_text(s: &str) {
                 std::ptr::copy_nonoverlapping(w.as_ptr(), p, w.len());
                 let _ = GlobalUnlock(h);
                 let _ = SetClipboardData(13, Some(HANDLE(h.0)));
+            }
+        }
+        if private {
+            // Formatos de marca: DWORD 0 = no guardar ni subir; el de exclusión basta con que exista
+            for name in [w!("CanIncludeInClipboardHistory"), w!("CanUploadToCloudClipboard"), w!("ExcludeClipboardContentFromMonitorProcessing")] {
+                let fmt = RegisterClipboardFormatW(name);
+                if fmt == 0 { continue; }
+                if let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, 4) {
+                    let p = GlobalLock(h) as *mut u32;
+                    if !p.is_null() { *p = 0; let _ = GlobalUnlock(h); let _ = SetClipboardData(fmt, Some(HANDLE(h.0))); }
+                }
             }
         }
         let _ = CloseClipboard();

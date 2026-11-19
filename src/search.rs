@@ -712,6 +712,8 @@ impl SearchPanel {
                 Cat::File | Cat::Folder if alt => sys::open_args("explorer.exe", &format!("/select,\"{}\"", it.target)),
                 Cat::File | Cat::Folder | Cat::Setting => sys::open(&it.target),
                 Cat::Web => sys::open(&format!("https://www.google.com/search?q={}", url_encode(&it.target))),
+                // Contraseñas generadas: se copian como privadas
+                Cat::Calc if it.target.starts_with(search_extra::SECRET) => deskw::copy_secret(&it.target[search_extra::SECRET.len()..]),
                 Cat::Calc | Cat::Clip | Cat::Emoji | Cat::Color => deskw::copy_text(&it.target),
                 Cat::Cmd => search_extra::run_cmd(&it.target),
                 Cat::Link => sys::open(&it.target),
