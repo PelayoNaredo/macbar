@@ -14,7 +14,7 @@ const WM_CC_STATE: u32 = WM_USER + 20;
 const TIMER_STATS: usize = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Hit { User, Settings, Wifi, Bt, Dark, Mute, Bright, Vol, Lock, Sleep, Restart, Shutdown }
+enum Hit { User, Settings, Wifi, Bt, Dark, Mute, Bright, Vol, App(u8), Stats, Proc(u8), Lock, Sleep, Restart, Shutdown }
 
 /// Estado que lee el hilo de trabajo (radios y brillo tardan; no pueden bloquear la interfaz).
 #[derive(Clone, Default)]
@@ -51,6 +51,11 @@ struct Cc {
     last_paint: Instant,
     /// Al abrir: los bloques entran en cascada (como el panel del tiempo).
     opened: Instant,
+    /// Apps que están sonando, con su volumen propio (mezclador)
+    apps: Vec<AppVol>,
+    /// Lista de procesos que más gastan (clic en CPU/RAM/Disco)
+    procs_open: bool,
+    procs: ProcSampler,
 }
 
 const TIMER_ANIM_CC: usize = 93;
@@ -93,6 +98,10 @@ fn read_dark() -> bool {
 }
 
 /// Cambia el tema de apps y sistema y avisa a Windows para que lo aplique al momento.
+/// Para el buscador: alterna modo claro/oscuro y silencio.
+pub(crate) fn toggle_dark() { set_dark(!read_dark()); }
+pub(crate) fn toggle_mute() { set_mute(!read_audio().1); }
+
 fn set_dark(dark: bool) {
     use windows::Win32::System::Registry::*;
     unsafe {
@@ -121,7 +130,7 @@ fn ram_load() -> f32 {
     unsafe { if GlobalMemoryStatusEx(&mut m).is_ok() { m.dwMemoryLoad as f32 } else { 0.0 } }
 }
 
-fn disk_used() -> f32 {
+pub(crate) fn disk_used() -> f32 {
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let (mut free, mut total) = (0u64, 0u64);
     unsafe {
@@ -204,7 +213,7 @@ fn radio_state(kind: windows::Devices::Radios::RadioKind) -> Option<bool> {
 }
 
 /// SSID de la red Wi-Fi conectada (WLAN API).
-fn wifi_ssid() -> String {
+pub(crate) fn wifi_ssid() -> String {
     use windows::Win32::NetworkManagement::WiFi::*;
     if sys::demo() { return "Casa".into(); }
     unsafe {
@@ -277,6 +286,156 @@ fn worker(rx: std::sync::mpsc::Receiver<Job>) {
 static CC_HWND: AtomicIsize = AtomicIsize::new(0);
 fn job(j: Job) { if let Some(tx) = JOBS.get() { let _ = tx.send(j); } }
 
+// ---------------------------------------------------------------- mezclador por app
+/// Una app que suena: todas sus sesiones de audio (Chrome abre varias) y su volumen.
+struct AppVol { name: String, vols: Vec<windows::Win32::Media::Audio::ISimpleAudioVolume>, vol: f32 }
+const APP_H: f32 = 30.0;
+const APPS_MAX: usize = 4;
+const APP_TL: f32 = PAD + 118.0;
+
+/// Apps con sonido ahora mismo en la salida por defecto (sin los sonidos del sistema ni macbar).
+fn app_sessions() -> Vec<AppVol> {
+    use windows::Win32::Media::Audio::*;
+    use windows::core::Interface;
+    let mut out: Vec<AppVol> = Vec::new();
+    unsafe {
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return out };
+        let Ok(dev) = en.GetDefaultAudioEndpoint(eRender, eConsole) else { return out };
+        let Ok(mgr) = dev.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else { return out };
+        let Ok(list) = mgr.GetSessionEnumerator() else { return out };
+        let me = windows::Win32::System::Threading::GetCurrentProcessId();
+        for i in 0..list.GetCount().unwrap_or(0) {
+            let Ok(ctl) = list.GetSession(i) else { continue };
+            let Ok(c2) = ctl.cast::<IAudioSessionControl2>() else { continue };
+            if c2.IsSystemSoundsSession() == windows::Win32::Foundation::S_OK { continue; }
+            if ctl.GetState().ok() != Some(AudioSessionStateActive) { continue; }
+            let pid = c2.GetProcessId().unwrap_or(0);
+            if pid == 0 || pid == me { continue; }
+            let Ok(sv) = ctl.cast::<ISimpleAudioVolume>() else { continue };
+            let name = if sys::demo() { "App".to_string() } else { app_name(pid) };
+            let v = sv.GetMasterVolume().unwrap_or(1.0);
+            match out.iter_mut().find(|a| a.name == name) { Some(a) => a.vols.push(sv), None => out.push(AppVol { name, vols: vec![sv], vol: v }) }
+        }
+    }
+    out.truncate(APPS_MAX);
+    out
+}
+
+/// Nombre legible de un proceso: la descripción de su ejecutable («Microsoft Edge»), si no, su nombre.
+fn app_name(pid: u32) -> String {
+    use windows::Win32::System::Threading::*;
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return format!("PID {pid}") };
+        let mut buf = [0u16; 520];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, windows::core::PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(h);
+        if !ok { return format!("PID {pid}"); }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        file_description(&path).unwrap_or_else(|| {
+            let stem = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mut c = stem.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        })
+    }
+}
+
+fn file_description(path: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::*;
+    unsafe {
+        let hp = HSTRING::from(path);
+        let size = GetFileVersionInfoSizeW(&hp, None);
+        if size == 0 { return None; }
+        let mut data = vec![0u8; size as usize];
+        GetFileVersionInfoW(&hp, None, size, data.as_mut_ptr() as _).ok()?;
+        let mut p: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        if !VerQueryValueW(data.as_ptr() as _, w!("\\VarFileInfo\\Translation"), &mut p, &mut len).as_bool() || len < 4 { return None; }
+        let tr = *(p as *const [u16; 2]);
+        let key = HSTRING::from(format!("\\StringFileInfo\\{:04x}{:04x}\\FileDescription", tr[0], tr[1]));
+        if !VerQueryValueW(data.as_ptr() as _, &key, &mut p, &mut len).as_bool() || len == 0 { return None; }
+        let s = String::from_utf16_lossy(std::slice::from_raw_parts(p as *const u16, len as usize)).trim_end_matches('\0').trim().to_string();
+        if s.is_empty() { None } else { Some(s) }
+    }
+}
+
+// ---------------------------------------------------------------- procesos que más gastan
+struct ProcRow { name: String, cpu: f32, mem: u64 }
+const PROC_H: f32 = 24.0;
+const PROCS_N: usize = 5;
+
+/// Muestrea los procesos: CPU desde la muestra anterior (sumada por programa: Chrome abre muchos) y memoria.
+#[derive(Default)]
+struct ProcSampler { prev: HashMap<u32, u64>, at: Option<Instant>, rows: Vec<ProcRow> }
+impl ProcSampler {
+    fn sample(&mut self) {
+        use windows::Win32::System::Diagnostics::ToolHelp::*;
+        use windows::Win32::System::ProcessStatus::*;
+        use windows::Win32::System::Threading::*;
+        let now = Instant::now();
+        let wall = self.at.map(|t| now.duration_since(t).as_secs_f64()).unwrap_or(0.0);
+        let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+        let mut cur: HashMap<u32, u64> = HashMap::new();
+        let mut agg: HashMap<String, (f64, u64)> = HashMap::new();
+        unsafe {
+            let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return };
+            let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+            let mut ok = Process32FirstW(snap, &mut e).is_ok();
+            while ok {
+                let pid = e.th32ProcessID;
+                if pid > 4 {
+                    if let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                        let (mut c0, mut x0, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+                        if GetProcessTimes(h, &mut c0, &mut x0, &mut k, &mut u).is_ok() {
+                            let t = ft(k) + ft(u);
+                            cur.insert(pid, t);
+                            let d = self.prev.get(&pid).map(|p| t.saturating_sub(*p)).unwrap_or(0);
+                            let mut pmc = PROCESS_MEMORY_COUNTERS { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32, ..Default::default() };
+                            let mem = if K32GetProcessMemoryInfo(h, &mut pmc, pmc.cb).as_bool() { pmc.WorkingSetSize as u64 } else { 0 };
+                            let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                            let exe = String::from_utf16_lossy(&e.szExeFile[..n]);
+                            let pct = if wall > 0.0 { d as f64 / 1e7 / wall / ncpu * 100.0 } else { 0.0 };
+                            let a = agg.entry(exe).or_default();
+                            a.0 += pct;
+                            a.1 += mem;
+                        }
+                        let _ = CloseHandle(h);
+                    }
+                }
+                ok = Process32NextW(snap, &mut e).is_ok();
+            }
+            let _ = CloseHandle(snap);
+        }
+        self.prev = cur;
+        self.at = Some(now);
+        let mut v: Vec<ProcRow> = agg.into_iter().map(|(exe, (c, m))| ProcRow { name: pretty_exe(&exe), cpu: c as f32, mem: m }).collect();
+        // La primera vez aún no hay CPU que comparar: se ordena por memoria
+        v.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal).then(b.mem.cmp(&a.mem)));
+        v.truncate(PROCS_N);
+        self.rows = v;
+    }
+}
+
+/// «msedge.exe» → «Microsoft Edge»; el resto, sin «.exe» y con mayúscula.
+fn pretty_exe(exe: &str) -> String {
+    let stem = exe.strip_suffix(".exe").or_else(|| exe.strip_suffix(".EXE")).unwrap_or(exe);
+    match stem.to_lowercase().as_str() {
+        "msedge" => "Microsoft Edge".into(), "chrome" => "Google Chrome".into(), "firefox" => "Firefox".into(),
+        "explorer" => i18n::t("Explorador").into(), "dwm" => i18n::t("Ventanas (dwm)").into(),
+        "msmpeng" => "Microsoft Defender".into(), "searchhost" => i18n::t("Búsqueda de Windows").into(),
+        _ => { let mut c = stem.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() }
+    }
+}
+
+fn mem_text(b: u64) -> String {
+    let mb = b as f64 / 1048576.0;
+    if mb >= 1024.0 { format!("{:.1} GB", mb / 1024.0).replace('.', if i18n::en() { "." } else { "," }) } else { format!("{} MB", mb.round() as u64) }
+}
+
+fn procs_height(open: bool) -> f32 { if open { 4.0 + PROCS_N as f32 * PROC_H + 8.0 } else { 0.0 } }
+
+fn apps_height(n: usize) -> f32 { if n == 0 { 0.0 } else { 18.0 + n as f32 * APP_H + 4.0 } }
+
 // ---------------------------------------------------------------- ventana
 pub fn toggle(bar: HWND) {
     let now_visible = is_open();
@@ -341,7 +500,7 @@ fn create() {
             hits: Vec::new(), hover: None, drag: None,
             avatar_px: None, avatar: None, title: String::new(), subtitle: String::new(),
             vol: 0.0, mute: false, dark: true, cpu: 0.0, ram: 0.0, disk: 0.0, cpu_prev: None, bright_drag: None,
-            height: 400.0, hidden_at: None, anim: HashMap::new(), last_paint: Instant::now(), opened: Instant::now(),
+            height: 400.0, hidden_at: None, anim: HashMap::new(), last_paint: Instant::now(), opened: Instant::now(), apps: Vec::new(), procs_open: false, procs: ProcSampler::default(),
         };
         CC.with(|c| *c.borrow_mut() = Some(cc));
         // El canal existe ANTES de lanzar el hilo: así el primer trabajo nunca se pierde
@@ -365,19 +524,21 @@ fn show(bar: HWND) {
             c.ram = ram_load(); c.disk = disk_used();
             c.cpu_prev = cpu_times();
             c.bright_drag = None;
+            c.apps = app_sessions();
             // Al abrir, las cifras del equipo cuentan desde 0
             c.anim.clear();
             for k in ["CPU", "RAM", "Disco"] { c.anim.insert(k.to_string(), 0.0); }
             c.last_paint = Instant::now();
             c.opened = Instant::now();
             let has_bright = SYS.lock().unwrap().bright.is_some();
-            c.height = layout_height(has_bright);
+            c.procs_open = false;
+            c.height = layout_height(has_bright) + apps_height(c.apps.len());
             c.target = None;
         });
         // Mostrar y dar el foco fuera del préstamo (mandan mensajes al panel al momento)
         let Some((hwnd, hh)) = CC.with(|c| c.borrow().as_ref().map(|c| (c.hwnd, c.height))) else { return };
         let (wpx, hpx) = ((W_DIP * s) as i32, (hh * s) as i32);
-        popup::begin(hwnd, (8.0 * s) as i32, ((BAR_H + 4.0) * s) as i32, wpx, hpx);
+        popup::begin(hwnd, (8.0 * s) as i32, crate::panel_y(hpx, s), wpx, hpx);
         let _ = SetForegroundWindow(hwnd);
         SetTimer(Some(hwnd), TIMER_STATS, 1000, None);
         job(Job::Refresh);
@@ -456,7 +617,7 @@ fn paint(hwnd: HWND) {
             let card = p.brush(popup::ink_color(ink, 0.075));
             let card_edge = p.brush(popup::ink_color(ink, 0.09));
             let off = p.brush(popup::ink_color(ink, 0.13));
-            let on = p.brush(rgba(0.23, 0.51, 0.96, 1.0));
+            let on = p.brush(crate::profiles::accent(1.0));
             let track = p.brush(popup::ink_color(ink, 0.14));
             let hov = p.brush(popup::ink_color(ink, 0.07));
             let mut hits: Vec<(D2D_RECT_F, Hit)> = Vec::new();
@@ -608,12 +769,36 @@ fn paint(hwnd: HWND) {
             let bs = enter(0.26);
             slider(&mut y, if c.mute || c.vol == 0.0 { "\u{E74F}" } else { "\u{E995}" }, i18n::t("Volumen"), if c.mute { 0.0 } else { c.vol }, Hit::Vol, &mut anim, &mut moving);
             popup::rise_end(&rt, bs);
+            // Mezclador: una pista fina por cada app que suena
+            if !c.apps.is_empty() {
+                let bm = enter(0.29);
+                text_in(&c.f_sub, i18n::t("Apps"), PAD + 12.0, y - 2.0, 16.0, &dim);
+                y += 18.0;
+                for (i, a) in c.apps.iter().enumerate() {
+                    let hit = Hit::App(i as u8);
+                    text_in(&c.f_sub, &trunc(&a.name, 16), PAD + 12.0, y, APP_H, &white);
+                    let (tl, tr, ty, th) = (APP_TL, w - PAD - 14.0, y + APP_H / 2.0, 6.0);
+                    let key = format!("v{hit:?}");
+                    let val = if drag == Some(hit) { anim.insert(key, a.vol); a.vol } else { ease_to(&mut anim, &key, a.vol, 0.08, dt, &mut moving) };
+                    let kk = ease_to(&mut anim, &format!("k{hit:?}"), if drag == Some(hit) { 1.0 } else if c.hover == Some(hit) { 0.5 } else { 0.0 }, 0.06, dt, &mut moving);
+                    rt.FillRoundedRectangle(&rrect(rect(tl, ty - th / 2.0, tr, ty + th / 2.0), th / 2.0), &track);
+                    let fx = tl + (tr - tl) * val.clamp(0.0, 1.0);
+                    if fx > tl + 1.0 { rt.FillRoundedRectangle(&rrect(rect(tl, ty - th / 2.0, fx.max(tl + th), ty + th / 2.0), th / 2.0), &white); }
+                    let kr = 5.5 + 2.0 * kk;
+                    rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: fx.clamp(tl + 5.5, tr - 5.5), Y: ty }, radiusX: kr, radiusY: kr }, &white);
+                    hits.push((rect(tl - 6.0, y, tr + 6.0, y + APP_H), hit));
+                    y += APP_H;
+                }
+                y += 4.0;
+                popup::rise_end(&rt, bm);
+            }
             y += 12.0 - GAP;
             sep_at(y - 6.0);
 
             // ---- Estado del equipo
             let r = rect(PAD, y, w - PAD, y + STATS_H);
-            card_at(r, 0.0);
+            card_at(r, glow(&mut anim, Hit::Stats, &mut moving).max(if c.procs_open { 0.6 } else { 0.0 }));
+            hits.push((r, Hit::Stats));
             let colw = (w - PAD * 2.0) / 3.0;
             for (i, (v, l)) in [(c.cpu, "CPU"), (c.ram, "RAM"), (c.disk, "Disco")].iter().enumerate() {
                 let x0 = PAD + i as f32 * colw;
@@ -628,7 +813,30 @@ fn paint(hwnd: HWND) {
                 text_in(&c.f_sub, l, x0 + (colw - lw) / 2.0, y + 31.0, 16.0, &dim);
                 popup::rise_end(&rt, bc);
             }
-            y += STATS_H + 12.0;
+            y += STATS_H;
+            // Lo que más gasta ahora mismo (como el menú de iStat): nombre, CPU y memoria
+            if c.procs_open {
+                y += 4.0;
+                let cw2 = 64.0;
+                for (i, pr) in c.procs.rows.iter().enumerate() {
+                    let hit = Hit::Proc(i as u8);
+                    let rr = rect(PAD, y, w - PAD, y + PROC_H);
+                    let bp = enter(0.0);
+                    card_at(rr, glow(&mut anim, hit, &mut moving));
+                    text_in(&c.f_sub, &trunc(&pr.name, 22), PAD + 12.0, y, PROC_H, &white);
+                    let cpu = format!("{} %", pr.cpu.round() as i32);
+                    let mt = mem_text(pr.mem);
+                    let x_mem = w - PAD - 12.0;
+                    let x_cpu = x_mem - cw2 - 8.0;
+                    text_in(&c.f_sub, &cpu, x_cpu - p.width(&c.f_sub, &cpu), y, PROC_H, if pr.cpu >= 20.0 { &white } else { &dim });
+                    text_in(&c.f_sub, &mt, x_mem - p.width(&c.f_sub, &mt), y, PROC_H, &dim);
+                    hits.push((rr, hit));
+                    popup::rise_end(&rt, bp);
+                    y += PROC_H;
+                }
+                y += 8.0;
+            }
+            y += 12.0;
             sep_at(y - 6.0);
 
             // ---- Energía: bloquear, suspender, reiniciar, apagar
@@ -673,6 +881,13 @@ fn apply_slider(hit: Hit, x: f32) {
         match hit {
             Hit::Vol => { c.vol = v; c.mute = false; set_volume(v); }
             Hit::Bright => { c.bright_drag = Some(v); job(Job::Bright(v)); }
+            Hit::App(i) => {
+                let v = ((x - APP_TL) / (W_DIP - PAD - 14.0 - APP_TL)).clamp(0.0, 1.0);
+                if let Some(a) = c.apps.get_mut(i as usize) {
+                    a.vol = v;
+                    for s in &a.vols { unsafe { let _ = s.SetMasterVolume(v, std::ptr::null()); } }
+                }
+            }
             _ => {}
         }
     });
@@ -690,7 +905,13 @@ fn click(hit: Hit) {
         Hit::Sleep => { hide(); sys::sleep(); }
         Hit::Restart => { hide(); if sys::ask(bar_hwnd(), i18n::t("¿Reiniciar el equipo ahora?")) { sys::restart(); } }
         Hit::Shutdown => { hide(); if sys::ask(bar_hwnd(), i18n::t("¿Apagar el equipo ahora?")) { sys::shutdown(); } }
-        Hit::Bright | Hit::Vol => {}
+        Hit::Bright | Hit::Vol | Hit::App(_) => {}
+        Hit::Stats => {
+            let hwnd = CC.with(|c| c.borrow_mut().as_mut().map(|c| { c.procs_open = !c.procs_open; if c.procs_open { c.procs.sample(); } c.hwnd }));
+            // Recalcula el alto (y la ventana) como cuando aparece el brillo
+            if let Some(h) = hwnd { unsafe { let _ = PostMessageW(Some(h), WM_CC_STATE, WPARAM(0), LPARAM(0)); } }
+        }
+        Hit::Proc(_) => { hide(); sys::open_args("taskmgr.exe", ""); }
     }
 }
 
@@ -718,7 +939,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     }
                     c.cpu_prev = cpu_times();
                     c.ram = ram_load();
-                    if c.drag.is_none() { let (v, m) = read_audio(); c.vol = v; c.mute = m; }
+                    if c.drag.is_none() {
+                        let (v, m) = read_audio(); c.vol = v; c.mute = m;
+                        if c.procs_open { c.procs.sample(); }
+                        for a in &mut c.apps { if let Some(v) = a.vols.first().and_then(|s| unsafe { s.GetMasterVolume() }.ok()) { a.vol = v; } }
+                    }
                 });
                 redraw(hwnd);
                 LRESULT(0)
@@ -728,11 +953,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 CC.with(|c| if let Some(c) = c.borrow_mut().as_mut() { if c.drag.is_none() { c.bright_drag = None; } });
                 // La altura cambia si aparece o desaparece el brillo
                 let has_b = SYS.lock().unwrap().bright.is_some();
-                let resize = CC.with(|c| c.borrow_mut().as_mut().map(|c| { let nh = layout_height(has_b); let ch = c.height != nh; c.height = nh; ch }).unwrap_or(false));
+                let resize = CC.with(|c| c.borrow_mut().as_mut().map(|c| { let nh = layout_height(has_b) + apps_height(c.apps.len()) + procs_height(c.procs_open); let ch = c.height != nh; c.height = nh; ch }).unwrap_or(false));
                 if resize {
                     let s = scale_of(hwnd);
                     let hh = CC.with(|c| c.borrow().as_ref().map(|c| c.height).unwrap_or(400.0));
-                    let _ = SetWindowPos(hwnd, None, 0, 0, (W_DIP * s) as i32, (hh * s) as i32, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    // Con la barra abajo el panel crece hacia arriba (su borde de abajo no se mueve)
+                    let hpx = (hh * s) as i32;
+                    let mut wr = RECT::default();
+                    let _ = GetWindowRect(hwnd, &mut wr);
+                    let top = if crate::bar_bottom() { wr.bottom - hpx } else { wr.top };
+                    let _ = SetWindowPos(hwnd, None, wr.left, top, (W_DIP * s) as i32, hpx, SWP_NOZORDER | SWP_NOACTIVATE);
                     CC.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.target = None; });
                 }
                 redraw(hwnd);
@@ -757,7 +987,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0x02A3 => { CC.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.hover = None; }); redraw(hwnd); LRESULT(0) }
             WM_LBUTTONDOWN => {
                 if let Some((h, x)) = hit_at(hwnd, lp) {
-                    if matches!(h, Hit::Bright | Hit::Vol) {
+                    if matches!(h, Hit::Bright | Hit::Vol | Hit::App(_)) {
                         CC.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.drag = Some(h); });
                         SetCapture(hwnd);
                         apply_slider(h, x);

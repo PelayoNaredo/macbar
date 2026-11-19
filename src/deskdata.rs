@@ -172,6 +172,9 @@ fn queue_thread() {
             }
             if last.elapsed() < Duration::from_millis(1000) { continue; }
             if !VISIBLE.load(Ordering::Relaxed) { continue; }
+            // Con YouTube Music (u otra app) a pantalla completa no se recorre su árbol de accesibilidad: es
+            // grande y la pondría lenta justo cuando se está viendo
+            if crate::fullscreen() { continue; }
             let k = MEDIA.lock().unwrap().as_ref().map(|m| format!("{}\u{1}{}", m.title, m.artist)).unwrap_or_default();
             // Cada 6 s, o enseguida si cambió la canción
             if k == key && last.elapsed() < Duration::from_secs(6) { continue; }

@@ -102,7 +102,7 @@ struct Dw {
     /// Quitándose: se encoge y se desvanece antes de cerrarse
     dying: Option<Instant>,
     /// Capa fija (lienzo de la ventana con el que se creó, la imagen, si quedó bien) y sus cachés y zonas
-    layer: Option<(usize, ID2D1BitmapRenderTarget, bool)>,
+    layer: Option<(Option<windows::core::IUnknown>, ID2D1BitmapRenderTarget, bool)>,
     lcache: RefCell<Caches>,
     layer_hits: Vec<(D2D_RECT_F, u32)>,
     /// Ratón dentro del widget (DIP; negativo si está fuera)
@@ -181,6 +181,21 @@ fn any_live() -> bool { DESKS.with(|d| d.borrow().iter().any(|w| w.dying.is_none
 fn retire(h: HWND) {
     with_dw(h, |w| { if w.dying.is_none() { w.dying = Some(Instant::now()); } });
     unsafe { SetTimer(Some(h), TIMER_FADE, 15, None); }
+}
+
+/// Cambia (o añade) `k = v` en widgets.ini (lo usa el importador de temas).
+pub fn set_ini_value(k: &str, v: &str) {
+    let mut out: Vec<String> = ini().lines().filter(|l| l.trim().strip_prefix(k).is_none_or(|r| !r.trim_start().starts_with('='))).map(str::to_string).collect();
+    out.push(format!("{k} = {v}"));
+    let _ = std::fs::create_dir_all(sys::config_dir());
+    let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
+}
+
+/// Modo presentación: los widgets se esconden (sin quitarlos) y vuelven igual al salir.
+pub fn set_hidden(hide: bool) {
+    let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
+    for h in all { unsafe { let _ = ShowWindow(h, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE }); } }
+    if !hide { restack(); }
 }
 
 /// Para el menú: nombre de cada widget y si está puesto.
@@ -505,10 +520,10 @@ fn make_ui<'a>(p: Painter<'a>, rt: &'a ID2D1RenderTarget, f: &'a popup::Fonts, w
         glow,
         white: p.brush(c(0.97)), dim: p.brush(c(dim)), faint: p.brush(c(faint)),
         card: p.brush(c(0.075)), card_edge: p.brush(c(if fl { 0.16 } else { 0.10 })),
-        off: p.brush(c(0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
+        off: p.brush(c(0.13)), on: p.brush(crate::profiles::accent(1.0)),
         hov: p.brush(c(0.07)), track: p.brush(c(track)),
         // Bajo texto oscuro, el halo claro casi desaparece (si no, el texto parece en relieve)
-        shadow: fl.then(|| p.brush(rgba(1.0 - sh, 1.0 - sh, 1.0 - sh, 0.21 * (1.0 - ink) + 0.07 * ink))),
+        shadow: fl.then(|| p.brush(rgba(1.0 - sh, 1.0 - sh, 1.0 - sh, 0.13 * (1.0 - ink) + 0.06 * ink))),
         p, rt, f, w, s, hover, hits: Vec::new(), ink,
     }
 }
@@ -587,6 +602,7 @@ fn backdrop_luma(hwnd: HWND) -> Option<f32> {
 
 /// Decide la tinta de un widget (con histéresis: no parpadea en fondos de luminosidad media).
 fn refresh_ink(hwnd: HWND, force: bool) {
+    if crate::fullscreen() && !force { return; }
     let mode = ink_mode();
     let want = match mode {
         1 => Some(true),
@@ -649,9 +665,9 @@ fn paint_real(hwnd: HWND) {
             // fotograma solo se pega; encima va lo que se mueve (`paint_live`)
             let layered = w.w.layered();
             if layered {
-                let rtk = { use windows::core::Interface; rt.as_raw() as usize };
+                let rtk = { use windows::core::Interface; rt.cast::<windows::core::IUnknown>().ok() };
                 if w.layer.as_ref().is_none_or(|l| l.0 != rtk) {
-                    w.layer = rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: ww, height: wh }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok().map(|b| (rtk, b, false));
+                    w.layer = rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: ww, height: wh }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok().map(|b| (rtk.clone(), b, false));
                 }
                 let need = moving || t < 1.4 || w.dying.is_some() || w.w.layer_stale() || w.layer.as_ref().is_some_and(|l| !l.2);
                 if need {

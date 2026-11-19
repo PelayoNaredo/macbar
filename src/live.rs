@@ -11,7 +11,15 @@ pub const WM_NET: u32 = WM_USER + 6;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(bool), LowBat(u8), Caps(bool), Audio, Claude(u8), Download, Shot, Usb(bool), Copied, Shelf,
-    Mic(bool), Num(bool), Lang, Desk(u8, u8), Mem(u8) }
+    Mic(bool), Num(bool), Lang, Desk(u8, u8), Mem(u8), Profile(u8), Present(bool),
+    /// Notificación nueva del móvil, cámara o micrófono que empiezan a usarse, batería llena, ahorro de
+    /// batería, red Wi-Fi a la que se conecta y disco casi lleno
+    Phone, CamOn, MicOn, Full, Saver(bool), Wifi, Disk(u8) }
+
+/// Última notificación del móvil que se enseñó: (app, título)
+pub static PHONE_NOTE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+/// Red Wi-Fi a la que se acaba de conectar
+pub static WIFI_NAME: Mutex<String> = Mutex::new(String::new());
 
 /// Nombre del idioma de teclado recién elegido (para Hud::Lang).
 pub static LANG: Mutex<String> = Mutex::new(String::new());
@@ -34,6 +42,8 @@ pub static AUDIO_NAME: Mutex<String> = Mutex::new(String::new());
 pub static HUD: Mutex<Option<(Hud, Instant)>> = Mutex::new(None);
 
 pub fn show(h: Hud, ms: u64) {
+    // En modo presentación solo pasa lo imprescindible
+    if crate::profiles::presenting() && !matches!(h, Hud::TimerDone | Hud::LowBat(_) | Hud::Present(_)) { return; }
     *HUD.lock().unwrap() = Some((h, Instant::now() + Duration::from_millis(ms)));
     unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(0), LPARAM(0)); }
 }
@@ -264,11 +274,14 @@ fn net_thread() {
     unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
     let mut n = 0u32;
     let mut was_online: Option<bool> = None;
+    let mut last_ssid: Option<String> = None;
     loop {
         // Micrófono y cámara en uso: cada 2 s (leer el registro cuesta microsegundos)
         let (mic, cam) = (in_use("microphone"), in_use("webcam"));
         let pc = MIC.swap(mic, Ordering::Relaxed) != mic;
         let cc = CAM.swap(cam, Ordering::Relaxed) != cam;
+        // Al empezar a usarse (no al soltarlos) la isla lo dice un momento, como el aviso de privacidad de iOS
+        if n > 0 && cc && cam { show(Hud::CamOn, 2200); } else if n > 0 && pc && mic { show(Hud::MicOn, 2200); }
         if pc || cc { unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_NET, WPARAM(0), LPARAM(0)); } }
         // Red: cada 4 s; la radio Wi-Fi, cada ~30 s
         if n % 2 == 0 {
@@ -280,7 +293,12 @@ fn net_thread() {
             let st = Net { wifi_quality: wifi_quality(), online: online(), radio_off };
             let changed = { let mut g = NET.lock().unwrap(); let c = *g != st; *g = st; c };
             // Se conecta o se pierde la conexión: la isla lo cuenta
-            if was_online.is_some_and(|w| w != st.online) { show(Hud::Net(st.online), 2400); }
+            // Wi-Fi nueva (cambio de red o reconexión): se dice a cuál
+            let ssid = if sys::demo() { String::new() } else { crate::ccenter::wifi_ssid() };
+            let joined = !ssid.is_empty() && last_ssid.as_ref().is_some_and(|l| *l != ssid);
+            last_ssid = Some(ssid.clone());
+            if joined { *WIFI_NAME.lock().unwrap() = ssid; show(Hud::Wifi, 2400); }
+            else if was_online.is_some_and(|w| w != st.online) { show(Hud::Net(st.online), 2400); }
             was_online = Some(st.online);
             if changed { unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_NET, WPARAM(0), LPARAM(0)); } }
         }

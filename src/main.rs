@@ -49,6 +49,9 @@ mod menus;
 mod phone;
 mod popup;
 mod search;
+mod search_extra;
+mod share;
+mod profiles;
 mod sys;
 mod tray;
 mod trayhost;
@@ -74,6 +77,10 @@ impl Mode {
             Mode::Hud(live::Hud::Download) => 12, Mode::Hud(live::Hud::Shot) => 13, Mode::Hud(live::Hud::Usb(_)) => 14,
             Mode::Hud(live::Hud::Mic(_)) => 18, Mode::Hud(live::Hud::Num(_)) => 19, Mode::Hud(live::Hud::Lang) => 20,
             Mode::Hud(live::Hud::Desk(..)) => 21, Mode::Hud(live::Hud::Mem(_)) => 22,
+            Mode::Hud(live::Hud::Profile(_)) => 23, Mode::Hud(live::Hud::Present(_)) => 24,
+            Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
+            Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
+            Mode::Hud(live::Hud::Disk(_)) => 31,
         }
     }
 }
@@ -105,6 +112,15 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         Desk(..) => ("\u{E7C4}", trunc(&live::DESK_NAME.lock().unwrap(), 26), false),
         // Sin barra lineal: lleva un anillo radial pequeño a la derecha (ver Mode::Hud)
         Mem(_) => ("\u{E964}", i18n::t("Memoria casi llena").into(), false),
+        Profile(i) => ("\u{E77B}", i18n::tf("Perfil «{}» guardado", &[&i18n::t(profiles::NAMES[(i as usize).min(2)])]), false),
+        Phone => { let (app, title) = live::PHONE_NOTE.lock().unwrap().clone(); ("\u{E8EA}", trunc(&if app.is_empty() { title } else { format!("{app} · {title}") }, 38), false) }
+        CamOn => ("\u{E722}", i18n::t("La cámara se está usando").into(), false),
+        MicOn => ("\u{E720}", i18n::t("El micrófono se está usando").into(), false),
+        Full => ("\u{EBB5}", i18n::t("Batería cargada").into(), true),
+        Saver(on) => ("\u{EBB6}", if on { i18n::t("Ahorro de batería activado").into() } else { i18n::t("Ahorro de batería desactivado").into() }, false),
+        Wifi => ("\u{E701}", trunc(&i18n::tf("Conectado a {}", &[&*live::WIFI_NAME.lock().unwrap()]), 34), false),
+        Disk(_) => ("\u{EDA2}", i18n::t("Disco casi lleno").into(), true),
+        Present(on) => ("\u{E7F4}", if on { i18n::t("Modo presentación: sin avisos").into() } else { i18n::t("Modo presentación desactivado").into() }, false),
         Usb(on) => { let l = live::USB_LETTER.load(Ordering::Relaxed) as char; ("\u{E88E}", if on { i18n::tf("USB conectado · {}:", &[&l]) } else { i18n::t("USB expulsado").into() }, false) }
     }
 }
@@ -127,6 +143,16 @@ pub const BAR_WIDGET0: u32 = 20;
 pub const BAR_INK0: u32 = 40;
 /// Idioma (automático, español, inglés): 50..52
 pub const BAR_LANG0: u32 = 50;
+/// Color de acento: 60..67; tema: exportar 70, importar 71; perfiles 80..82, su carpeta 84; presentación 85
+pub const BAR_ACCENT0: u32 = 60;
+pub const BAR_THEME_EXPORT: u32 = 70;
+pub const BAR_THEME_IMPORT: u32 = 71;
+pub const BAR_PROFILE0: u32 = 80;
+pub const BAR_PROFILES_DIR: u32 = 84;
+pub const BAR_PRESENT: u32 = 85;
+/// Posición: arriba 86, abajo 87
+pub const BAR_POS_TOP: u32 = 86;
+pub const BAR_POS_BOTTOM: u32 = 87;
 static WEATHER_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Última ventana activa que no es la barra: destino de los menús y atajos.
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
@@ -157,14 +183,71 @@ const TIMER_GUARD: usize = 12;
 static FOCUS_TARGET: AtomicIsize = AtomicIsize::new(0);
 static KEEP_LEFT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// ¿Hay una app a pantalla completa? (juego, vídeo, F11). Entonces no se lee nada de otras apps ni de la pantalla.
+pub fn fullscreen() -> bool { FULLSCREEN.load(Ordering::Relaxed) }
 /// Fondo claro detrás de la barra: texto e iconos oscuros (lo decide `bar_ink_thread`).
 static BAR_LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Identidad de un lienzo para las cachés ligadas a él. Guarda una referencia: mientras la tenga, el lienzo
+/// viejo no se libera y uno nuevo no puede caer en su misma dirección (comparar solo la dirección fallaba:
+/// tras recrearse, pinceles e imágenes del viejo hacían fallar cada fotograma y la barra salía vacía).
+#[derive(Default)]
+pub struct RtKey(Option<windows::core::IUnknown>);
+impl RtKey {
+    /// ¿Es un lienzo distinto del último visto? (y lo recuerda)
+    pub fn fresh(&mut self, rt: &impl windows::core::Interface) -> bool {
+        let u = rt.cast::<windows::core::IUnknown>().ok();
+        if self.0 == u { return false; }
+        self.0 = u;
+        true
+    }
+}
+/// Deja en graficos.log por qué falló un fotograma (como mucho una línea por minuto).
+fn log_draw_fail(where_: &str, e: &windows::core::Error) {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut l = LAST.lock().unwrap();
+    if l.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) { return; }
+    *l = Some(Instant::now());
+    use std::io::Write;
+    let t = unsafe { GetLocalTime() };
+    let line = format!("{}-{:02}-{:02} {:02}:{:02}:{:02} {}: {:?}\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, where_, e);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(sys::config_dir() + "\\graficos.log") { let _ = f.write_all(line.as_bytes()); }
+}
 thread_local! { static BAR_INK: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) }; }
+
+/// Vigía: cada 2 s comprueba que la interfaz de macbar responde. Si tarda más de un segundo, apunta en
+/// crash.log cuánto estuvo parada (para saber, si algo se congela, si fue macbar o no).
+fn hang_watch() {
+    std::thread::spawn(|| {
+        let mut stuck_since: Option<Instant> = None;
+        loop {
+            std::thread::sleep(Duration::from_millis(2000));
+            let bar = bar_hwnd();
+            if bar.0.is_null() { continue; }
+            let t0 = Instant::now();
+            let mut r = 0usize;
+            let ok = unsafe { SendMessageTimeoutW(bar, WM_NULL, WPARAM(0), LPARAM(0), SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, Some(&mut r)) }.0 != 0;
+            match (ok, stuck_since) {
+                (false, None) => stuck_since = Some(t0),
+                (true, Some(s)) => {
+                    let secs = s.elapsed().as_secs_f32();
+                    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                    let line = format!("{}-{:02}-{:02} {:02}:{:02}:{:02} interfaz parada {:.1} s{}\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, secs, if fullscreen() { " (con una app a pantalla completa)" } else { "" });
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(sys::config_dir() + "\\bloqueos.log") { let _ = f.write_all(line.as_bytes()); }
+                    stuck_since = None;
+                }
+                _ => {}
+            }
+        }
+    });
+}
 
 /// Mira cada 3 s el fondo justo debajo de la barra (solo donde se ve el escritorio, no ventanas) y
 /// decide la tinta, con histéresis. Con el modo fijo del menú, la tinta es la elegida.
 fn bar_ink_thread() {
     std::thread::spawn(|| loop {
+        // A pantalla completa la barra no se ve: no se captura la pantalla (estorbaría al juego o al vídeo)
+        if fullscreen() { std::thread::sleep(Duration::from_millis(1500)); continue; }
         let want = match desk::ink_mode() {
             1 => Some(true),
             2 => Some(false),
@@ -184,7 +267,9 @@ fn bar_backdrop_luma() -> Option<f32> {
         if bar.0.is_null() { return None; }
         let s = scale_of(bar);
         let sw = GetSystemMetrics(SM_CXSCREEN);
-        let (y, hh) = (((BAR_H + 4.0) * s) as i32, (10.0 * s) as i32);
+        let hh = (10.0 * s) as i32;
+        // La franja de fondo junto a la barra: debajo si va arriba, encima si va abajo
+        let y = if bar_bottom() { GetSystemMetrics(SM_CYSCREEN) - ((BAR_H + 4.0) * s) as i32 - hh } else { ((BAR_H + 4.0) * s) as i32 };
         // Al volver de suspensión la pantalla puede no tener aún tamaño ni escala: no se mide
         if sw < 96 || hh < 4 || s <= 0.0 { return None; }
         let sdc = GetDC(None);
@@ -262,7 +347,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare,
 }
 
 impl Act {
@@ -332,6 +417,8 @@ struct Gfx {
     tray_rot: f32,
     shelf_bmps: (u64, Vec<Option<ID2D1Bitmap>>),
     hud_bmp: Option<(u64, ID2D1Bitmap)>,
+    /// Ya se avisó de batería llena / disco lleno; último estado del ahorro de batería
+    full_warned: bool, disk_warned: bool, saver: Option<bool>,
     usage_disp: f32,
     low_warned: u8,
     art_tint: [f32; 3],
@@ -427,6 +514,35 @@ fn make_format(dw: &IDWriteFactory, family: PCWSTR, size: f32, weight: DWRITE_FO
     }
 }
 
+// ---------------------------------------------------------------- posición (arriba o abajo)
+/// ¿La barra va abajo? (`posicion = abajo` en config.ini; se lee una vez al arrancar)
+pub fn bar_bottom() -> bool {
+    static B: OnceLock<bool> = OnceLock::new();
+    *B.get_or_init(|| sys::config_value("posicion").is_some_and(|v| v.eq_ignore_ascii_case("abajo")))
+}
+
+/// Dónde se abre un panel de alto `hpx`: bajo la barra si va arriba, encima si va abajo.
+pub fn panel_y(hpx: i32, s: f32) -> i32 {
+    let gap = ((BAR_H + 4.0) * s) as i32;
+    if bar_bottom() { (unsafe { GetSystemMetrics(SM_CYSCREEN) }) - gap - hpx } else { gap }
+}
+
+/// Con la barra abajo, la barra de tareas de Windows (en ocultación automática) saldría encima al tocar
+/// el borde: se esconde mientras macbar está abajo y vuelve al cerrar macbar o al subirla.
+pub fn windows_taskbar(show: bool) {
+    if let Some(h) = trayhost::explorer_tray() {
+        unsafe { let _ = ShowWindow(h, if show { SW_SHOWNOACTIVATE } else { SW_HIDE }); }
+    }
+}
+
+/// Cambia la posición (menú): se guarda y macbar se reinicia para colocarlo todo de nuevo.
+pub fn set_bar_bottom(bottom: bool) {
+    if bottom == bar_bottom() { return; }
+    sys::set_config_value("posicion", if bottom { "abajo" } else { "arriba" });
+    if !bottom { windows_taskbar(true); }
+    profiles::relaunch();
+}
+
 // ---------------------------------------------------------------- AppBar
 /// Todas las peticiones del hueco de la barra van DIRECTAS al Explorador (ver `trayhost::direct`).
 fn appbar(msg: u32, abd: &mut APPBARDATA) -> usize {
@@ -436,11 +552,13 @@ fn appbar(msg: u32, abd: &mut APPBARDATA) -> usize {
 fn position_appbar(hwnd: HWND) {
     unsafe {
         let h = (BAR_H * scale_of(hwnd)).round() as i32;
-        let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: ABE_TOP, ..Default::default() };
+        let bottom = bar_bottom();
+        let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: if bottom { ABE_BOTTOM } else { ABE_TOP }, ..Default::default() };
         abd.rc = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
         appbar(ABM_QUERYPOS, &mut abd);
-        abd.rc.bottom = abd.rc.top + h;
+        if bottom { abd.rc.top = abd.rc.bottom - h; } else { abd.rc.bottom = abd.rc.top + h; }
         appbar(ABM_SETPOS, &mut abd);
+        if bottom { abd.rc.top = abd.rc.bottom - h; windows_taskbar(false); }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), abd.rc.left, abd.rc.top, abd.rc.right - abd.rc.left, h, SWP_NOACTIVATE);
         GFX.with(|g| {
             if let Some(g) = g.borrow_mut().as_mut() {
@@ -474,7 +592,10 @@ fn fix_maximized(bar: HWND) -> usize {
         let mut wa = RECT::default();
         if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut wa as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_err() { return 0; }
         let h_bar = (BAR_H * scale_of(bar)).round() as i32;
-        if wa.top < h_bar - 1 { return 0; } // el hueco aún no está: primero hay que reservarlo
+        let bottom = bar_bottom();
+        let sh = GetSystemMetrics(SM_CYSCREEN);
+        // El hueco aún no está: primero hay que reservarlo
+        if if bottom { wa.bottom > sh - h_bar + 1 } else { wa.top < h_bar - 1 } { return 0; }
         for h in sys::app_windows() {
             if h == bar || !IsZoomed(h).as_bool() || !IsWindowVisible(h).as_bool() { continue; }
             let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
@@ -485,8 +606,8 @@ fn fix_maximized(bar: HWND) -> usize {
             // Una maximizada sobresale por su marco (unos 8 px) a cada lado: se mide en el borde izquierdo
             let frame = (wa.left - r.left).clamp(0, 16);
             let want_top = wa.top - frame;
-            if r.top < want_top - 2 {
-                let want_bottom = wa.bottom + frame;
+            let want_bottom = wa.bottom + frame;
+            if (!bottom && r.top < want_top - 2) || (bottom && r.bottom > want_bottom + 2) {
                 let _ = SetWindowPos(h, None, r.left, want_top, r.right - r.left, want_bottom - want_top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 fixed += 1;
             }
@@ -502,6 +623,8 @@ fn guard(hwnd: HWND) {
     // y esta vigilancia se saltaba para siempre).
     sync_fullscreen(hwnd);
     if FULLSCREEN.load(Ordering::Relaxed) { return; }
+    // El Explorador puede volver a mostrar su barra (al reiniciarse, al cambiar de pantalla…)
+    if bar_bottom() && trayhost::explorer_tray().is_some_and(|h| unsafe { IsWindowVisible(h).as_bool() }) { windows_taskbar(false); }
     if !reserved_ok(hwnd) { reserve(hwnd); } else { fix_maximized(hwnd); }
 }
 
@@ -512,7 +635,7 @@ fn reserved_ok(hwnd: HWND) -> bool {
         let mut wa = RECT::default();
         if SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut wa as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)).is_err() { return true; }
         let h = (BAR_H * scale_of(hwnd)).round() as i32;
-        wa.top >= h - 1
+        if bar_bottom() { wa.bottom <= GetSystemMetrics(SM_CYSCREEN) - h + 1 } else { wa.top >= h - 1 }
     }
 }
 
@@ -894,6 +1017,14 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_WIDGETS => desk::toggle(),
         i if (BAR_WIDGET0..BAR_WIDGET0 + 7).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
         i if (BAR_INK0..BAR_INK0 + 3).contains(&i) => desk::set_ink_mode((i - BAR_INK0) as i8),
+        i if (BAR_ACCENT0..BAR_ACCENT0 + profiles::ACCENTS.len() as u32).contains(&i) => profiles::set_accent((i - BAR_ACCENT0) as usize),
+        BAR_THEME_EXPORT => profiles::export_theme(),
+        BAR_THEME_IMPORT => profiles::import_theme(),
+        i if (BAR_PROFILE0..BAR_PROFILE0 + 3).contains(&i) => profiles::choose((i - BAR_PROFILE0) as usize),
+        BAR_PROFILES_DIR => profiles::open_folder(),
+        BAR_PRESENT => profiles::toggle_present(),
+        BAR_POS_TOP => set_bar_bottom(false),
+        BAR_POS_BOTTOM => set_bar_bottom(true),
         i if (BAR_LANG0..BAR_LANG0 + 3).contains(&i) => { i18n::set_mode((i - BAR_LANG0) as i8); desk::repaint_all(); unsafe { let _ = InvalidateRect(Some(hwnd), None, false); } }
         _ => {}
     }
@@ -908,12 +1039,19 @@ fn run(a: Act) {
         Act::TimerStop => live::timer_stop(),
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
+        Act::ShelfShare => {
+            let paths: Vec<String> = live::SHELF.lock().unwrap().iter().map(|x| x.0.clone()).collect();
+            let _ = share::files(bar_hwnd(), &paths);
+        }
         Act::HudDismiss => {
             // Descarga: se muestra en su carpeta; captura: se abre; el resto, se cierra el aviso
             let file = live::LAST_FILE.lock().unwrap().as_ref().map(|f| f.0.clone());
             match (live::current(), file) {
                 (Some(live::Hud::Download), Some(p)) => sys::open_args("explorer.exe", &format!("/select,\"{p}\"")),
                 (Some(live::Hud::Shot), Some(p)) => sys::open(&p),
+                (Some(live::Hud::Phone), _) => sys::open("ms-phone:"),
+                (Some(live::Hud::Disk(_)), _) => sys::open("ms-settings:storagesense"),
+                (Some(live::Hud::Saver(_)), _) => sys::open("ms-settings:batterysaver"),
                 _ => {}
             }
             live::dismiss();
@@ -1024,7 +1162,7 @@ fn click(hwnd: HWND, a: Act) {
     };
     match a {
         Act::Logo => { close_others(a); ccenter::toggle(hwnd); }
-        Act::Tray => { close_others(a); tray::toggle(anchor_right(hwnd, a, 40.0)); }
+        Act::Tray => { close_others(a); trayhost::mark_seen(); tray::toggle(anchor_right(hwnd, a, 40.0)); }
         Act::Wifi => { close_others(a); popup::toggle(popup::Kind::Wifi, anchor_right(hwnd, a, 60.0)); }
         Act::Weather => { close_others(a); popup::toggle(popup::Kind::Weather, anchor_right(hwnd, a, 24.0)); }
         Act::Clock | Act::TimerOpen => {
@@ -1122,7 +1260,7 @@ struct Caches {
     /// Pinceles de color sólido y degradados, ligados al lienzo `rt_key` (si cambia, se tiran)
     brushes: std::collections::HashMap<u32, ID2D1Brush>,
     grads: std::collections::HashMap<(i32, i32, i32, i32, u32, u32), ID2D1Brush>,
-    rt_key: usize,
+    rt_key: RtKey,
 }
 
 struct Painter<'a> { rt: &'a ID2D1RenderTarget, dw: &'a IDWriteFactory, cache: &'a RefCell<Caches>, h: f32, s: f32 }
@@ -1162,10 +1300,8 @@ fn pack(c: &D2D1_COLOR_F) -> u32 {
 impl Painter<'_> {
     /// Las cachés de pinceles valen solo para el lienzo con el que se crearon.
     fn check_rt(&self) {
-        use windows::core::Interface;
-        let k = self.rt.as_raw() as usize;
         let mut c = self.cache.borrow_mut();
-        if c.rt_key != k { c.rt_key = k; c.brushes.clear(); c.grads.clear(); }
+        if c.rt_key.fresh(self.rt) { c.brushes.clear(); c.grads.clear(); }
     }
     fn brush(&self, c: D2D1_COLOR_F) -> ID2D1Brush {
         self.check_rt();
@@ -1276,7 +1412,9 @@ impl Painter<'_> {
             if let Some(sb) = shadow {
                 self.rt.DrawTextLayout(Vector2 { X: x, Y: y + 1.0 }, &lay, sb, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
-            self.rt.DrawTextLayout(Vector2 { X: x, Y: y }, &lay, b, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            // Sin sombra, los emojis salen en color (con sombra, la fuente de color la pintaría también)
+            let opt = if shadow.is_none() { D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT } else { D2D1_DRAW_TEXT_OPTIONS_NONE };
+            self.rt.DrawTextLayout(Vector2 { X: x, Y: y }, &lay, b, opt);
         }
     }
     /// Texto con su altura de mayúscula centrada en la barra: todos comparten línea base.
@@ -1306,7 +1444,7 @@ impl Painter<'_> {
     /// Carátula recortada en círculo (`radius` = None) o cuadrado redondeado.
     fn art(&self, bmp: &ID2D1Bitmap, x: f32, y: f32, size: f32, radius: Option<f32>) {
         unsafe {
-            let br = self.rt.CreateBitmapBrush(bmp, None, None).unwrap();
+            let Ok(br) = self.rt.CreateBitmapBrush(bmp, None, None) else { return };
             let s = size / ART_PX as f32;
             br.SetTransform(&Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: x, M32: y });
             let r = rect(x, y, x + size, y + size);
@@ -1348,7 +1486,8 @@ fn paint(hwnd: HWND) {
                     // Escala de grises: ClearType deja halos sobre fondo transparente
                     t.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
                 }
-                g.art = None; g.avatar = None;
+                // Todo bitmap pertenece a su superficie: con una nueva, los viejos hacen fallar cada EndDraw
+                g.art = None; g.avatar = None; g.hud_bmp = None; g.shelf_bmps = (u64::MAX, Vec::new());
             }
             let Some(rt) = g.target.clone() else { return };
             let media = MEDIA.lock().unwrap().clone();
@@ -1385,7 +1524,7 @@ fn paint(hwnd: HWND) {
             let ic = |a: f32| popup::ink_color(bk, a);
             let (bar_white, bar_soft, bar_dim) = (p.brush(ic(0.96)), p.brush(ic(0.86)), p.brush(ic(0.52)));
             // Sombra bajo el texto: oscura con tinta blanca, un halo claro muy suave con tinta oscura
-            let bar_shadow = p.brush(rgba(bk, bk, bk, 0.38 * (1.0 - bk) + 0.10 * bk));
+            let bar_shadow = p.brush(rgba(bk, bk, bk, 0.26 * (1.0 - bk) + 0.08 * bk));
             let (isl_white, isl_soft, isl_dim, isl_shadow) = (p.brush(rgba(1.0, 1.0, 1.0, 0.96)), p.brush(rgba(1.0, 1.0, 1.0, 0.86)), p.brush(rgba(1.0, 1.0, 1.0, 0.52)), p.brush(rgba(0.0, 0.0, 0.0, 0.38)));
             let (white, soft, dim, shadow) = (bar_white.clone(), bar_soft.clone(), bar_dim.clone(), bar_shadow.clone());
             let black = p.brush(rgba(0.0, 0.0, 0.0, 1.0));
@@ -1534,7 +1673,8 @@ fn paint(hwnd: HWND) {
             let hud_target = match hud.or(g.last_hud) {
                 Some(live::Hud::Volume(v, m)) => if m { 0.0 } else { v },
                 Some(live::Hud::Bright(b)) => b,
-                Some(live::Hud::Power(pc, _)) | Some(live::Hud::LowBat(pc)) | Some(live::Hud::Claude(pc)) | Some(live::Hud::Mem(pc)) => pc as f32 / 100.0,
+                Some(live::Hud::Power(pc, _)) | Some(live::Hud::LowBat(pc)) | Some(live::Hud::Claude(pc)) | Some(live::Hud::Mem(pc)) | Some(live::Hud::Disk(pc)) => pc as f32 / 100.0,
+                Some(live::Hud::Full) => 1.0,
                 _ => 0.0,
             };
             if (g.hud_val - hud_target).abs() > 0.002 { g.hud_val += (hud_target - g.hud_val) * (1.0 - (-dt / 0.07).exp()); animating = true; } else { g.hud_val = hud_target; }
@@ -1584,12 +1724,13 @@ fn paint(hwnd: HWND) {
             }
             let shelf_cnt = shelf_n.to_string();
             let shelf_compact = 12.0 + 16.0 + 8.0 + p.width(&g.f.title, &shelf_cnt) + 14.0;
-            let shelf_full = 12.0 + 16.0 + 10.0 + shelf_n as f32 * 30.0 + 6.0 + 26.0 + 8.0;
+            let shelf_full = 12.0 + 16.0 + 10.0 + shelf_n as f32 * 30.0 + 6.0 + 26.0 + 4.0 + 26.0 + 8.0;
             let mode_size = |m: Mode| -> (f32, f32) {
                 match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
                     let (_, l, bar) = hud_parts(h);
                     let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Mem(_) => 26.0, _ => 0.0 };
-                    let w = if bar { HUD_W } else { (38.0 + p.width(&g.f.title, &l) + 18.0 + dots).max(170.0) }; (w, w) } }
+                    // Con barra: texto + hueco + barra (84) + hueco + porcentaje, para que nunca se pisen
+                    let w = if bar { (38.0 + p.width(&g.f.title, &l) + 16.0 + 84.0 + 10.0 + p.width(&g.f.title, "100%") + 14.0).max(HUD_W) } else { (38.0 + p.width(&g.f.title, &l) + 18.0 + dots).max(170.0) }; (w, w) } }
             };
             let (compact_w, full_w) = mode_size(mode);
             // El destello de carga necesita fotogramas mientras se ve
@@ -1771,6 +1912,10 @@ fn paint(hwnd: HWND) {
                                 if t > 0.9 && live { hits.push((rect(x0, sy + 1.0, x0 + 28.0, sb - 1.0), Act::ShelfOpen(i as u8))); }
                             }
                             let xx = ix + iw - 8.0 - 26.0;
+                            // Compartir (al móvil con Enlace Móvil, Uso compartido cercano…) y vaciar
+                            let xs = xx - 4.0 - 26.0;
+                            p.glyph(&g.f.icon_s, "\u{E72D}", xs, 26.0, &white, None);
+                            if t > 0.9 && live { hits.push((rect(xs + 1.0, sy + 1.0, xs + 25.0, sb - 1.0), Act::ShelfShare)); }
                             p.glyph(&g.f.icon_s, "\u{E711}", xx, 26.0, &dim, None);
                             if t > 0.9 && live { hits.push((rect(xx + 1.0, sy + 1.0, xx + 25.0, sb - 1.0), Act::ShelfClear)); }
                             rt.PopLayer();
@@ -1780,7 +1925,8 @@ fn paint(hwnd: HWND) {
                         let (gl, lbl, has_bar) = hud_parts(hh);
                         let (icon_b, fill_b) = match hh {
                             live::Hud::TimerDone => (&orange, &orange),
-                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) => (&green, &green),
+                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn => (&green, &green),
+                            live::Hud::MicOn | live::Hud::Disk(_) | live::Hud::Saver(true) => (&orange, &orange),
                             live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true) => (&red, &red),
                             live::Hud::Claude(pc) if pc >= 90 => (&orange, &orange),
                             live::Hud::Mem(_) => (&orange, &orange),
@@ -2050,6 +2196,11 @@ fn paint(hwnd: HWND) {
                         None => p.glyph(&g.f.icon, &gl, rx, 34.0, ib, sh),
                     }
                     rt.SetTransform(&base);
+                    // Un icono oculto pidió atención (aviso nuevo): punto azul junto a la flecha
+                    if act == Act::Tray && !tray_open && trayhost::needs_attention() {
+                        let e = D2D1_ELLIPSE { point: Vector2 { X: pcx + 7.5, Y: pcy - 7.0 }, radiusX: 3.0, radiusY: 3.0 };
+                        rt.FillEllipse(&e, &p.brush(crate::profiles::accent(1.0)));
+                    }
                 }
                 hits.push((rect(rx + 4.0, sy, hit_r, sb), act));
             }
@@ -2119,7 +2270,7 @@ fn paint(hwnd: HWND) {
             g.eq_visible = eq_rect.is_some();
             g.eq_rect = eq_rect;
             if animating { SetTimer(Some(hwnd), TIMER_FX, 15, None); }
-            if rt.EndDraw(None, None).is_err() { g.target = None; g.art = None; g.avatar = None; }
+            if let Err(e) = rt.EndDraw(None, None) { log_draw_fail("barra", &e); g.target = None; g.art = None; g.avatar = None; }
         });
         let _ = EndPaint(hwnd, &ps);
     }
@@ -2172,7 +2323,7 @@ fn paint_eq() -> bool {
             rt.FillRectangle(&r, &black);
             draw_eq(&rt, &g.eq, r.left + 1.0, BAR_H / 2.0, &bars);
             rt.PopAxisAlignedClip();
-            if rt.EndDraw(None, None).is_err() { g.target = None; return false; }
+            if let Err(e) = rt.EndDraw(None, None) { log_draw_fail("barra (eq)", &e); g.target = None; return false; }
         }
         true
     })
@@ -2360,7 +2511,24 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                             Some(pct)
                         }));
                         if let Some(p) = warn { live::show(live::Hud::LowBat(p), 4500); }
+                        // Llena con el cargador puesto: se avisa una vez (vuelve a avisar tras desenchufar)
+                        let full = GFX.with(|g| g.borrow_mut().as_mut().is_some_and(|g| {
+                            if !ac { g.full_warned = false; return false; }
+                            if pct >= 100 && !g.full_warned { g.full_warned = true; return true; }
+                            false
+                        }));
+                        if full { live::show(live::Hud::Full, 3000); }
                     }
+                    // Ahorro de batería que se enciende o se apaga
+                    let saver = { let mut s = SYSTEM_POWER_STATUS::default(); unsafe { GetSystemPowerStatus(&mut s).is_ok() }.then_some(s.SystemStatusFlag == 1) };
+                    if let Some(on) = saver {
+                        let ch = GFX.with(|g| g.borrow_mut().as_mut().map(|g| { let c = g.saver.is_some_and(|l| l != on); g.saver = Some(on); c }).unwrap_or(false));
+                        if ch { live::show(live::Hud::Saver(on), 2400); }
+                    }
+                    // Disco del sistema casi lleno: una vez por sesión (con la barra de cuánto)
+                    let d = ccenter::disk_used();
+                    let disk = GFX.with(|g| g.borrow_mut().as_mut().is_some_and(|g| { if d >= 95.0 && !g.disk_warned { g.disk_warned = true; true } else { false } }));
+                    if disk { live::show(live::Hud::Disk(d.round() as u8), 4000); }
                     let u = current_usage();
                     GFX.with(|g| if let Some(g) = g.borrow_mut().as_mut() { g.usage = u; });
                 }
@@ -2535,6 +2703,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_DESTROY => {
+                if bar_bottom() { windows_taskbar(true); }
                 let mut abd = APPBARDATA { cbSize: size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
                 appbar(ABM_REMOVE, &mut abd);
                 PostQuitMessage(0);
@@ -2673,6 +2842,8 @@ fn main() {
         let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
         let line = format!("{}-{:02}-{:02} {:02}:{:02}:{:02} hilo {hilo}: {msg} ({loc})\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
         let _ = std::fs::create_dir_all(sys::config_dir());
+        // Si cae con la barra abajo, la de Windows no puede quedarse escondida
+        if bar_bottom() { windows_taskbar(true); }
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(sys::config_dir() + "\\crash.log") { let _ = f.write_all(line.as_bytes()); }
         // Y se vuelve a abrir sola (salvo que ya haya fallado 3 veces en el último minuto: así no entra en bucle)
@@ -2694,7 +2865,7 @@ fn main() {
         let mut _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             // Relanzada tras un fallo: la instancia que cae aún está cerrándose; se espera a que suelte el sitio
-            if !std::env::args().any(|a| a == "--tras-fallo") { return; }
+            if !std::env::args().any(|a| a == "--tras-fallo" || a == "--reinicio") { return; }
             let mut ok = false;
             for _ in 0..40 {
                 std::thread::sleep(Duration::from_millis(250));
@@ -2708,6 +2879,7 @@ fn main() {
         let _ = windows::Win32::System::Recovery::RegisterApplicationRestart(w!("--tras-fallo"), windows::Win32::System::Recovery::REGISTER_APPLICATION_RESTART_FLAGS(0));
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        profiles::load_accent();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let hinst = GetModuleHandleW(None).unwrap();
         let class = w!("MacBarWindow");
@@ -2769,7 +2941,7 @@ fn main() {
             last_frame: Instant::now(), hl: HashMap::new(), pressed: None, born: HashMap::new(),
             app_prev: String::new(), app_at: Instant::now() - Duration::from_secs(5),
             isl_mode: Mode::Idle, isl_prev: None, isl_mode_at: Instant::now() - Duration::from_secs(5),
-            last_hud: None, hud_val: 0.0, count_on: false, eq_visible: false, last_ac: battery().map(|b| b.1), isl_v: 0.0, tray_rot: 0.0, shelf_bmps: (u64::MAX, Vec::new()), hud_bmp: None, usage_disp: 0.0, low_warned: 100,
+            last_hud: None, hud_val: 0.0, count_on: false, eq_visible: false, last_ac: battery().map(|b| b.1), isl_v: 0.0, tray_rot: 0.0, shelf_bmps: (u64::MAX, Vec::new()), hud_bmp: None, usage_disp: 0.0, low_warned: 100, full_warned: true, saver: None, disk_warned: false,
             art_tint: [1.0; 3], tint_now: [1.0; 3], art_at: Instant::now() - Duration::from_secs(5), desk_x: -1.0, glide: (D2D_RECT_F::default(), 0.0), clock_roll: Roll::default(), temp_roll: Roll::default(), morph: HashMap::new(), play_state: (false, Instant::now() - Duration::from_secs(5)),
             round_cap,
         }));
@@ -2801,6 +2973,19 @@ fn main() {
         // Widgets del escritorio (si están activados)
         desk::start();
         bar_ink_thread();
+        hang_watch();
+        search_extra::clip_start();
+        // Prueba visual de los avisos de la isla: MACBAR_HUDTEST=1 los enseña uno tras otro (3 s cada uno)
+        if std::env::var_os("MACBAR_HUDTEST").is_some() {
+            std::thread::spawn(|| {
+                *live::PHONE_NOTE.lock().unwrap() = ("WhatsApp".into(), "Mamá: ¿vienes a cenar?".into());
+                *live::WIFI_NAME.lock().unwrap() = "MiCasa_5G".into();
+                for h in [live::Hud::Phone, live::Hud::CamOn, live::Hud::MicOn, live::Hud::Wifi, live::Hud::Full, live::Hud::Saver(true), live::Hud::Disk(96), live::Hud::Volume(0.4, false), live::Hud::Bright(0.7), live::Hud::Power(80, true), live::Hud::Power(80, false), live::Hud::LowBat(9), live::Hud::Claude(68)] {
+                    std::thread::sleep(Duration::from_secs(4));
+                    live::show(h, 3000);
+                }
+            });
+        }
         // Reloj, batería e idioma: un timer lento
         SetTimer(Some(hwnd), TIMER_TICK, 10_000, None);
         SetTimer(Some(hwnd), TIMER_GUARD, 2_000, None);

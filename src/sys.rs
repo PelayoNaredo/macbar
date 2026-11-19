@@ -245,6 +245,16 @@ pub fn config_value(k: &str) -> Option<String> {
     txt.lines().find_map(|l| Some(l.trim().strip_prefix(k)?.trim().strip_prefix('=')?.trim().to_string()))
 }
 
+/// Cambia (o añade) `k = v` en config.ini, sin tocar el resto.
+pub fn set_config_value(k: &str, v: &str) {
+    let p = config_path();
+    let old = std::fs::read_to_string(&p).unwrap_or_default();
+    let mut lines: Vec<String> = old.lines().filter(|l| l.trim().strip_prefix(k).is_none_or(|r| !r.trim_start().starts_with('='))).map(str::to_string).collect();
+    lines.push(format!("{k} = {v}"));
+    let _ = std::fs::create_dir_all(config_dir());
+    let _ = std::fs::write(&p, lines.join("\n") + "\n");
+}
+
 pub fn edit_config() {
     let p = config_path();
     if !std::path::Path::new(&p).exists() {

@@ -277,7 +277,7 @@ impl CalendarW {
                 let beat = ((t - 0.75) / 0.5).clamp(0.0, 1.0);
                 let halo = (beat * std::f32::consts::PI).sin();
                 unsafe {
-                    if halo > 0.01 { ui.rt.FillEllipse(&ellipse(cx, cy, 12.0 + 6.0 * beat), &ui.brush(rgba(0.23, 0.51, 0.96, 0.35 * halo))); }
+                    if halo > 0.01 { ui.rt.FillEllipse(&ellipse(cx, cy, 12.0 + 6.0 * beat), &ui.brush(crate::profiles::accent(0.35 * halo))); }
                     ui.rt.FillEllipse(&ellipse(cx, cy, 12.0 * pop), &ui.on);
                 }
             }
@@ -927,7 +927,7 @@ const SYS_XS: [f32; 4] = [0.0, 0.20, 0.58, 0.80];
 /// con la que se pintó la capa.
 struct SystemW {
     bars: [f32; 3], disp: [f32; 4], apps: HashMap<String, (f32, f32, f32, f32)>, moving: bool,
-    graph: Option<(usize, Option<Instant>, ID2D1BitmapRenderTarget)>,
+    graph: Option<(Option<windows::core::IUnknown>, Option<Instant>, ID2D1BitmapRenderTarget)>,
     live: Option<(f32, f32, f32, f32, f32, f32, Option<Instant>)>,
     layer_at: Option<Instant>,
     /// Sonda de la gráfica: opacidad, posición y si sigue al ratón
@@ -973,7 +973,7 @@ impl Widget for SystemW {
         // entre una y otra, la imagen se desliza entera, que a la GPU no le cuesta nada
         const M: f32 = 10.0;
         let (bw, bh) = (HIST as f32 * step + M * 2.0, gb - gt + M * 2.0);
-        let rtk = { use windows::core::Interface; ui.rt.as_raw() as usize };
+        let rtk = { use windows::core::Interface; ui.rt.cast::<windows::core::IUnknown>().ok() };
         let stale = self.graph.as_ref().is_none_or(|g| g.0 != rtk || g.1 != s.at) || k < 1.0;
         if stale {
             let fresh = unsafe { ui.rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: bw, height: bh }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok() };
@@ -1510,13 +1510,12 @@ pub(crate) fn copy_text(s: &str) {
 /// `born`: cuándo apareció cada aviso (los nuevos entran deslizándose); `seen`: si ya se pintó una vez
 /// (los que había al abrir entran en la cascada normal, no como "nuevos").
 #[derive(Default)]
-struct PhoneW { born: HashMap<u32, Instant>, seen: bool, moving: bool, bmps: HashMap<String, ID2D1Bitmap>, bmp_rt: usize, sync_at: Option<Instant> }
+struct PhoneW { born: HashMap<u32, Instant>, seen: bool, moving: bool, bmps: HashMap<String, ID2D1Bitmap>, bmp_rt: crate::RtKey, sync_at: Option<Instant> }
 
 impl PhoneW {
     /// Miniatura como imagen de Direct2D (se rehace si cambia el lienzo).
     fn bmp(&mut self, rt: &ID2D1RenderTarget, key: &str, px: &Arc<Vec<u8>>) -> Option<ID2D1Bitmap> {
-        let raw = windows::core::Interface::as_raw(rt) as usize;
-        if raw != self.bmp_rt { self.bmps.clear(); self.bmp_rt = raw; }
+        if self.bmp_rt.fresh(rt) { self.bmps.clear(); }
         if self.bmps.len() > 12 { self.bmps.clear(); }
         if let Some(b) = self.bmps.get(key) { return Some(b.clone()); }
         let b = bitmap(rt, px, crate::phone::THUMB)?;
@@ -1526,8 +1525,7 @@ impl PhoneW {
     /// Igual, para imágenes que no son cuadradas (el fondo del móvil). La clave lleva la dirección de los
     /// datos: al elegir otro fondo cambia y se rehace.
     fn bmp_wh(&mut self, rt: &ID2D1RenderTarget, key: &str, px: &Arc<Vec<u8>>, w: u32, h: u32) -> Option<ID2D1Bitmap> {
-        let raw = windows::core::Interface::as_raw(rt) as usize;
-        if raw != self.bmp_rt { self.bmps.clear(); self.bmp_rt = raw; }
+        if self.bmp_rt.fresh(rt) { self.bmps.clear(); }
         let key = format!("{key}:{:x}", Arc::as_ptr(px) as usize);
         if let Some(b) = self.bmps.get(&key) { return Some(b.clone()); }
         let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
@@ -1721,8 +1719,21 @@ impl Widget for PhoneW {
         if st.ready && st.notifs.is_empty() {
             let k = ez(t, 0.3, 0.5);
             popup::push_alpha(ui.rt, k);
-            ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 40.0, W, 50.0, &ui.wa(0.3));
-            ui.text_c(&ui.f.sub, i18n::t("Sin notificaciones del móvil"), W / 2.0, ly + 98.0, 18.0, &ui.dim);
+            if st.unread > 0 {
+                // Enlace Móvil cuenta avisos pero no los pasa a Windows (banners apagados): al menos el número
+                let r = rect(PAD - 8.0, ly + 20.0, W - PAD + 8.0, ly + 150.0);
+                ui.card_k(r, ui.heat(16));
+                ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 30.0, W, 50.0, &ui.wa(0.75));
+                unsafe { ui.rt.FillEllipse(&ellipse(W / 2.0 + 16.0, ly + 38.0, 11.0), &ui.on); }
+                ui.text_c(&ui.f.small, &st.unread.to_string(), W / 2.0 + 16.0, ly + 29.0, 18.0, &ui.brush(rgba(1.0, 1.0, 1.0, 1.0)));
+                let n = st.unread.to_string();
+                ui.text_c(&ui.f.lbl, &if st.unread == 1 { i18n::t("1 notificación en Enlace Móvil").to_string() } else { i18n::tf("{} notificaciones en Enlace Móvil", &[&n]) }, W / 2.0, ly + 88.0, 20.0, &ui.white);
+                ui.text_c(&ui.f.small, i18n::t("Activa sus banners para verlas aquí"), W / 2.0, ly + 110.0, 18.0, &ui.faint);
+                ui.hit(r, 16);
+            } else {
+                ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 40.0, W, 50.0, &ui.wa(0.3));
+                ui.text_c(&ui.f.sub, i18n::t("Sin notificaciones del móvil"), W / 2.0, ly + 98.0, 18.0, &ui.dim);
+            }
             ui.rt_pop();
             return;
         }
@@ -1756,7 +1767,7 @@ impl Widget for PhoneW {
                 // Al pasar el ratón: una cruz para quitarlo (también de Windows)
                 round_btn(ui, &ui.f.icon.clone(), G_CLOSE, W - PAD - 6.0 + dx, yy + 12.0 + dy, 12.0, 300 + i as u32, false);
             } else {
-                ui.text_r(&ui.f.small, &ago(n.when), W - PAD + dx, yy + 2.0 + dy, 20.0, &ui.faint);
+                ui.text_r(&ui.f.small, &if n.app.is_empty() { ago(n.when) } else { format!("{} · {}", n.app, ago(n.when)) }, W - PAD + dx, yy + 2.0 + dy, 20.0, &ui.faint);
             }
             ui.rt_pop();
             yy += NROW;
@@ -1766,7 +1777,7 @@ impl Widget for PhoneW {
         match id? {
             10 => Some(Box::new(|| sys::open("sms:"))),
             11 => Some(Box::new(|| sys::open("tel:"))),
-            12 | 13 | 100..=199 => Some(Box::new(|| sys::open("ms-phone:"))),
+            12 | 13 | 16 | 100..=199 => Some(Box::new(|| sys::open("ms-phone:"))),
             14 => Some(Box::new(crate::phone::pick_wallpaper)),
             15 => { self.sync_at = Some(Instant::now()); crate::phone::PHONE_NOW.store(true, Ordering::Relaxed); None }
             20 => Some(Box::new(crate::phone::ask_access)),

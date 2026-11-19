@@ -208,7 +208,13 @@ pub fn content_matrix(hwnd: HWND, w: f32) -> Matrix3x2 {
         if *entering { 0.94 + 0.06 * crate::ease_back(ms / REVEAL_MS) } else { 1.0 - 0.035 * ease_out(ms / HIDE_MS) }
     })).unwrap_or(1.0);
     let px = w / 2.0;
-    Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: px * (1.0 - sc), M32: 0.0 }
+    // Crece desde el lado de la barra: arriba si va arriba, desde abajo si va abajo
+    let py = if crate::bar_bottom() {
+        let mut rc = RECT::default();
+        unsafe { let _ = GetClientRect(hwnd, &mut rc); }
+        (rc.bottom - rc.top) as f32 / scale_of(hwnd)
+    } else { 0.0 };
+    Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: px * (1.0 - sc), M32: py * (1.0 - sc) }
 }
 
 /// Segundos desde que empezó a abrirse (solo mientras dura la apertura).
@@ -495,7 +501,7 @@ pub fn toggle(k: Kind, anchor_right: i32) {
     let (wpx, hpx) = ((pw * s) as i32, (ph * s) as i32);
     let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let x = (anchor_right - wpx).clamp((8.0 * s) as i32, sw - wpx - (8.0 * s) as i32);
-    begin(hwnd, x, ((BAR_H + 4.0) * s) as i32, wpx, hpx);
+    begin(hwnd, x, crate::panel_y(hpx, s), wpx, hpx);
     unsafe {
         let _ = SetForegroundWindow(hwnd);
         SetTimer(Some(hwnd), TIMER_TICK_P, 1000, None);
@@ -552,7 +558,7 @@ fn paint(hwnd: HWND) {
                 glow: w.glow.clone(),
                 white: p.brush(ink_color(ink, 0.95)), dim: p.brush(ink_color(ink, 0.55)), faint: p.brush(ink_color(ink, 0.30)),
                 card: p.brush(ink_color(ink, 0.075)), card_edge: p.brush(ink_color(ink, 0.09)),
-                off: p.brush(ink_color(ink, 0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
+                off: p.brush(ink_color(ink, 0.13)), on: p.brush(crate::profiles::accent(1.0)),
                 hov: p.brush(ink_color(ink, 0.07)), track: p.brush(ink_color(ink, 0.14)), ink,
                 p, rt: &rt, f: &w.f, w: pw, s, hover: w.hover, hits: Vec::new(), shadow: None,
             };
@@ -601,8 +607,10 @@ fn resize_if_needed(hwnd: HWND) {
         let (wpx, hpx) = ((pw * s) as i32, (ph * s) as i32);
         let sw = GetSystemMetrics(SM_CXSCREEN);
         let x = (ar - wpx).clamp((8.0 * s) as i32, sw - wpx - (8.0 * s) as i32);
-        let _ = SetWindowPos(hwnd, None, x, wr.top, wpx, hpx, SWP_NOZORDER | SWP_NOACTIVATE);
-        REVEALS.with(|r| if let Some(e) = r.borrow_mut().get_mut(&(hwnd.0 as isize)) { e.1 = x; });
+        // Con la barra abajo, el panel crece hacia arriba: su borde de abajo se queda junto a la barra
+        let top = if crate::bar_bottom() { wr.bottom - hpx } else { wr.top };
+        let _ = SetWindowPos(hwnd, None, x, top, wpx, hpx, SWP_NOZORDER | SWP_NOACTIVATE);
+        REVEALS.with(|r| if let Some(e) = r.borrow_mut().get_mut(&(hwnd.0 as isize)) { e.1 = x; e.2 = top; });
         // La superficie se ajusta al tamaño nuevo en vez de rehacerse (rehacerla a cada tecla daba tirones
         // y, si ese primer fotograma fallaba, se quedaba a la vista el contenido viejo)
         let mut rc = RECT::default();

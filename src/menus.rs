@@ -117,7 +117,11 @@ pub fn track(owner: HWND, menu: Menu, x: i32, y: i32, right_align: bool, current
         // Necesario para que el menú se cierre al hacer clic fuera
         let _ = SetForegroundWindow(owner);
         let align = if right_align { TPM_RIGHTALIGN } else { TPM_LEFTALIGN };
-        let cmd = TrackPopupMenu(h, TPM_RETURNCMD | TPM_NONOTIFY | TPM_TOPALIGN | align, x, y, Some(0), owner, None);
+        // Con la barra abajo, el menú sale hacia arriba desde el borde de arriba de la barra
+        let (vert, y) = if crate::bar_bottom() {
+            (TPM_BOTTOMALIGN, GetSystemMetrics(SM_CYSCREEN) - (crate::BAR_H * crate::scale_of(owner)) as i32)
+        } else { (TPM_TOPALIGN, y) };
+        let cmd = TrackPopupMenu(h, TPM_RETURNCMD | TPM_NONOTIFY | vert | align, x, y, Some(0), owner, None);
         let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
         if let Some(hk) = hook { let _ = UnhookWindowsHookEx(hk); }
         let _ = DestroyMenu(h);
@@ -323,6 +327,28 @@ pub fn bar_menu() -> Menu {
             m.check(format!("      {}", t(label)), mode == i as i8, A::Bar(crate::BAR_INK0 + i as u32));
         }
     }
+    // Perfiles: cada uno recuerda sus widgets y ajustes
+    m.sep().info(t("Perfiles"));
+    let cur = crate::profiles::active();
+    for (i, name) in crate::profiles::NAMES.iter().enumerate() {
+        let label = if crate::profiles::exists(i) || cur == Some(i) { t(name).to_string() } else { crate::i18n::tf("{} (guardar el actual)", &[&t(name)]) };
+        m.check(format!("      {label}"), cur == Some(i), A::Bar(crate::BAR_PROFILE0 + i as u32));
+    }
+    m.item(format!("      {}", t("Abrir la carpeta de perfiles…")), A::Bar(crate::BAR_PROFILES_DIR));
+    m.check(t("Modo presentación (sin avisos ni widgets)"), crate::profiles::presenting(), A::Bar(crate::BAR_PRESENT));
+    // Tema: color de acento, y un archivo para compartirlo
+    m.sep().info(t("Color de acento"));
+    let ai = crate::profiles::accent_index();
+    for (i, (name, _)) in crate::profiles::ACCENTS.iter().enumerate() {
+        m.check(format!("      {}", t(name)), ai == Some(i), A::Bar(crate::BAR_ACCENT0 + i as u32));
+    }
+    m.item(format!("      {}", t("Exportar tema…")), A::Bar(crate::BAR_THEME_EXPORT))
+        .item(format!("      {}", t("Importar tema…")), A::Bar(crate::BAR_THEME_IMPORT));
+    // Posición de la barra
+    m.sep().info(t("Posición de la barra"));
+    let b = crate::bar_bottom();
+    m.check(format!("      {}", t("Arriba")), !b, A::Bar(crate::BAR_POS_TOP))
+        .check(format!("      {}", t("Abajo")), b, A::Bar(crate::BAR_POS_BOTTOM));
     // Idioma de la interfaz
     m.sep().info(t("Idioma"));
     let lm = crate::i18n::mode();

@@ -19,15 +19,15 @@ const ICON_PX: u32 = 64;
 const ID_ROW0: u32 = 100;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Cat { App, File, Folder, Setting, Web, Calc }
+enum Cat { App, File, Folder, Setting, Web, Calc, Clip, Link, Win, Cmd, Emoji, Color }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Sec { Calc, Best, Recent, Apps, Settings, Files, Web }
+enum Sec { Calc, Best, Recent, Clip, Win, Cmd, Emoji, Apps, Settings, Files, Web }
 
 impl Sec {
     fn label(self) -> &'static str {
         i18n::t(match self {
-            Sec::Calc => "Calculadora", Sec::Best => "Mejor resultado", Sec::Recent => "Recientes",
+            Sec::Calc => "Calculadora", Sec::Best => "Mejor resultado", Sec::Recent => "Recientes", Sec::Clip => "Portapapeles", Sec::Win => "Ventana", Sec::Cmd => "Comandos", Sec::Emoji => "Emojis",
             Sec::Apps => "Aplicaciones", Sec::Settings => "Configuración", Sec::Files => "Archivos y carpetas", Sec::Web => "Web",
         })
     }
@@ -206,7 +206,7 @@ fn settings_for(q: &str) -> Vec<Item> {
 // ---------------------------------------------------------------- recientes
 fn recent_path() -> String { sys::config_dir() + "\\search_recent.txt" }
 
-fn cat_code(c: Cat) -> char { match c { Cat::App => 'a', Cat::File => 'f', Cat::Folder => 'd', Cat::Setting => 's', Cat::Web => 'w', Cat::Calc => 'c' } }
+fn cat_code(c: Cat) -> char { match c { Cat::App => 'a', Cat::File => 'f', Cat::Folder => 'd', Cat::Setting => 's', Cat::Web => 'w', Cat::Calc => 'c', Cat::Clip => 'p', Cat::Link => 'l', Cat::Win => 'v', Cat::Cmd => 'k', Cat::Emoji => 'e', Cat::Color => 'o' } }
 fn code_cat(c: &str) -> Option<Cat> { Some(match c { "a" => Cat::App, "f" => Cat::File, "d" => Cat::Folder, "s" => Cat::Setting, _ => return None }) }
 
 fn load_recent() -> Vec<(Cat, String, String)> {
@@ -218,7 +218,7 @@ fn load_recent() -> Vec<(Cat, String, String)> {
 }
 
 fn remember(it: &Item) {
-    if matches!(it.cat, Cat::Web | Cat::Calc) { return; }
+    if matches!(it.cat, Cat::Web | Cat::Calc | Cat::Clip | Cat::Link | Cat::Win | Cat::Cmd | Cat::Emoji | Cat::Color) { return; }
     let mut v = load_recent();
     v.retain(|(_, _, t)| *t != it.target);
     v.insert(0, (it.cat, it.title.clone(), it.target.clone()));
@@ -474,6 +474,8 @@ pub fn selftest(q: &str) {
         None => s += "índice: sin conexión\n",
     }
     s += &format!("calc: {:?}\n", calc(q));
+    s += &format!("unidades: {:?}\n", search_extra::convert(q));
+    s += &format!("acceso: {:?}\n", search_extra::quicklink(q, url_encode));
     if let Ok(wic) = unsafe { CoCreateInstance::<_, IWICImagingFactory>(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) } {
         if let Some((_, a)) = f.first() { s += &format!("icono app: {:?} bytes\n", shell_icon(&wic, &a.item).map(|v| v.len())); }
     }
@@ -513,6 +515,48 @@ fn read_clipboard() -> Option<String> {
     }
 }
 
+/// Comandos del sistema: «bloquear», «papelera», «modo oscuro»…
+fn cmd_items(q: &str) -> Vec<Item> {
+    let fq = fold(q.trim());
+    if fq.chars().count() < 3 { return Vec::new(); }
+    let mut v: Vec<Item> = search_extra::CMDS.iter().filter_map(|(code, name, kes, ken, _)| {
+        let title = i18n::t(name);
+        let words = fold(&format!("{} {}", if i18n::en() { ken } else { kes }, title));
+        let s = score(&fq, &fold(title)).unwrap_or(0).max(
+            if fq.split_whitespace().all(|w| words.split_whitespace().any(|k| k.starts_with(w))) { 880 } else { 0 });
+        (s >= 600).then(|| Item { cat: Cat::Cmd, title: title.to_string(), sub: String::new(), target: code.to_string(), icon: None, score: s })
+    }).collect();
+    v.sort_by(|a, b| b.score.cmp(&a.score));
+    v
+}
+
+/// Colocar la ventana de delante: «izquierda», «maximizar», «esquina arriba derecha»…
+fn win_items(q: &str) -> Vec<Item> {
+    let fq = fold(q.trim());
+    if fq.chars().count() < 3 { return Vec::new(); }
+    let fg = last_fg();
+    if fg.0.is_null() { return Vec::new(); }
+    let sub = trunc(&search_extra::win_title(fg), 40);
+    let mut v: Vec<Item> = search_extra::WIN_ACTS.iter().filter_map(|(code, name, kes, ken)| {
+        let title = i18n::t(name);
+        let words = fold(&format!("{} {}", if i18n::en() { ken } else { kes }, title));
+        let s = score(&fq, &fold(title)).unwrap_or(0).max(
+            if fq.split_whitespace().all(|w| words.split_whitespace().any(|k| k.starts_with(w))) { 900 } else { 0 });
+        (s >= 600).then(|| Item { cat: Cat::Win, title: title.to_string(), sub: sub.clone(), target: code.to_string(), icon: None, score: s })
+    }).collect();
+    v.sort_by(|a, b| b.score.cmp(&a.score));
+    v
+}
+
+/// Textos copiados que contienen `q` (todos si está vacía), como filas.
+fn clip_items(q: &str) -> Vec<Item> {
+    let fq = fold(q.trim());
+    search_extra::clips().into_iter().filter(|(t, _)| fq.is_empty() || fold(t).contains(&fq)).map(|(t, at)| {
+        let one: String = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        Item { cat: Cat::Clip, title: one, sub: deskdata::ago(at), target: t, icon: None, score: 0 }
+    }).collect()
+}
+
 // ---------------------------------------------------------------- panel
 struct Row { it: Item, sec: Sec, born: Instant, delay: f32 }
 
@@ -533,13 +577,13 @@ pub struct SearchPanel {
     recent: Vec<Item>,
     calc: Option<String>,
     bmps: HashMap<String, ID2D1Bitmap>,
-    bmp_rt: usize,
+    bmp_rt: RtKey,
 }
 
 impl SearchPanel {
     pub fn new() -> Self {
         SearchPanel { query: String::new(), all: false, ver: 0, rows: Vec::new(), sel: 0, files_pending: false, asked: Instant::now(),
-            opened: Instant::now(), last: Instant::now(), sel_y: -1.0, sel_h: ROW, hover_prev: None, recent: Vec::new(), calc: None, bmps: HashMap::new(), bmp_rt: 0 }
+            opened: Instant::now(), last: Instant::now(), sel_y: -1.0, sel_h: ROW, hover_prev: None, recent: Vec::new(), calc: None, bmps: HashMap::new(), bmp_rt: RtKey::default() }
     }
 
     /// Lo escrito cambió: se pide la búsqueda y se rehace la lista con lo que ya se sabe.
@@ -549,7 +593,7 @@ impl SearchPanel {
         LATEST.store(self.ver, Ordering::Relaxed);
         self.asked = Instant::now();
         self.sel = 0;
-        self.calc = calc(&self.query);
+        self.calc = calc(&self.query).or_else(|| search_extra::convert(&self.query));
         job(Job::Query(self.ver, self.query.clone()));
         self.rebuild();
     }
@@ -565,7 +609,24 @@ impl SearchPanel {
         if o.ver == self.ver && q.is_empty() { self.recent = o.recent.clone(); }
         if q.is_empty() {
             for it in &self.recent { list.push((it.clone(), Sec::Recent)); }
+            for it in clip_items("").into_iter().take(3) { list.push((it, Sec::Clip)); }
+        } else if let Some(eq) = q.strip_prefix(':') {
+            // «:fuego» → emojis (solo eso: el resto no interesa)
+            for (e, name) in search_extra::emoji_matches(&fold(eq), fold) {
+                list.push((Item { cat: Cat::Emoji, title: format!("{e}   {name}"), sub: i18n::t("Intro para copiar").into(), target: e.to_string(), icon: None, score: 0 }, Sec::Emoji));
+            }
         } else {
+            // Temporizador («5 min») y color («#FF8800»): van arriba del todo
+            if let Some(s) = search_extra::timer_secs(&q) {
+                list.push((Item { cat: Cat::Cmd, title: i18n::tf("Temporizador de {}", &[&live::mmss(s)]), sub: i18n::t("Intro para empezar").into(), target: format!("timer:{s}"), icon: None, score: 0 }, Sec::Best));
+            }
+            if let Some(c) = search_extra::color_of(&q) {
+                let hex = format!("#{:02X}{:02X}{:02X}", c.0, c.1, c.2);
+                list.push((Item { cat: Cat::Color, title: hex.clone(), sub: format!("rgb({}, {}, {})", c.0, c.1, c.2), target: hex, icon: Some(Arc::new(search_extra::swatch(c, ICON_PX))), score: 0 }, Sec::Best));
+            }
+            if let Some((title, sub, url)) = search_extra::quicklink(&q, url_encode) {
+                list.push((Item { cat: Cat::Link, title, sub, target: url, icon: None, score: 0 }, Sec::Best));
+            }
             let mut apps = o.apps.clone();
             let mut settings = o.settings.clone();
             let mut files = o.files.clone();
@@ -578,11 +639,18 @@ impl SearchPanel {
                 else if ta >= ts && ta >= 0 { Some(apps.remove(0)) }
                 else if ts >= 0 { Some(settings.remove(0)) }
                 else { None };
-            if self.calc.is_none() { if let Some(b) = best { list.push((b, Sec::Best)); } }
+            let has_best = list.iter().any(|x| x.1 == Sec::Best);
+            if self.calc.is_none() && !has_best { if let Some(b) = best { list.push((b, Sec::Best)); } }
             else if let Some(b) = best { apps.insert(0, b); }
+            let wins = win_items(&q);
+            let win_first = wins.first().is_some_and(|w| w.score >= 900);
+            if win_first { for it in wins.iter().take(3) { list.push((it.clone(), Sec::Win)); } }
             for it in apps.into_iter().take(4) { list.push((it, Sec::Apps)); }
+            if !win_first { for it in wins.into_iter().take(2) { list.push((it, Sec::Win)); } }
+            for it in cmd_items(&q).into_iter().take(3) { list.push((it, Sec::Cmd)); }
             for it in settings.into_iter().take(3) { list.push((it, Sec::Settings)); }
             for it in files.into_iter().take(5) { list.push((it, Sec::Files)); }
+            if q.chars().count() >= 2 { for it in clip_items(&q).into_iter().take(3) { list.push((it, Sec::Clip)); } }
             list.push((Item { cat: Cat::Web, title: i18n::tf("Buscar «{}» en la web", &[&trunc(&q, 40)]), sub: "Google".into(), target: q.clone(), icon: None, score: 0 }, Sec::Web));
         }
         self.files_pending = !q.is_empty() && !(o.ver == self.ver && o.files_done);
@@ -637,14 +705,16 @@ impl SearchPanel {
                 Cat::File | Cat::Folder if alt => sys::open_args("explorer.exe", &format!("/select,\"{}\"", it.target)),
                 Cat::File | Cat::Folder | Cat::Setting => sys::open(&it.target),
                 Cat::Web => sys::open(&format!("https://www.google.com/search?q={}", url_encode(&it.target))),
-                Cat::Calc => deskw::copy_text(&it.target),
+                Cat::Calc | Cat::Clip | Cat::Emoji | Cat::Color => deskw::copy_text(&it.target),
+                Cat::Cmd => search_extra::run_cmd(&it.target),
+                Cat::Link => sys::open(&it.target),
+                Cat::Win => search_extra::win_apply(&it.target, last_fg()),
             }
         }))
     }
 
     fn bitmap(&mut self, rt: &ID2D1RenderTarget, key: &str, px: &Arc<Vec<u8>>) -> Option<ID2D1Bitmap> {
-        let raw = rt.as_raw() as usize;
-        if raw != self.bmp_rt { self.bmps.clear(); self.bmp_rt = raw; }
+        if self.bmp_rt.fresh(rt) { self.bmps.clear(); }
         if self.bmps.len() > 80 { self.bmps.clear(); }
         if let Some(b) = self.bmps.get(key) { return Some(b.clone()); }
         let b = deskw::bitmap(rt, px, ICON_PX)?;
@@ -654,7 +724,7 @@ impl SearchPanel {
 }
 
 fn glyph_of(c: Cat) -> &'static str {
-    match c { Cat::App => "\u{E737}", Cat::File => "\u{E8A5}", Cat::Folder => "\u{E8B7}", Cat::Setting => "\u{E713}", Cat::Web => "\u{E774}", Cat::Calc => "\u{E8EF}" }
+    match c { Cat::App => "\u{E737}", Cat::File => "\u{E8A5}", Cat::Folder => "\u{E8B7}", Cat::Setting => "\u{E713}", Cat::Web => "\u{E774}", Cat::Calc => "\u{E8EF}", Cat::Clip => "\u{E77F}", Cat::Link => "\u{E71B}", Cat::Win => "\u{E737}", Cat::Cmd => "\u{E756}", Cat::Emoji => "\u{E76E}", Cat::Color => "\u{E790}" }
 }
 
 impl Content for SearchPanel {
@@ -700,7 +770,7 @@ impl Content for SearchPanel {
         } else {
             let tw = ui.p.width(&ui.f.q, &self.query);
             if self.all {
-                unsafe { rt.FillRoundedRectangle(&rrect(rect(tx - 2.0, PAD + INPUT_H / 2.0 - 13.0, tx + tw + 2.0, PAD + INPUT_H / 2.0 + 13.0), 4.0), &ui.brush(rgba(0.23, 0.51, 0.96, 0.55))); }
+                unsafe { rt.FillRoundedRectangle(&rrect(rect(tx - 2.0, PAD + INPUT_H / 2.0 - 13.0, tx + tw + 2.0, PAD + INPUT_H / 2.0 + 13.0), 4.0), &ui.brush(crate::profiles::accent(0.55))); }
             }
             ui.text(&ui.f.q, &self.query, tx, PAD, INPUT_H, &ui.white);
         }
@@ -708,7 +778,7 @@ impl Content for SearchPanel {
         let cx = tx + if self.query.is_empty() { 0.0 } else { ui.p.width(&ui.f.q, &self.query) + 1.0 };
         if !self.all {
             let blink = if self.animating() { 0.55 + 0.45 * (since * 5.0).cos().abs() } else { 1.0 };
-            unsafe { rt.FillRectangle(&rect(cx, PAD + INPUT_H / 2.0 - 11.0, cx + 1.6, PAD + INPUT_H / 2.0 + 11.0), &ui.brush(rgba(0.23, 0.51, 0.96, blink))); }
+            unsafe { rt.FillRectangle(&rect(cx, PAD + INPUT_H / 2.0 - 11.0, cx + 1.6, PAD + INPUT_H / 2.0 + 11.0), &ui.brush(crate::profiles::accent(blink))); }
         }
         // Buscando en el índice: tres puntos que laten
         if self.files_pending && self.asked.elapsed().as_secs_f32() > 0.15 {

@@ -7,7 +7,7 @@ use windows::UI::Notifications::Management::{UserNotificationListener, UserNotif
 use windows::UI::Notifications::{KnownNotificationBindings, NotificationKinds, UserNotification};
 
 #[derive(Clone, Default, PartialEq)]
-pub struct PNotif { pub id: u32, pub title: String, pub body: String, pub when: u64 }
+pub struct PNotif { pub id: u32, pub title: String, pub body: String, pub when: u64, pub app: String }
 
 /// Foto o vídeo reciente del móvil: ruta, miniatura (THUMB × THUMB, BGRA) y si es vídeo.
 #[derive(Clone)]
@@ -21,10 +21,12 @@ pub const WALL_H: u32 = 276;
 /// `battery`: carga y cuándo se vio (solo se puede leer con la ventana de Enlace Móvil abierta).
 #[derive(Clone, Default)]
 pub struct PhoneState { pub ready: bool, pub access: bool, pub running: bool, pub notifs: Vec<PNotif>, pub photos: Vec<PPhoto>,
-    pub name: String, pub battery: Option<(u8, u64)>, pub wall: Option<Arc<Vec<u8>>> }
+    pub name: String, pub battery: Option<(u8, u64)>, pub wall: Option<Arc<Vec<u8>>>,
+    /// Contador del icono de Enlace Móvil (avisos sin leer), aunque los avisos no lleguen a Windows
+    pub unread: u32 }
 
 pub static PHONE: Mutex<PhoneState> = Mutex::new(PhoneState { ready: false, access: false, running: false, notifs: Vec::new(), photos: Vec::new(),
-    name: String::new(), battery: None, wall: None });
+    name: String::new(), battery: None, wall: None, unread: 0 });
 /// Pedir una lectura ya (al quitar un aviso, al volver a la vista…).
 pub static PHONE_NOW: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
@@ -40,12 +42,22 @@ pub fn start() {
         let mut thumbs: HashMap<String, Option<Arc<Vec<u8>>>> = HashMap::new();
         let mut photos: Vec<PPhoto> = Vec::new();
         let mut round = 0u32;
+        // Avisos ya vistos: solo los que llegan después del arranque salen en la isla
+        let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut battery: Option<(u8, u64)> = None;
         let mut wall: (String, Option<Arc<Vec<u8>>>) = (String::new(), None);
         let name = if sys::demo() { "Mi móvil".to_string() } else { device_name() };
         loop {
             let mut st = if sys::demo() { demo() } else { read() };
             st.name = name.clone();
+            let fresh: Vec<&PNotif> = st.notifs.iter().filter(|n| !seen.contains(&n.id)).collect();
+            if round > 0 && !sys::demo() {
+                if let Some(n) = fresh.iter().max_by_key(|n| n.when) {
+                    *live::PHONE_NOTE.lock().unwrap() = (n.app.clone(), if n.title.is_empty() { n.body.clone() } else { n.title.clone() });
+                    live::show(live::Hud::Phone, 4000);
+                }
+            }
+            for n in &st.notifs { seen.insert(n.id); }
             // La batería solo la enseña la ventana de Enlace Móvil: se lee si está abierta y se recuerda
             if st.running && round % 3 == 0 { if let Some(b) = read_battery() { battery = Some((b, deskdata::now_unix())); } }
             st.battery = if sys::demo() { Some((72, deskdata::now_unix())) } else { battery };
@@ -207,6 +219,61 @@ fn read_battery() -> Option<u8> {
     }
 }
 
+/// Avisos de la lista «Notificaciones» de la ventana de Enlace Móvil (si está abierta). Cada aviso trae app,
+/// título, texto y hora ("8:06").
+fn read_window_notifs() -> Option<Vec<PNotif>> {
+    let pid = phone_pid()?;
+    unsafe {
+        let uia: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let cond = uia.CreatePropertyCondition(UIA_ProcessIdPropertyId, &windows::Win32::System::Variant::VARIANT::from(pid as i32)).ok()?;
+        let wins = uia.GetRootElement().ok()?.FindAll(TreeScope_Children, &cond).ok()?;
+        let by_id = |id: &str| uia.CreatePropertyCondition(UIA_AutomationIdPropertyId, &windows::Win32::System::Variant::VARIANT::from(id)).ok();
+        let items_c = uia.CreatePropertyCondition(UIA_ControlTypePropertyId, &windows::Win32::System::Variant::VARIANT::from(UIA_ListItemControlTypeId.0)).ok()?;
+        for i in 0..wins.Length().unwrap_or(0) {
+            let Ok(w) = wins.GetElement(i) else { continue };
+            let Some(hc) = by_id("NotificationsListScrollHost") else { continue };
+            let Ok(host) = w.FindFirst(TreeScope_Descendants, &hc) else { continue };
+            let Ok(items) = host.FindAll(TreeScope_Descendants, &items_c) else { continue };
+            let text_of = |e: &IUIAutomationElement, id: &str| -> String {
+                by_id(id).and_then(|c| e.FindFirst(TreeScope_Descendants, &c).ok()).and_then(|x| x.CurrentName().ok())
+                    .map(|b| b.to_string().chars().filter(|c| *c != '\u{200e}' && *c != '\u{200f}').collect::<String>().trim().to_string())
+                    .unwrap_or_default()
+            };
+            let mut out = Vec::new();
+            for j in 0..items.Length().unwrap_or(0).min(20) {
+                let Ok(it) = items.GetElement(j) else { continue };
+                let app = text_of(&it, "AppNameTextBlock");
+                let title = text_of(&it, "CompactModeTitleTextBlock");
+                let body = text_of(&it, "NotificationDescriptionText");
+                if title.is_empty() && body.is_empty() { continue; }
+                let when = clock_to_unix(&text_of(&it, "HoverDateReceivedTextBlock"));
+                // Sin identificador propio: uno estable a partir del contenido
+                let id = { use std::hash::{Hash, Hasher}; let mut h = std::collections::hash_map::DefaultHasher::new(); (&app, &title, &body).hash(&mut h); h.finish() as u32 };
+                let (title, body) = if title.is_empty() { (body, String::new()) } else { (title, body) };
+                out.push(PNotif { id, title, body, when, app });
+            }
+            return Some(out);
+        }
+        None
+    }
+}
+
+/// "8:06" (hoy) → hora unix; si no es una hora, ahora.
+fn clock_to_unix(s: &str) -> u64 {
+    let now = deskdata::now_unix();
+    let p: Vec<u32> = s.split(':').filter_map(|x| x.trim().parse().ok()).collect();
+    if p.len() != 2 { return now; }
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let secs_now = t.wHour as i64 * 3600 + t.wMinute as i64 * 60 + t.wSecond as i64;
+    let mut d = secs_now - (p[0] as i64 * 3600 + p[1] as i64 * 60);
+    if d < 0 { d += 86_400; } // de ayer
+    now.saturating_sub(d as u64)
+}
+
+/// Lo último visto en la ventana de Enlace Móvil (se sigue enseñando al cerrarla, mientras su contador diga
+/// que hay avisos).
+static WINDOW_CACHE: Mutex<Vec<PNotif>> = Mutex::new(Vec::new());
+
 fn running() -> bool { phone_pid().is_some() }
 
 fn phone_pid() -> Option<u32> {
@@ -237,24 +304,163 @@ fn texts(n: &UserNotification) -> Vec<String> {
 
 fn read() -> PhoneState {
     let mut st = PhoneState { ready: true, running: running(), ..Default::default() };
-    let Ok(l) = UserNotificationListener::Current() else { return st };
-    st.access = l.GetAccessStatus().ok() == Some(UserNotificationListenerAccessStatus::Allowed);
-    if !st.access { return st; }
-    let Ok(v) = l.GetNotificationsAsync(NotificationKinds::Toast).and_then(|a| a.join()) else { return st };
-    for n in v {
-        let app = n.AppInfo().and_then(|a| a.AppUserModelId()).map(|h| h.to_string()).unwrap_or_default();
-        if !app.starts_with(AUMID) { continue; }
-        let t = texts(&n);
-        let Some(title) = t.first().cloned() else { continue };
-        // DateTime: intervalos de 100 ns desde 1601
-        let when = n.CreationTime().map(|d| (d.UniversalTime / 10_000_000 - 11_644_473_600).max(0) as u64).unwrap_or(0);
-        st.notifs.push(PNotif { id: n.Id().unwrap_or(0), title, body: t[1..].join(" · "), when });
+    // Los avisos se leen de la base de datos del centro de notificaciones de Windows (solo lectura):
+    // la API de "leer notificaciones" dice que sí a una app sin paquete y luego devuelve la lista vacía
+    match wpn_phone_notifs() {
+        Some((v, badge)) => { st.access = true; st.notifs = v; st.unread = badge; }
+        None => {
+            // Sin base de datos legible: la API, por si acaso (con paquete sí funciona)
+            let Ok(l) = UserNotificationListener::Current() else { return st };
+            st.access = l.GetAccessStatus().ok() == Some(UserNotificationListenerAccessStatus::Allowed);
+            if !st.access { return st; }
+            let Ok(v) = l.GetNotificationsAsync(NotificationKinds::Toast).and_then(|a| a.join()) else { return st };
+            for n in v {
+                let app = n.AppInfo().and_then(|a| a.AppUserModelId()).map(|h| h.to_string()).unwrap_or_default();
+                if !app.starts_with(AUMID) { continue; }
+                let t = texts(&n);
+                let Some(title) = t.first().cloned() else { continue };
+                let when = n.CreationTime().map(|d| (d.UniversalTime / 10_000_000 - 11_644_473_600).max(0) as u64).unwrap_or(0);
+                st.notifs.push(PNotif { id: n.Id().unwrap_or(0), title, body: t[1..].join(" · "), when, app: app_name(&app) });
+            }
+        }
     }
+    // Si a Windows no llegan (banners apagados), los de la ventana de Enlace Móvil
+    if st.notifs.is_empty() && st.running {
+        if let Some(v) = read_window_notifs() { *WINDOW_CACHE.lock().unwrap() = v; }
+        if st.unread == 0 && st.access { WINDOW_CACHE.lock().unwrap().clear(); }
+        st.notifs = WINDOW_CACHE.lock().unwrap().clone();
+    }
+    let hidden = HIDDEN.lock().unwrap();
+    st.notifs.retain(|n| !hidden.contains(&n.id));
     st.notifs.sort_by(|a, b| b.when.cmp(&a.when));
     st.notifs.truncate(12);
     st
 }
 
+/// Avisos quitados desde el widget (Windows no deja a otra app borrarlos: se ocultan aquí).
+static HIDDEN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Nombre de la app del móvil a partir del identificador que le da Enlace Móvil
+/// ("…!YourPhoneNotifications_com.whatsapp" → "WhatsApp").
+fn app_name(aumid: &str) -> String {
+    if aumid.contains("!YourPhoneMessages") { return i18n::t("Mensajes").to_string(); }
+    let pkg = aumid.rsplit("YourPhoneNotifications_").next().unwrap_or("").to_lowercase();
+    let known = [
+        ("com.whatsapp", "WhatsApp"), ("com.instagram.android", "Instagram"), ("com.google.android.gm", "Gmail"),
+        ("com.google.android.youtube", "YouTube"), ("com.zhiliaoapp.musically", "TikTok"), ("org.telegram.messenger", "Telegram"),
+        ("com.discord", "Discord"), ("com.valvesoftware.android.steam.community", "Steam"), ("com.spotify.music", "Spotify"),
+        ("com.twitter.android", "X"), ("com.google.android.apps.walletnfcrel", "Wallet"), ("com.android.bluetooth", "Bluetooth"),
+        ("com.samsung.android.app.routines", "Rutinas"), ("com.sec.spp.push", "Samsung"), ("com.osp.app.signin", "Samsung"),
+        ("com.google.android.calendar", "Calendar"), ("com.facebook.orca", "Messenger"), ("com.facebook.katana", "Facebook"),
+        ("com.amazon.mshop.android.shopping", "Amazon"), ("com.netflix.mediaclient", "Netflix"), ("com.reddit.frontpage", "Reddit"),
+    ];
+    if let Some((_, n)) = known.iter().find(|(k, _)| *k == pkg) { return n.to_string(); }
+    // Si no se conoce, la última parte del paquete con mayúscula ("com.foo.bar" → "Bar")
+    let last = pkg.rsplit('.').find(|s| !["android", "app", "apps", "mobile"].contains(s)).unwrap_or("");
+    let mut c = last.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+// ---- Base de datos del centro de notificaciones (SQLite de Windows: winsqlite3.dll, sin dependencias)
+type Open = unsafe extern "C" fn(*const u8, *mut *mut core::ffi::c_void, i32, *const u8) -> i32;
+type Prepare = unsafe extern "C" fn(*mut core::ffi::c_void, *const u8, i32, *mut *mut core::ffi::c_void, *mut *const u8) -> i32;
+type Step = unsafe extern "C" fn(*mut core::ffi::c_void) -> i32;
+type ColBlob = unsafe extern "C" fn(*mut core::ffi::c_void, i32) -> *const u8;
+type ColBytes = unsafe extern "C" fn(*mut core::ffi::c_void, i32) -> i32;
+type ColI64 = unsafe extern "C" fn(*mut core::ffi::c_void, i32) -> i64;
+type Fin = unsafe extern "C" fn(*mut core::ffi::c_void) -> i32;
+
+fn wpn_phone_notifs() -> Option<(Vec<PNotif>, u32)> {
+    unsafe {
+        let lib = windows::Win32::System::LibraryLoader::LoadLibraryW(w!("winsqlite3.dll")).ok()?;
+        let f = |n: windows::core::PCSTR| windows::Win32::System::LibraryLoader::GetProcAddress(lib, n);
+        let open: Open = std::mem::transmute(f(windows::core::s!("sqlite3_open_v2"))?);
+        let prepare: Prepare = std::mem::transmute(f(windows::core::s!("sqlite3_prepare_v2"))?);
+        let step: Step = std::mem::transmute(f(windows::core::s!("sqlite3_step"))?);
+        let blob: ColBlob = std::mem::transmute(f(windows::core::s!("sqlite3_column_blob"))?);
+        let text: ColBlob = std::mem::transmute(f(windows::core::s!("sqlite3_column_text"))?);
+        let bytes: ColBytes = std::mem::transmute(f(windows::core::s!("sqlite3_column_bytes"))?);
+        let i64_: ColI64 = std::mem::transmute(f(windows::core::s!("sqlite3_column_int64"))?);
+        let finalize: Fin = std::mem::transmute(f(windows::core::s!("sqlite3_finalize"))?);
+        let close: Fin = std::mem::transmute(f(windows::core::s!("sqlite3_close"))?);
+        let path = std::env::var("LOCALAPPDATA").ok()? + "\\Microsoft\\Windows\\Notifications\\wpndatabase.db\0";
+        let mut db = std::ptr::null_mut();
+        // 1 = SQLITE_OPEN_READONLY: nunca se escribe en ella
+        if open(path.as_ptr(), &mut db, 1, std::ptr::null()) != 0 || db.is_null() { if !db.is_null() { close(db); } return None; }
+        let sql = "SELECT n.Id, n.ArrivalTime, n.Payload, h.PrimaryId FROM Notification n JOIN NotificationHandler h ON n.HandlerId = h.RecordId \
+                   WHERE h.PrimaryId LIKE 'Microsoft.YourPhone_8wekyb3d8bbwe!YourPhone%' AND n.Type = 'toast' ORDER BY n.ArrivalTime DESC LIMIT 20\0";
+        let mut stmt = std::ptr::null_mut();
+        if prepare(db, sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut()) != 0 { close(db); return None; }
+        let mut out = Vec::new();
+        // 100 = SQLITE_ROW
+        while step(stmt) == 100 {
+            let id = i64_(stmt, 0) as u32;
+            let ft = i64_(stmt, 1);
+            let when = if ft > 0 { (ft / 10_000_000 - 11_644_473_600).max(0) as u64 } else { 0 };
+            let (p, n) = (blob(stmt, 2), bytes(stmt, 2));
+            if p.is_null() || n <= 0 { continue; }
+            let xml = String::from_utf8_lossy(std::slice::from_raw_parts(p, n as usize)).to_string();
+            let (a, an) = (text(stmt, 3), bytes(stmt, 3));
+            let aumid = if a.is_null() { String::new() } else { String::from_utf8_lossy(std::slice::from_raw_parts(a, an as usize)).to_string() };
+            let t = toast_texts(&xml);
+            let Some(title) = t.first().cloned() else { continue };
+            out.push(PNotif { id, title, body: t[1..].join(" · "), when, app: app_name(&aumid) });
+        }
+        finalize(stmt);
+        // El contador del icono de Enlace Móvil: <badge value="4"/>
+        let mut badge = 0u32;
+        let sql2 = "SELECT n.Payload FROM Notification n JOIN NotificationHandler h ON n.HandlerId = h.RecordId WHERE h.PrimaryId LIKE 'Microsoft.YourPhone_8wekyb3d8bbwe!%' AND n.Type = 'badge' LIMIT 1\0";
+        let mut st2 = std::ptr::null_mut();
+        if prepare(db, sql2.as_ptr(), -1, &mut st2, std::ptr::null_mut()) == 0 {
+            if step(st2) == 100 {
+                let (p, n) = (blob(st2, 0), bytes(st2, 0));
+                if !p.is_null() && n > 0 {
+                    let x = String::from_utf8_lossy(std::slice::from_raw_parts(p, n as usize)).to_string();
+                    badge = x.split("value=\"").nth(1).and_then(|r| r.split('"').next()).and_then(|v| v.parse().ok()).unwrap_or(0);
+                }
+            }
+            finalize(st2);
+        }
+        close(db);
+        Some((out, badge))
+    }
+}
+
+/// Textos de un aviso (los `<text>` de su XML, sin la atribución), con las entidades ya resueltas.
+fn toast_texts(xml: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<text") {
+        rest = &rest[i + 5..];
+        let Some(gt) = rest.find('>') else { break };
+        let attrs = &rest[..gt];
+        if attrs.ends_with('/') { rest = &rest[gt + 1..]; continue; }
+        let body = &rest[gt + 1..];
+        let Some(end) = body.find("</text>") else { break };
+        let s = unescape(&body[..end]);
+        if !attrs.contains("attribution") && !s.trim().is_empty() { v.push(s.trim().to_string()); }
+        rest = &body[end..];
+    }
+    v
+}
+
+fn unescape(s: &str) -> String {
+    let mut out = String::new();
+    let mut it = s.split('&');
+    if let Some(first) = it.next() { out.push_str(first); }
+    for part in it {
+        let Some(semi) = part.find(';') else { out.push('&'); out.push_str(part); continue };
+        let ent = &part[..semi];
+        let ch = match ent {
+            "amp" => Some('&'), "lt" => Some('<'), "gt" => Some('>'), "quot" => Some('"'), "apos" => Some('\''),
+            e if e.starts_with("#x") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
+            e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
+            _ => None,
+        };
+        match ch { Some(c) => { out.push(c); out.push_str(&part[semi + 1..]); } None => { out.push('&'); out.push_str(part); } }
+    }
+    out
+}
 /// Imagen de degradado vertical con unas "colinas" (para el modo demo).
 fn gradient(w: u32, h: u32, top: [f32; 3], bottom: [f32; 3]) -> Vec<u8> {
     let mut v = vec![0u8; (w * h * 4) as usize];
@@ -276,8 +482,8 @@ fn demo_photos() -> Vec<PPhoto> {
 
 fn demo() -> PhoneState {
     let now = deskdata::now_unix();
-    let n = |id, t: &str, b: &str, m: u64| PNotif { id, title: t.into(), body: b.into(), when: now - m * 60 };
-    PhoneState { ready: true, access: true, running: true, photos: Vec::new(), name: "Móvil de demostración".into(), battery: Some((72, now)), wall: None, notifs: vec![
+    let n = |id, t: &str, b: &str, m: u64| PNotif { id, title: t.into(), body: b.into(), when: now - m * 60, app: ["WhatsApp", "WhatsApp", "Gmail", "Calendario"][(id as usize - 1) % 4].into() };
+    PhoneState { ready: true, access: true, running: true, photos: Vec::new(), name: "Móvil de demostración".into(), battery: Some((72, now)), wall: None, unread: 0, notifs: vec![
         n(1, "Lucía", "¿Quedamos a las ocho en el sitio de siempre?", 2),
         n(2, "Grupo Familia", "Mamá: Las fotos de ayer ya están en el álbum", 18),
         n(3, "Correos", "Tu envío llega hoy entre las 10:00 y las 14:00", 64),
@@ -289,6 +495,8 @@ fn demo() -> PhoneState {
 pub fn dismiss(id: u32) {
     std::thread::spawn(move || {
         if let Ok(l) = UserNotificationListener::Current() { let _ = l.RemoveNotification(id); }
+        // Por si Windows no deja quitarlo (app sin paquete): al menos desaparece del widget
+        HIDDEN.lock().unwrap().push(id);
         PHONE_NOW.store(true, Ordering::Relaxed);
     });
 }
@@ -309,11 +517,21 @@ pub fn selftest() {
     unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
     let st = read();
     let mut s = format!("en marcha={} acceso={} avisos del móvil={}\n", st.running, st.access, st.notifs.len());
+    // Qué apps tienen avisos ahora (solo su identificador y cuántos, sin contenido)
+    if let Ok(l) = UserNotificationListener::Current() {
+        if let Ok(v) = l.GetNotificationsAsync(NotificationKinds::Toast).and_then(|a| a.join()) {
+            let mut by: HashMap<String, usize> = HashMap::new();
+            for n in v { *by.entry(n.AppInfo().and_then(|a| a.AppUserModelId()).map(|h| h.to_string()).unwrap_or_else(|_| "?".into())).or_default() += 1; }
+            s += &format!("apps con avisos: {by:?}\n");
+        }
+    }
     let t = Instant::now();
     if let Ok(w) = unsafe { CoCreateInstance::<_, IWICImagingFactory>(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER) } {
         for p in recent_photos(&w, &mut HashMap::new()) { s += &format!("foto vídeo={} miniatura={:?} bytes\n", p.video, p.thumb.map(|v| v.len())); }
     }
     s += &format!("fotos en {} ms\n", t.elapsed().as_millis());
+    match wpn_phone_notifs() { Some((v, b)) => { s += &format!("base de avisos: {} del móvil, contador {b}\n", v.len()); for n in v.iter().take(5) { s += &format!("  app={} textos={} hace={}s\n", n.app, 1 + n.body.split(" · ").filter(|x| !x.is_empty()).count(), deskdata::now_unix().saturating_sub(n.when)); } } None => s += "base de avisos: no legible\n" }
     s += &format!("nombre=«{}» batería={:?}\n", device_name(), read_battery());
+    match read_window_notifs() { Some(v) => { s += &format!("ventana: {} avisos\n", v.len()); for n in &v { s += &format!("  app={} titulo={}c texto={}c hace={}s\n", n.app, n.title.chars().count(), n.body.chars().count(), deskdata::now_unix().saturating_sub(n.when)); } } None => s += "ventana: cerrada\n" }
     let _ = std::fs::write(std::env::temp_dir().join("macbar_phone.txt"), s);
 }

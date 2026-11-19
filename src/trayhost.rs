@@ -28,6 +28,7 @@ const NIF_ICON: u32 = 2;
 const NIF_TIP: u32 = 4;
 const NIF_STATE: u32 = 8;
 const NIF_GUID: u32 = 0x20;
+const NIF_INFO: u32 = 0x10;
 const NIS_HIDDEN: u32 = 1;
 const TIMER_TOP: usize = 1;
 const TIMER_REBROADCAST: usize = 2;
@@ -46,7 +47,25 @@ pub struct TrayIcon {
     pub exe: String,
     pub pid: u32,
     pub seq: u64,
+    /// Cuándo pidió atención por última vez (aviso propio o texto nuevo), en ms desde el arranque
+    pub changed: u64,
 }
+
+/// Algún icono pidió atención (ms desde el arranque) y cuándo se miró el panel por última vez.
+static ATTN_AT: AtomicU64 = AtomicU64::new(0);
+static SEEN_AT: AtomicU64 = AtomicU64::new(0);
+fn ms_now() -> u64 { static T0: OnceLock<Instant> = OnceLock::new(); T0.get_or_init(Instant::now).elapsed().as_millis() as u64 + 1 }
+/// ¿Hay algo nuevo en los iconos ocultos que aún no se ha mirado? (caduca a la media hora)
+pub fn needs_attention() -> bool {
+    let a = ATTN_AT.load(Ordering::Relaxed);
+    a > SEEN_AT.load(Ordering::Relaxed) && ms_now().saturating_sub(a) < 30 * 60 * 1000
+}
+/// Se abrió el panel: lo pendiente ya está visto.
+pub fn mark_seen() { SEEN_AT.store(ms_now(), Ordering::Relaxed); }
+/// ¿Este icono pidió atención hace poco? (el panel los pone primero)
+pub fn recent(i: &TrayIcon) -> bool { i.changed > 0 && ms_now().saturating_sub(i.changed) < 30 * 60 * 1000 }
+/// El texto sin cifras: un «Descargando 41 %» que pasa a 42 % no es nada nuevo.
+fn gist(s: &str) -> String { s.chars().filter(|c| !c.is_ascii_digit()).collect() }
 
 pub static ICONS: Mutex<Vec<TrayIcon>> = Mutex::new(Vec::new());
 static OWN: AtomicIsize = AtomicIsize::new(0);
@@ -180,7 +199,7 @@ fn record(d: &TrayData) {
                     let pid = sys::window_pid(hwnd);
                     list.push(TrayIcon {
                         hwnd: n.hwnd as isize, uid: n.uid, guid: by_guid.then_some(n.guid), cbmsg: 0, version: 0,
-                        tip: String::new(), px: None, hidden_state: false,
+                        tip: String::new(), px: None, hidden_state: false, changed: 0,
                         exe: sys::process_path(pid).unwrap_or_default(), pid, seq: SEQ.fetch_add(1, Ordering::Relaxed),
                     });
                     list.last_mut().unwrap()
@@ -188,7 +207,18 @@ fn record(d: &TrayData) {
             };
             if n.hwnd != 0 { it.hwnd = n.hwnd as isize; }
             if n.flags & NIF_MESSAGE != 0 { it.cbmsg = n.cbmsg; }
-            if n.flags & NIF_TIP != 0 { it.tip = wstr(&n.tip); }
+            let fresh = OWN_BROADCAST.load(Ordering::Relaxed) || idx.is_none();
+            if n.flags & NIF_TIP != 0 {
+                let tip = wstr(&n.tip);
+                if !fresh && !it.tip.is_empty() && gist(&tip) != gist(&it.tip) { it.changed = ms_now(); }
+                it.tip = tip;
+            }
+            // Un aviso propio de la app (globo): eso sí pide atención
+            if n.flags & NIF_INFO != 0 && !fresh && !wstr(&n.info).is_empty() { it.changed = ms_now(); }
+            if it.changed > ATTN_AT.load(Ordering::Relaxed) {
+                ATTN_AT.store(it.changed, Ordering::Relaxed);
+                unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); }
+            }
             if n.flags & NIF_STATE != 0 && n.state_mask & NIS_HIDDEN != 0 { it.hidden_state = n.state & NIS_HIDDEN != 0; }
             if px.is_some() { it.px = px; }
         }
@@ -347,6 +377,7 @@ pub fn hidden_icons() -> Vec<TrayIcon> {
         // Sin ajuste guardado, Windows 11 lo deja oculto
         !s.is_some_and(|s| s.promoted)
     });
-    v.sort_by_key(|i| i.seq);
+    // En orden de llegada, salvo lo que acaba de pedir atención, que va primero
+    v.sort_by_key(|i| (std::cmp::Reverse(if recent(i) { i.changed } else { 0 }), i.seq));
     v
 }

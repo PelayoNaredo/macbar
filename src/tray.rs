@@ -368,7 +368,7 @@ fn show_now() {
     let (wpx, hpx) = ((w * s) as i32, (h * s) as i32);
     let x = (ar - wpx).max(4);
     unsafe {
-        popup::begin(hwnd, x, ((BAR_H + 4.0) * s) as i32, wpx, hpx);
+        popup::begin(hwnd, x, crate::panel_y(hpx, s), wpx, hpx);
         let _ = SetForegroundWindow(hwnd);
     }
 }
