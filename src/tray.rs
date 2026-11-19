@@ -235,7 +235,7 @@ fn exe_icon(path: &str) -> Option<Vec<u8>> {
 
 fn short_name(name: &str) -> String {
     let s = name.split(" - ").next().unwrap_or(name).trim();
-    if s.is_empty() { "Sin nombre".into() } else { s.to_string() }
+    if s.is_empty() { i18n::t("Sin nombre").into() } else { s.to_string() }
 }
 
 // ---------------------------------------------------------------- hilo de trabajo
@@ -398,14 +398,15 @@ fn paint(hwnd: HWND) {
                 t.bmps = items.iter().map(|it| it.icon.as_ref().and_then(|px| rt.CreateBitmap(D2D_SIZE_U { width: ART_PX, height: ART_PX }, Some(px.as_ptr() as _), ART_PX * 4, &bp).ok())).collect();
             }
             let (w, ph) = panel_size(items.len());
+            let ink = popup::panel_ink();
             let p = Painter { rt: &rt, dw: &t.dw, cache: &t.cache, h: 100.0, s };
-            let white = p.brush(rgba(1.0, 1.0, 1.0, 0.95));
-            let dim = p.brush(rgba(1.0, 1.0, 1.0, 0.55));
-            let hov = p.brush(rgba(1.0, 1.0, 1.0, 0.10));
-            let tile = p.brush(rgba(1.0, 1.0, 1.0, 0.07));
+            let white = p.brush(popup::ink_color(ink, 0.95));
+            let dim = p.brush(popup::ink_color(ink, 0.55));
+            let hov = p.brush(popup::ink_color(ink, 0.10));
+            let tile = p.brush(popup::ink_color(ink, 0.07));
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
-            let tint = p.brush(popup::TINT);
+            let tint = p.brush(popup::tint());
             rt.FillRectangle(&rect(0.0, 0.0, w, ph), &tint); popup::glass_edge(&rt, w, ph, s); rt.SetTransform(&popup::content_matrix(hwnd, w));
             popup::push_reveal(&rt, hwnd, ph, popup::alpha(hwnd));
             let text_c = |f: &IDWriteTextFormat, s: &str, cx: f32, top: f32, bh: f32, b: &ID2D1Brush| {
@@ -414,7 +415,7 @@ fn paint(hwnd: HWND) {
                 p.draw_at(f, s, cx - tw / 2.0, top + bh / 2.0 + cap, b, None);
             };
             if items.is_empty() {
-                text_c(&t.f_foot, "No hay iconos ocultos", w / 2.0, TPAD, CELL_H, &dim);
+                text_c(&t.f_foot, i18n::t("No hay iconos ocultos"), w / 2.0, TPAD, CELL_H, &dim);
                 let _ = (&tile, &t.f_lbl);
             }
             let nc = cols(items.len());

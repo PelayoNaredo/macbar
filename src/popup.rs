@@ -47,7 +47,8 @@ pub fn set_glass(hwnd: HWND) -> bool {
         let f: unsafe extern "system" fn(HWND, *mut CompAttr) -> i32 = std::mem::transmute(f);
         // 3 = BLURBEHIND: desenfoque suave (el acrílico, 4, emborrona y oscurece demasiado).
         // Color en AABBGGRR: casi transparente, como el vidrio de macOS
-        let mut ap = AccentPolicy { state: 3, flags: 0, color: 0x10282828, anim: 0 };
+        // Con el tema claro de Windows, el velo es blanco
+        let mut ap = AccentPolicy { state: 3, flags: 0, color: if light_theme() { 0x30F4F4F4 } else { 0x10282828 }, anim: 0 };
         let mut d = CompAttr { attr: 19, data: &mut ap as *mut _ as _, size: size_of::<AccentPolicy>() };
         f(hwnd, &mut d) != 0
     }
@@ -78,6 +79,20 @@ pub fn create_window(class: PCWSTR, title: PCWSTR, proc: WNDPROC) -> HWND {
 
 /// Tinte que cada panel pinta encima del vidrio (suave: el desenfoque ya oscurece).
 pub const TINT: D2D1_COLOR_F = D2D1_COLOR_F { r: 0.16, g: 0.17, b: 0.19, a: 0.22 };
+
+/// ¿Windows está en modo claro (apps)? Los paneles lo siguen: vidrio claro y texto oscuro.
+pub fn light_theme() -> bool {
+    use windows::Win32::System::Registry::*;
+    unsafe {
+        let mut v = 0u32; let mut sz = 4u32;
+        let _ = RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("AppsUseLightTheme"), RRF_RT_REG_DWORD, None, Some(&mut v as *mut _ as _), Some(&mut sz));
+        v == 1
+    }
+}
+/// Tinta de los paneles según el tema de Windows (ver `Ui::ink`).
+pub fn panel_ink() -> f32 { if light_theme() { 1.0 } else { 0.0 } }
+/// Velo de los paneles encima del desenfoque.
+pub fn tint() -> D2D1_COLOR_F { if light_theme() { rgba(0.97, 0.97, 0.98, 0.62) } else { TINT } }
 
 /// Brillo de vidrio estilo Apple: un velo blanco muy sutil arriba y un borde de 1 px con luz arriba.
 pub fn glass_edge(rt: &ID2D1RenderTarget, w: f32, h: f32, s: f32) {
@@ -127,6 +142,8 @@ pub fn begin(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
     let s = scale_of(hwnd);
     // Si se estaba cerrando, vuelve a abrirse desde la opacidad que tenga ahora
     let from = if unsafe { IsWindowVisible(hwnd).as_bool() } { cur_alpha(hwnd) } else { 0.0 };
+    // El tema pudo cambiar desde la última vez: el velo del desenfoque se pone de nuevo
+    set_glass(hwnd);
     REVEALS.with(|r| r.borrow_mut().insert(hwnd.0 as isize, (Instant::now(), x, y, true, from)));
     unsafe {
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), (from * 255.0) as u8, LWA_ALPHA);
@@ -257,6 +274,16 @@ pub struct Fonts {
     pub q: IDWriteTextFormat,
 }
 
+/// Color de la tinta (ver `Ui::ink`).
+pub fn ink_color(ink: f32, a: f32) -> D2D1_COLOR_F {
+    let c = 1.0 - 0.93 * ink;
+    // El negro a poca opacidad apenas se ve: con tinta oscura las opacidades suben con una curva
+    // (las bajas, de líneas, rellenos e iconos, suben mucho; las altas casi nada, y se conserva la
+    // diferencia entre texto principal y secundario)
+    let a = a.clamp(0.0, 1.0);
+    rgba(c, c, c, if ink > 0.0 { a.powf(1.0 - 0.38 * ink) } else { a })
+}
+
 /// Lo que cada panel puede pedir al pulsar algo.
 pub enum Re { Stay, Close, CloseRun(Box<dyn FnOnce()>) }
 
@@ -293,6 +320,8 @@ pub struct Ui<'a> {
     pub hits: Vec<(D2D_RECT_F, u32)>,
     pub white: ID2D1Brush, pub dim: ID2D1Brush, pub faint: ID2D1Brush, pub card: ID2D1Brush, pub card_edge: ID2D1Brush,
     pub off: ID2D1Brush, pub on: ID2D1Brush, pub hov: ID2D1Brush, pub track: ID2D1Brush,
+    /// Tinta: 0 = texto blanco (fondos oscuros), 1 = texto casi negro (fondos claros); en medio, transición.
+    pub ink: f32,
 }
 
 impl Ui<'_> {
@@ -341,7 +370,11 @@ impl Ui<'_> {
     /// Cuánto brilla ahora una zona por el ratón (0..1, animado).
     pub fn heat(&self, id: u32) -> f32 { self.glow.get(&id).copied().unwrap_or(0.0) }
     /// Brocha blanca con la opacidad dada.
-    pub fn wa(&self, a: f32) -> ID2D1Brush { self.p.brush(rgba(1.0, 1.0, 1.0, a)) }
+    pub fn wa(&self, a: f32) -> ID2D1Brush { self.p.brush(self.ic(a)) }
+    /// Color de la tinta con opacidad `a` (en fondos claros, algo más opaca: el negro pesa menos a la vista).
+    pub fn ic(&self, a: f32) -> D2D1_COLOR_F { ink_color(self.ink, a) }
+    /// Fondo de las etiquetas que flotan sobre gráficas (oscuro con tinta blanca, claro con tinta negra).
+    pub fn chip(&self) -> ID2D1Brush { let k = self.ink; self.p.brush(rgba(k, k, k, 0.5 + 0.3 * k)) }
     /// Zona sin caja que se ilumina con fundido según `heat`.
     pub fn card_k(&self, r: D2D_RECT_F, k: f32) {
         if k > 0.01 { unsafe { self.rt.FillRoundedRectangle(&rrect(r, 10.0), &self.wa(0.07 * k)); } }
@@ -514,17 +547,18 @@ fn paint(hwnd: HWND) {
             }
             w.glow.retain(|_, v| *v > 0.0);
             let p = Painter { rt: &rt, dw: &w.dw, cache: &w.cache, h: 100.0, s };
+            let ink = panel_ink();
             let mut ui = Ui {
                 glow: w.glow.clone(),
-                white: p.brush(rgba(1.0, 1.0, 1.0, 0.95)), dim: p.brush(rgba(1.0, 1.0, 1.0, 0.55)), faint: p.brush(rgba(1.0, 1.0, 1.0, 0.30)),
-                card: p.brush(rgba(1.0, 1.0, 1.0, 0.075)), card_edge: p.brush(rgba(1.0, 1.0, 1.0, 0.09)),
-                off: p.brush(rgba(1.0, 1.0, 1.0, 0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
-                hov: p.brush(rgba(1.0, 1.0, 1.0, 0.07)), track: p.brush(rgba(1.0, 1.0, 1.0, 0.14)),
+                white: p.brush(ink_color(ink, 0.95)), dim: p.brush(ink_color(ink, 0.55)), faint: p.brush(ink_color(ink, 0.30)),
+                card: p.brush(ink_color(ink, 0.075)), card_edge: p.brush(ink_color(ink, 0.09)),
+                off: p.brush(ink_color(ink, 0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
+                hov: p.brush(ink_color(ink, 0.07)), track: p.brush(ink_color(ink, 0.14)), ink,
                 p, rt: &rt, f: &w.f, w: pw, s, hover: w.hover, hits: Vec::new(), shadow: None,
             };
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
-            let tint = ui.brush(TINT);
+            let tint = ui.brush(tint());
             rt.FillRectangle(&rect(0.0, 0.0, pw, ph), &tint);
             glass_edge(&rt, pw, ph, s);
             rt.SetTransform(&content_matrix(hwnd, pw));

@@ -162,9 +162,10 @@ pub fn pick_wallpaper() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let Ok(dlg) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return };
         use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
-        let spec = [COMDLG_FILTERSPEC { pszName: w!("Imágenes"), pszSpec: w!("*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.heic") }];
+        let imgs = HSTRING::from(i18n::t("Imágenes"));
+        let spec = [COMDLG_FILTERSPEC { pszName: PCWSTR(imgs.as_ptr()), pszSpec: w!("*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.heic") }];
         let _ = dlg.SetFileTypes(&spec);
-        let _ = dlg.SetTitle(w!("Fondo del móvil"));
+        let _ = dlg.SetTitle(&HSTRING::from(i18n::t("Fondo del móvil")));
         if dlg.Show(None).is_err() { return; }
         let Ok(item) = dlg.GetResult() else { return };
         let Ok(p) = item.GetDisplayName(SIGDN_FILESYSPATH) else { return };

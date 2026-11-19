@@ -1,6 +1,7 @@
 //! Menús desplegables estilo macOS sobre menús nativos de Windows en modo oscuro.
 //! Mientras un menú está abierto, pasar el ratón por otro título de la barra salta a ese menú.
 
+use crate::i18n::{t, tf};
 use crate::sys::{self, combo, vk};
 use std::cell::RefCell;
 use std::sync::Mutex;
@@ -186,10 +187,10 @@ pub fn perform(owner: HWND, target: HWND, a: A) -> Option<u32> {
         A::Reveal(path) => sys::open_args("explorer.exe", &format!("/select,\"{path}\"")),
         A::Relaunch(path) => sys::open(&path),
         A::Lock => sys::lock(),
-        A::SignOut => { if sys::ask(owner, "¿Cerrar la sesión? Se cerrarán todas las apps.") { sys::sign_out(); } }
+        A::SignOut => { if sys::ask(owner, t("¿Cerrar la sesión? Se cerrarán todas las apps.")) { sys::sign_out(); } }
         A::Sleep => sys::sleep(),
-        A::Restart => { if sys::ask(owner, "¿Reiniciar el equipo ahora?") { sys::restart(); } }
-        A::Shutdown => { if sys::ask(owner, "¿Apagar el equipo ahora?") { sys::shutdown(); } }
+        A::Restart => { if sys::ask(owner, t("¿Reiniciar el equipo ahora?")) { sys::restart(); } }
+        A::Shutdown => { if sys::ask(owner, t("¿Apagar el equipo ahora?")) { sys::shutdown(); } }
         A::Autostart(on) => sys::set_autostart(on),
         A::EditConfig => sys::edit_config(),
         A::Bar(id) => return Some(id),
@@ -210,42 +211,42 @@ fn k(keys: &[VIRTUAL_KEY]) -> A { A::Keys(keys.to_vec()) }
 
 pub fn system_menu() -> Menu {
     let mut m = Menu::default();
-    m.item("Acerca de este equipo", A::Open("ms-settings:about".into()))
+    m.item(t("Acerca de este equipo"), A::Open("ms-settings:about".into()))
         .sep()
-        .item("Configuración…\tWin+I", A::Open("ms-settings:".into()))
+        .item(t("Configuración…\tWin+I"), A::Open("ms-settings:".into()))
         .item("Microsoft Store…", A::Open("ms-windows-store:".into()))
         .sep()
-        .item("Elementos recientes", A::Open("shell:recent".into()))
+        .item(t("Elementos recientes"), A::Open("shell:recent".into()))
         .sep()
-        .item("Forzar salida…\tCtrl+Mayús+Esc", A::Open("taskmgr.exe".into()))
+        .item(t("Forzar salida…\tCtrl+Mayús+Esc"), A::Open("taskmgr.exe".into()))
         .sep()
-        .item("Suspender", A::Sleep)
-        .item("Reiniciar…", A::Restart)
-        .item("Apagar…", A::Shutdown)
+        .item(t("Suspender"), A::Sleep)
+        .item(t("Reiniciar…"), A::Restart)
+        .item(t("Apagar…"), A::Shutdown)
         .sep()
-        .item("Bloquear pantalla\tWin+L", A::Lock)
-        .item(format!("Cerrar sesión de {}…", sys::display_name()), A::SignOut);
+        .item(t("Bloquear pantalla\tWin+L"), A::Lock)
+        .item(tf("Cerrar sesión de {}…", &[&sys::display_name()]), A::SignOut);
     m
 }
 
 pub fn app_menu(c: &Ctx) -> Menu {
     let mut m = Menu::default();
     if c.desktop {
-        m.info("Escritorio").sep().item("Abrir el Explorador\tWin+E", k(&[VK_LWIN, vk(b'E')])).item("Mostrar todo", A::ShowAll);
+        m.info(t("Escritorio")).sep().item(t("Abrir el Explorador\tWin+E"), k(&[VK_LWIN, vk(b'E')])).item(t("Mostrar todo"), A::ShowAll);
         return m;
     }
     if let Some(exe) = &c.exe {
-        m.item(format!("Mostrar {} en el Explorador", c.app), A::Reveal(exe.clone()));
+        m.item(tf("Mostrar {} en el Explorador", &[&c.app]), A::Reveal(exe.clone()));
         if !exe.to_lowercase().contains("\\windowsapps\\") {
-            m.item(format!("Abrir otra ventana de {}", c.app), A::Relaunch(exe.clone()));
+            m.item(tf("Abrir otra ventana de {}", &[&c.app]), A::Relaunch(exe.clone()));
         }
         m.sep();
     }
-    m.item(format!("Ocultar {}", c.app), A::HideApp(c.pid))
-        .item("Ocultar las demás", A::HideOthers(c.pid))
-        .item("Mostrar todo", A::ShowAll)
+    m.item(tf("Ocultar {}", &[&c.app]), A::HideApp(c.pid))
+        .item(t("Ocultar las demás"), A::HideOthers(c.pid))
+        .item(t("Mostrar todo"), A::ShowAll)
         .sep()
-        .item(format!("Salir de {}", c.app), A::QuitApp(c.pid));
+        .item(tf("Salir de {}", &[&c.app]), A::QuitApp(c.pid));
     m
 }
 
@@ -261,34 +262,34 @@ pub fn island_menu(title: &str, artist: &str, playing: bool) -> Menu {
     m.info(crate::trunc(title, 44));
     if !artist.is_empty() { m.info(crate::trunc(artist, 44)); }
     m.sep()
-        .item("Anterior", A::Bar(crate::BAR_PREV))
-        .item(if playing { "Pausa" } else { "Reproducir" }, A::Bar(crate::BAR_TOGGLE))
-        .item("Siguiente", A::Bar(crate::BAR_NEXT))
+        .item(t("Anterior"), A::Bar(crate::BAR_PREV))
+        .item(if playing { t("Pausa") } else { t("Reproducir") }, A::Bar(crate::BAR_TOGGLE))
+        .item(t("Siguiente"), A::Bar(crate::BAR_NEXT))
         .sep()
-        .item("Abrir el reproductor", A::Bar(crate::BAR_PLAYER));
+        .item(t("Abrir el reproductor"), A::Bar(crate::BAR_PLAYER));
     m
 }
 
 pub fn battery_menu(pct: u8, charging: bool, secs: Option<u32>) -> Menu {
     let mut m = Menu::default();
-    m.info(format!("Batería: {pct} %"));
-    m.info(if charging && pct >= 100 { "Conectado, carga completa".to_string() } else if charging { "Cargando".to_string() } else {
-        match secs { Some(s) => format!("Quedan {} h {:02} min", s / 3600, (s % 3600) / 60), None => "Con batería".to_string() }
+    m.info(tf("Batería: {} %", &[&pct]));
+    m.info(if charging && pct >= 100 { t("Conectado, carga completa").to_string() } else if charging { t("Cargando").to_string() } else {
+        match secs { Some(s) => { let mm = format!("{:02}", (s % 3600) / 60); tf("Quedan {} h {} min", &[&(s / 3600), &mm]) }, None => t("Con batería").to_string() }
     });
     m.sep()
-        .item("Ahorro de batería…", A::Open("ms-settings:batterysaver".into()))
-        .item("Energía y suspensión…", A::Open("ms-settings:powersleep".into()));
+        .item(t("Ahorro de batería…"), A::Open("ms-settings:batterysaver".into()))
+        .item(t("Energía y suspensión…"), A::Open("ms-settings:powersleep".into()));
     m
 }
 
 pub fn weather_menu(city: &str, temp: f32, desc: &str) -> Menu {
     let mut m = Menu::default();
-    m.info(if city.is_empty() { "Tiempo".to_string() } else { city.to_string() })
+    m.info(if city.is_empty() { t("Tiempo").to_string() } else { city.to_string() })
         .info(format!("{} °C · {desc}", temp.round() as i32))
         .sep()
-        .item("Actualizar ahora", A::Bar(crate::BAR_WEATHER_NOW))
-        .item("Cambiar ciudad…", A::EditConfig)
-        .item("Panel de widgets\tWin+W", k(&[VK_LWIN, vk(b'W')]));
+        .item(t("Actualizar ahora"), A::Bar(crate::BAR_WEATHER_NOW))
+        .item(t("Cambiar ciudad…"), A::EditConfig)
+        .item(t("Panel de widgets\tWin+W"), k(&[VK_LWIN, vk(b'W')]));
     m
 }
 
@@ -297,28 +298,40 @@ pub fn user_menu() -> Menu {
     let mut m = Menu::default();
     m.info(sys::display_name())
         .sep()
-        .item("Tu cuenta…", A::Open("ms-settings:yourinfo".into()))
-        .item("Opciones de inicio de sesión…", A::Open("ms-settings:signinoptions".into()))
+        .item(t("Tu cuenta…"), A::Open("ms-settings:yourinfo".into()))
+        .item(t("Opciones de inicio de sesión…"), A::Open("ms-settings:signinoptions".into()))
         .sep()
-        .item("Bloquear\tWin+L", A::Lock)
-        .item("Cerrar sesión…", A::SignOut);
+        .item(t("Bloquear\tWin+L"), A::Lock)
+        .item(t("Cerrar sesión…"), A::SignOut);
     m
 }
 
 pub fn bar_menu() -> Menu {
     let mut m = Menu::default();
     let on = sys::autostart_enabled();
-    m.check("Iniciar con Windows", on, A::Autostart(!on))
-        .check("Widgets del escritorio", crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
+    m.check(t("Iniciar con Windows"), on, A::Autostart(!on))
+        .check(t("Widgets del escritorio"), crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
     // Cada widget por separado (solo con los widgets encendidos)
     if crate::desk::enabled() {
         for (i, (label, on)) in crate::desk::menu_items().into_iter().enumerate() {
             m.check(format!("      {label}"), on, A::Bar(crate::BAR_WIDGET0 + i as u32));
         }
+        // Color del texto de los widgets: según el fondo, o fijo para fondos claros u oscuros
+        m.sep();
+        let mode = crate::desk::ink_mode();
+        for (i, label) in ["Texto según el fondo", "Texto oscuro (fondos claros)", "Texto claro (fondos oscuros)"].into_iter().enumerate() {
+            m.check(format!("      {}", t(label)), mode == i as i8, A::Bar(crate::BAR_INK0 + i as u32));
+        }
+    }
+    // Idioma de la interfaz
+    m.sep().info(t("Idioma"));
+    let lm = crate::i18n::mode();
+    for (i, label) in ["Automático (el de Windows)", "Español", "English"].into_iter().enumerate() {
+        m.check(format!("      {}", t(label)), lm == i as i8, A::Bar(crate::BAR_LANG0 + i as u32));
     }
     m.sep()
-        .item("Editar configuración…", A::EditConfig)
+        .item(t("Editar configuración…"), A::EditConfig)
         .sep()
-        .item("Salir de macbar", A::Bar(crate::BAR_QUIT));
+        .item(t("Salir de macbar"), A::Bar(crate::BAR_QUIT));
     m
 }

@@ -444,19 +444,21 @@ fn paint(hwnd: HWND) {
                 }
             }
             let st = SYS.lock().unwrap().clone();
+            // Tinta según el tema de Windows: texto oscuro sobre vidrio claro en modo claro
+            let ink = popup::panel_ink();
             let w = W_DIP;
             let ph = c.height;
             // Altura de referencia fija: el centrado vertical se cachea y no debe depender del alto del panel
             let h = 100.0;
             let p = Painter { rt: &rt, dw: &c.dw, cache: &c.cache, h, s };
-            let white = p.brush(rgba(1.0, 1.0, 1.0, 0.95));
-            let dim = p.brush(rgba(1.0, 1.0, 1.0, 0.55));
-            let card = p.brush(rgba(1.0, 1.0, 1.0, 0.075));
-            let card_edge = p.brush(rgba(1.0, 1.0, 1.0, 0.09));
-            let off = p.brush(rgba(1.0, 1.0, 1.0, 0.13));
+            let white = p.brush(popup::ink_color(ink, 0.95));
+            let dim = p.brush(popup::ink_color(ink, 0.55));
+            let card = p.brush(popup::ink_color(ink, 0.075));
+            let card_edge = p.brush(popup::ink_color(ink, 0.09));
+            let off = p.brush(popup::ink_color(ink, 0.13));
             let on = p.brush(rgba(0.23, 0.51, 0.96, 1.0));
-            let track = p.brush(rgba(1.0, 1.0, 1.0, 0.14));
-            let hov = p.brush(rgba(1.0, 1.0, 1.0, 0.07));
+            let track = p.brush(popup::ink_color(ink, 0.14));
+            let hov = p.brush(popup::ink_color(ink, 0.07));
             let mut hits: Vec<(D2D_RECT_F, Hit)> = Vec::new();
             let dt = c.last_paint.elapsed().as_secs_f32().min(1.0 / 30.0);
             c.last_paint = Instant::now();
@@ -473,7 +475,7 @@ fn paint(hwnd: HWND) {
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
             // Tinte oscuro encima del acrílico (el desenfoque lo pone Windows)
-            let tint = p.brush(popup::TINT);
+            let tint = p.brush(popup::tint());
             rt.FillRectangle(&rect(0.0, 0.0, w, ph), &tint); popup::glass_edge(&rt, w, ph, s); rt.SetTransform(&popup::content_matrix(hwnd, w));
             // Entrada: el contenido aparece con un fundido mientras el panel baja a su sitio
             popup::push_reveal(&rt, hwnd, ph, popup::alpha(hwnd));
@@ -489,7 +491,7 @@ fn paint(hwnd: HWND) {
             };
             // Sin cajas: el contenido va directamente sobre el vidrio; solo brilla al pasar el ratón
             let card_at = |r: D2D_RECT_F, k: f32| {
-                if k > 0.01 { rt.FillRoundedRectangle(&rrect(r, 10.0), &p.brush(rgba(1.0, 1.0, 1.0, 0.07 * k))); }
+                if k > 0.01 { rt.FillRoundedRectangle(&rrect(r, 10.0), &p.brush(popup::ink_color(ink, 0.07 * k))); }
             };
             let _ = &hov;
             let sep_at = |y: f32| { let px = 1.0 / s; rt.FillRectangle(&rect(PAD + 4.0, y, w - PAD - 4.0, y + px), &card_edge); };
@@ -511,7 +513,7 @@ fn paint(hwnd: HWND) {
             text_in(&c.f_sub, &c.subtitle, PAD + av + 10.0, y + 22.0, 18.0, &dim);
             let gear = rect(w - PAD - 30.0, y + 7.0, w - PAD, y + 37.0);
             let gk = glow(&mut anim, Hit::Settings, &mut moving);
-            if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: (gear.left + gear.right) / 2.0, Y: (gear.top + gear.bottom) / 2.0 }, radiusX: 15.0, radiusY: 15.0 }, &p.brush(rgba(1.0, 1.0, 1.0, 0.07 * gk))); }
+            if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: (gear.left + gear.right) / 2.0, Y: (gear.top + gear.bottom) / 2.0 }, radiusX: 15.0, radiusY: 15.0 }, &p.brush(popup::ink_color(ink, 0.07 * gk))); }
             // El engranaje gira un poco al pasar el ratón
             let ang = gk * std::f32::consts::FRAC_PI_3;
             let (gcx, gcy) = ((gear.left + gear.right) / 2.0, (gear.top + gear.bottom) / 2.0);
@@ -533,13 +535,14 @@ fn paint(hwnd: HWND) {
 
             // ---- Interruptores 2×2
             let cw = (w - PAD * 2.0 - GAP) / 2.0;
-            let wifi_sub = match st.wifi { Some(true) if !st.ssid.is_empty() => st.ssid.clone(), Some(true) => "Activado".into(), Some(false) => "Desactivado".into(), None => "No disponible".into() };
-            let bt_sub = match st.bt { Some(true) => "Activado".into(), Some(false) => "Desactivado".into(), None => "No disponible".into() };
+            let (s_on, s_off, s_na) = (i18n::t("Activado"), i18n::t("Desactivado"), i18n::t("No disponible"));
+            let wifi_sub = match st.wifi { Some(true) if !st.ssid.is_empty() => st.ssid.clone(), Some(true) => s_on.into(), Some(false) => s_off.into(), None => s_na.into() };
+            let bt_sub = match st.bt { Some(true) => s_on.into(), Some(false) => s_off.into(), None => s_na.into() };
             let tiles: [(&str, &str, String, bool, Hit); 4] = [
                 ("\u{E701}", "Wi-Fi", wifi_sub, st.wifi == Some(true), Hit::Wifi),
                 ("\u{E702}", "Bluetooth", bt_sub, st.bt == Some(true), Hit::Bt),
-                ("\u{E793}", "Modo oscuro", if c.dark { "Activado".into() } else { "Desactivado".into() }, c.dark, Hit::Dark),
-                (if c.mute { "\u{E74F}" } else { "\u{E767}" }, "Silencio", if c.mute { "Activado".into() } else { "Desactivado".into() }, c.mute, Hit::Mute),
+                ("\u{E793}", i18n::t("Modo oscuro"), if c.dark { s_on.into() } else { s_off.into() }, c.dark, Hit::Dark),
+                (if c.mute { "\u{E74F}" } else { "\u{E767}" }, i18n::t("Silencio"), if c.mute { s_on.into() } else { s_off.into() }, c.mute, Hit::Mute),
             ];
             for (i, (gl, lbl, sub, active, hit)) in tiles.iter().enumerate() {
                 let cx = PAD + (i % 2) as f32 * (cw + GAP);
@@ -554,10 +557,13 @@ fn paint(hwnd: HWND) {
                 let ccx = cx + 10.0 + 15.0;
                 let e = D2D1_ELLIPSE { point: Vector2 { X: ccx, Y: cy0 + CARD_H / 2.0 }, radiusX: cr, radiusY: cr };
                 let mix = |a: f32, b: f32| a + (b - a) * ak;
-                rt.FillEllipse(&e, &p.brush(rgba(mix(1.0, 0.23), mix(1.0, 0.51), mix(1.0, 0.96), mix(0.13, 1.0))));
+                let c0 = 1.0 - 0.93 * ink;
+                rt.FillEllipse(&e, &p.brush(rgba(mix(c0, 0.23), mix(c0, 0.51), mix(c0, 0.96), mix(0.13, 1.0))));
                 let _ = (&on, &off);
                 let cr = 15.0;
-                glyph_in(&c.f_icon, gl, ccx - cr, cy0 + CARD_H / 2.0 - cr, cr * 2.0, cr * 2.0, &white);
+                // Sobre el círculo azul, el glifo siempre blanco
+                let gb = if *active { p.brush(rgba(1.0, 1.0, 1.0, 0.98)) } else { white.clone() };
+                glyph_in(&c.f_icon, gl, ccx - cr, cy0 + CARD_H / 2.0 - cr, cr * 2.0, cr * 2.0, &gb);
                 let tx = cx + 10.0 + cr * 2.0 + 9.0;
                 text_in(&c.f_lbl, lbl, tx, cy0 + 9.0, 18.0, &white);
                 text_in(&c.f_sub, &trunc(sub, 14), tx, cy0 + 27.0, 17.0, &dim);
@@ -596,11 +602,11 @@ fn paint(hwnd: HWND) {
             };
             if let Some(b) = c.bright_drag.or(st.bright) {
                 let bs = enter(0.22);
-                slider(&mut y, "\u{E706}", "Brillo", b, Hit::Bright, &mut anim, &mut moving);
+                slider(&mut y, "\u{E706}", i18n::t("Brillo"), b, Hit::Bright, &mut anim, &mut moving);
                 popup::rise_end(&rt, bs);
             }
             let bs = enter(0.26);
-            slider(&mut y, if c.mute || c.vol == 0.0 { "\u{E74F}" } else { "\u{E995}" }, "Volumen", if c.mute { 0.0 } else { c.vol }, Hit::Vol, &mut anim, &mut moving);
+            slider(&mut y, if c.mute || c.vol == 0.0 { "\u{E74F}" } else { "\u{E995}" }, i18n::t("Volumen"), if c.mute { 0.0 } else { c.vol }, Hit::Vol, &mut anim, &mut moving);
             popup::rise_end(&rt, bs);
             y += 12.0 - GAP;
             sep_at(y - 6.0);
@@ -617,6 +623,7 @@ fn paint(hwnd: HWND) {
                 let vt = format!("{}%", v.round() as i32);
                 let vw = p.width(&c.f_val, &vt);
                 text_in(&c.f_val, &vt, x0 + (colw - vw) / 2.0, y + 8.0, 22.0, &white);
+                let l = i18n::t(*l);
                 let lw = p.width(&c.f_sub, l);
                 text_in(&c.f_sub, l, x0 + (colw - lw) / 2.0, y + 31.0, 16.0, &dim);
                 popup::rise_end(&rt, bc);
@@ -631,7 +638,7 @@ fn paint(hwnd: HWND) {
                 let bp = enter(0.40 + i as f32 * 0.035);
                 let e = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: y + POWER_H / 2.0 }, radiusX: 19.0, radiusY: 19.0 };
                 let hk = glow(&mut anim, *hit, &mut moving);
-                rt.FillEllipse(&e, &p.brush(rgba(1.0, 1.0, 1.0, 0.075 + 0.055 * hk)));
+                rt.FillEllipse(&e, &p.brush(popup::ink_color(ink, 0.075 + 0.055 * hk)));
                 let _ = &card;
                 glyph_in(&c.f_icon_l, gl, cx - 19.0, y + POWER_H / 2.0 - 19.0, 38.0, 38.0, &white);
                 popup::rise_end(&rt, bp);
@@ -681,8 +688,8 @@ fn click(hit: Hit) {
         Hit::Mute => { let m = CC.with(|c| c.borrow_mut().as_mut().map(|c| { c.mute = !c.mute; c.mute })).unwrap_or(false); set_mute(m); }
         Hit::Lock => { hide(); sys::lock(); }
         Hit::Sleep => { hide(); sys::sleep(); }
-        Hit::Restart => { hide(); if sys::ask(bar_hwnd(), "¿Reiniciar el equipo ahora?") { sys::restart(); } }
-        Hit::Shutdown => { hide(); if sys::ask(bar_hwnd(), "¿Apagar el equipo ahora?") { sys::shutdown(); } }
+        Hit::Restart => { hide(); if sys::ask(bar_hwnd(), i18n::t("¿Reiniciar el equipo ahora?")) { sys::restart(); } }
+        Hit::Shutdown => { hide(); if sys::ask(bar_hwnd(), i18n::t("¿Apagar el equipo ahora?")) { sys::shutdown(); } }
         Hit::Bright | Hit::Vol => {}
     }
 }

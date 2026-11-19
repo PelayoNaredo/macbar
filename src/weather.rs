@@ -200,7 +200,7 @@ impl Content for WeatherPanel {
         }
         let wnow = *WEATHER.lock().unwrap();
         let fc = FORECAST.lock().unwrap().clone();
-        let city = sys::config_value("ciudad").unwrap_or_else(|| "Tu ubicación".into());
+        let city = sys::config_value("ciudad").unwrap_or_else(|| i18n::t("Tu ubicación").into());
         let mut y = PAD;
         // ---- Ahora
         match wnow {
@@ -221,11 +221,11 @@ impl Content for WeatherPanel {
                 ui.text_r(&ui.f.name, &city, W - PAD, y + 8.0, 22.0, &ui.white);
                 ui.text_r(&ui.f.sub, weather_desc(wt.code), W - PAD, y + 30.0, 18.0, &ui.dim);
                 if let Some(d0) = fc.as_ref().and_then(|f| f.days.first()) {
-                    let mm = format!("Máx {}°  ·  Mín {}°", d0.3.round() as i32, d0.2.round() as i32);
+                    let mm = i18n::tf("Máx {}°  ·  Mín {}°", &[&(d0.3.round() as i32), &(d0.2.round() as i32)]);
                     ui.text_r(&ui.f.sub, &mm, W - PAD, y + 50.0, 18.0, &ui.dim);
                 }
             }
-            None => ui.text(&ui.f.name, "Cargando el tiempo…", PAD, y, 76.0, &ui.dim),
+            None => ui.text(&ui.f.name, i18n::t("Cargando el tiempo…"), PAD, y, 76.0, &ui.dim),
         }
         y += 76.0 + 12.0;
 
@@ -241,7 +241,7 @@ impl Content for WeatherPanel {
                     let y = y + 10.0 * (1.0 - k);
                     popup::push_alpha(ui.rt, k);
                     let cx = PAD + 6.0 + i as f32 * cw + cw / 2.0;
-                    let lbl = if i == 0 { "Ahora".to_string() } else { format!("{hr}") };
+                    let lbl = if i == 0 { i18n::t("Ahora").to_string() } else { format!("{hr}") };
                     ui.text_c(&ui.f.small, &lbl, cx, y + 8.0, 18.0, if i == 0 { &ui.white } else { &ui.dim });
                     draw_icon(ui.rt, &ui.p, &ui.f.icon_l, cx - 14.0, y + 30.0, 28.0, 30.0, *code, *day, &ui.white);
                     ui.text_c(&ui.f.lbl, &format!("{}°", t.round() as i32), cx, y + 66.0, 20.0, &ui.white);
@@ -254,7 +254,6 @@ impl Content for WeatherPanel {
                 ui.sep(y - 6.0);
                 let lo = f.days.iter().map(|d| d.2).fold(f32::MAX, f32::min);
                 let hi = f.days.iter().map(|d| d.3).fold(f32::MIN, f32::max).max(lo + 1.0);
-                let dias = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
                 let (bl, br) = (PAD + 150.0, W - PAD - 44.0);
                 for (i, (wd, code, mn, mx)) in f.days.iter().enumerate() {
                     // Filas en cascada y la barra de temperaturas crece desde su centro
@@ -262,7 +261,7 @@ impl Content for WeatherPanel {
                     let grow = stagger(since, 0.3 + i as f32 * 0.045, 0.5);
                     popup::push_alpha(ui.rt, k);
                     let ry = y + 8.0 + i as f32 * DAY_ROW + 6.0 * (1.0 - k);
-                    let name = if i == 0 { "Hoy" } else { dias[*wd as usize % 7] };
+                    let name = if i == 0 { i18n::t("Hoy") } else { i18n::weekday_short(*wd as usize) };
                     ui.text(&ui.f.lbl, name, PAD + 14.0, ry, DAY_ROW, &ui.white);
                     draw_icon(ui.rt, &ui.p, &ui.f.icon, PAD + 54.0, ry, 26.0, DAY_ROW, *code, true, &ui.white);
                     ui.text_r(&ui.f.sub, &format!("{}°", mn.round() as i32), bl - 8.0, ry, DAY_ROW, &ui.dim);
@@ -294,12 +293,12 @@ impl Content for WeatherPanel {
         }
 
         // ---- Pie: cuándo se actualizó y acciones
-        let when = if self.loading { "Actualizando…".to_string() } else {
-            match fc.as_ref().map(|f| f.at.elapsed().as_secs() / 60) { Some(0) => "Actualizado ahora mismo".into(), Some(m) => format!("Actualizado hace {m} min"), None => String::new() }
+        let when = if self.loading { i18n::t("Actualizando…").to_string() } else {
+            match fc.as_ref().map(|f| f.at.elapsed().as_secs() / 60) { Some(0) => i18n::t("Actualizado ahora mismo").into(), Some(m) => i18n::tf("Actualizado hace {} min", &[&m]), None => String::new() }
         };
         ui.text(&ui.f.sub, &when, PAD + 2.0, y, 34.0, &ui.dim);
         let b2 = rect(W - PAD - 86.0, y, W - PAD, y + 34.0);
-        ui.button(b2, None, "Ciudad…", ID_CITY, false);
+        ui.button(b2, None, i18n::t("Ciudad…"), ID_CITY, false);
         // Actualizar: botón redondo solo con icono (deja sitio al texto de la izquierda)
         let b1 = rect(b2.left - 8.0 - 34.0, y, b2.left - 8.0, y + 34.0);
         ui.button(b1, None, "", ID_REFRESH, self.loading);

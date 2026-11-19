@@ -16,8 +16,6 @@ const ID_STOP: u32 = 6;
 const ID_TIMER0: u32 = 100; // + índice de TIMERS
 
 const TIMERS: [(u32, &str); 4] = [(60, "1 min"), (5 * 60, "5 min"), (15 * 60, "15 min"), (25 * 60, "25 min")];
-pub const MESES: [&str; 12] = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
-pub const DIAS: [&str; 7] = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
 
 /// Día de la semana (0 = domingo) por el método de Sakamoto.
 pub fn weekday(y: i32, m: u32, d: u32) -> u32 {
@@ -61,7 +59,9 @@ impl Content for Calendar {
         let b0 = popup::rise(rt, popup::stagger(since, 0.0, 0.32));
         let hora = format!("{}:{:02}", now.wHour, now.wMinute);
         ui.text(&ui.f.big, &hora, PAD + 2.0, y, 40.0, &ui.white);
-        let fecha = format!("{}, {} de {} de {}", DIAS[now.wDayOfWeek as usize % 7], now.wDay, MESES[(now.wMonth as usize + 11) % 12], now.wYear);
+        // "miércoles, 18 de noviembre de 2026" / "Wednesday, November 18, 2026"
+        let (dia, mes) = (i18n::weekday(now.wDayOfWeek as usize), i18n::month((now.wMonth as usize + 11) % 12));
+        let fecha = if i18n::en() { format!("{dia}, {mes} {}, {}", now.wDay, now.wYear) } else { format!("{dia}, {} de {mes} de {}", now.wDay, now.wYear) };
         let mut f = fecha.chars();
         let fecha: String = f.next().map(|c| c.to_uppercase().collect::<String>() + f.as_str()).unwrap_or_default();
         ui.text(&ui.f.sub, &fecha, PAD + 3.0, y + 42.0, 18.0, &ui.dim);
@@ -73,7 +73,7 @@ impl Content for Calendar {
         let card_h = 40.0 + 22.0 + rows as f32 * CELL + 10.0;
         let b1 = popup::rise(rt, popup::stagger(since, 0.06, 0.32));
         ui.sep(y - 6.0);
-        let titulo = format!("{} {}", MESES[(self.month - 1) as usize], self.year);
+        let titulo = format!("{} {}", i18n::month((self.month - 1) as usize), self.year);
         let mut tt = titulo.chars();
         let titulo: String = tt.next().map(|c| c.to_uppercase().collect::<String>() + tt.as_str()).unwrap_or_default();
         // Cambio de mes: título y días entran deslizándose desde el lado del que vienen, con fundido
@@ -97,17 +97,17 @@ impl Content for Calendar {
             bx -= 30.0;
         }
         if !is_now {
-            let tw = ui.p.width(&ui.f.small, "Hoy") + 18.0;
+            let tw = ui.p.width(&ui.f.small, i18n::t("Hoy")) + 18.0;
             let r = rect(bx - tw, y + 10.0, bx - 2.0, y + 32.0);
             unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 11.0), &ui.wa(0.075 + 0.075 * ui.heat(ID_TODAY))); }
-            ui.text_c(&ui.f.small, "Hoy", (r.left + r.right) / 2.0, r.top, 22.0, &ui.white);
+            ui.text_c(&ui.f.small, i18n::t("Hoy"), (r.left + r.right) / 2.0, r.top, 22.0, &ui.white);
             ui.hit(r, ID_TODAY);
         }
         popup::rise_end(rt, b1);
         let gx = PAD + (W - PAD * 2.0 - 7.0 * CELL) / 2.0;
         let gy = y + 40.0;
         let b2 = popup::rise(rt, popup::stagger(since, 0.10, 0.32));
-        for (i, d) in ["L", "M", "X", "J", "V", "S", "D"].iter().enumerate() {
+        for (i, d) in i18n::weekday_letters().iter().enumerate() {
             ui.text_c(&ui.f.small, d, gx + i as f32 * CELL + CELL / 2.0, gy, 18.0, &ui.faint);
         }
         popup::rise_end(rt, b2);
@@ -138,12 +138,12 @@ impl Content for Calendar {
         let b3 = popup::rise(rt, popup::stagger(since, 0.32, 0.32));
         ui.sep(y - 6.0);
         ui.glyph(&ui.f.icon, "\u{E916}", PAD + 10.0, y + 8.0, 20.0, 22.0, &ui.white);
-        ui.text(&ui.f.lbl, "Temporizador", PAD + 34.0, y + 8.0, 22.0, &ui.white);
+        ui.text(&ui.f.lbl, i18n::t("Temporizador"), PAD + 34.0, y + 8.0, 22.0, &ui.white);
         match live::timer_left() {
             Some((left, _)) => {
                 ui.text_r(&ui.f.val, &live::mmss(left), W - PAD - 14.0, y + 7.0, 24.0, &ui.white);
                 let r = rect(PAD + 10.0, y + 42.0, W - PAD - 10.0, y + 72.0);
-                ui.button(r, Some("\u{E711}"), "Detener", ID_STOP, false);
+                ui.button(r, Some("\u{E711}"), i18n::t("Detener"), ID_STOP, false);
             }
             None => {
                 let bw = (W - PAD * 2.0 - 20.0 - 3.0 * 8.0) / 4.0;
@@ -159,8 +159,8 @@ impl Content for Calendar {
         // ---- Accesos
         let b4 = popup::rise(rt, popup::stagger(since, 0.38, 0.32));
         let bw = (W - PAD * 2.0 - 8.0) / 2.0;
-        ui.button(rect(PAD, y, PAD + bw, y + 34.0), Some("\u{EA8F}"), "Notificaciones", ID_NOTIF, false);
-        ui.button(rect(PAD + bw + 8.0, y, W - PAD, y + 34.0), Some("\u{E713}"), "Fecha y hora", ID_SETTINGS, false);
+        ui.button(rect(PAD, y, PAD + bw, y + 34.0), Some("\u{EA8F}"), i18n::t("Notificaciones"), ID_NOTIF, false);
+        ui.button(rect(PAD + bw + 8.0, y, W - PAD, y + 34.0), Some("\u{E713}"), i18n::t("Fecha y hora"), ID_SETTINGS, false);
         popup::rise_end(rt, b4);
     }
 

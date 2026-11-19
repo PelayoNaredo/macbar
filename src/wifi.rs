@@ -200,9 +200,9 @@ impl Content for WifiPanel {
         ui.glyph(&ui.f.icon, "\u{E701}", PAD + 10.0, y + 12.0, 30.0, 30.0, &ui.wa(breathe));
         ui.text(&ui.f.lbl, "Wi-Fi", PAD + 50.0, y + 9.0, 18.0, &ui.white);
         let sub = match st.radio {
-            None => "Comprobando…".to_string(),
-            Some(false) => "Desactivado".into(),
-            Some(true) => st.nets.iter().find(|n| n.connected).map(|n| n.ssid.clone()).unwrap_or_else(|| "Sin conectar".into()),
+            None => i18n::t("Comprobando…").to_string(),
+            Some(false) => i18n::t("Desactivado").into(),
+            Some(true) => st.nets.iter().find(|n| n.connected).map(|n| n.ssid.clone()).unwrap_or_else(|| i18n::t("Sin conectar").into()),
         };
         ui.text(&ui.f.sub, &trunc(&sub, 30), PAD + 50.0, y + 27.0, 17.0, &ui.dim);
         // Interruptor tipo macOS a la derecha
@@ -223,7 +223,7 @@ impl Content for WifiPanel {
             let h = rows as f32 * ROW + 8.0;
             ui.sep(y - 6.0);
             if st.nets.is_empty() {
-                let msg = if st.scanning { dots("Buscando redes") } else { "No hay redes a la vista".into() };
+                let msg = if st.scanning { dots(i18n::t("Buscando redes")) } else { i18n::t("No hay redes a la vista").into() };
                 ui.text(&ui.f.sub, &msg, PAD + 14.0, y + 4.0, ROW, &ui.dim);
             }
             // Filas nuevas entran en cascada: suben 8 px y aparecen con fundido
@@ -239,7 +239,7 @@ impl Content for WifiPanel {
                 let k = ui.heat(id); if k > 0.01 && !n.connected { unsafe { ui.rt.FillRoundedRectangle(&rrect(rr, 9.0), &ui.wa(0.07 * k)); } }
                 ui.glyph(&ui.f.icon, bars(n.quality), PAD + 8.0, ry, 30.0, ROW, if n.connected { &ui.white } else { &ui.dim });
                 let busy = st.connecting.as_deref() == Some(n.profile.as_str()) && !n.profile.is_empty();
-                let note = if n.connected { "Conectada".to_string() } else if busy { dots("Conectando") } else if n.known { "Guardada".into() } else if n.secure { "Protegida".into() } else { "Abierta".into() };
+                let note = if n.connected { i18n::t("Conectada").to_string() } else if busy { dots(i18n::t("Conectando")) } else if n.known { i18n::t("Guardada").into() } else if n.secure { i18n::t("Protegida").into() } else { i18n::t("Abierta").into() };
                 ui.text(&ui.f.lbl, &trunc(&n.ssid, 26), PAD + 44.0, ry + 5.0, 18.0, &ui.white);
                 ui.text(&ui.f.sub, &note, PAD + 44.0, ry + 22.0, 16.0, &ui.dim);
                 if busy {
@@ -266,8 +266,8 @@ impl Content for WifiPanel {
 
         // ---- Pie
         let bw = (W - PAD * 2.0 - 8.0) / 2.0;
-        ui.button(rect(PAD, y, PAD + bw, y + 34.0), None, "Más redes…", ID_MORE, false);
-        ui.button(rect(PAD + bw + 8.0, y, W - PAD, y + 34.0), Some("\u{E713}"), "Configuración", ID_SETTINGS, false);
+        ui.button(rect(PAD, y, PAD + bw, y + 34.0), None, i18n::t("Más redes…"), ID_MORE, false);
+        ui.button(rect(PAD + bw + 8.0, y, W - PAD, y + 34.0), Some("\u{E713}"), i18n::t("Configuración"), ID_SETTINGS, false);
     }
 
     fn click(&mut self, id: u32, _right: bool) -> Re {

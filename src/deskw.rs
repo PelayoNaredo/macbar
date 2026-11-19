@@ -208,14 +208,12 @@ fn round_btn_inner(ui: &mut Ui, f: &IDWriteTextFormat, g: &str, cx: f32, cy: f32
         if filled { ui.rt.FillEllipse(&ellipse(cx, cy, r), &ui.wa(0.92)); }
         else if k > 0.01 { ui.rt.FillEllipse(&ellipse(cx, cy, r), &ui.wa(0.10 * k)); }
     }
-    let b = if filled { ui.brush(rgba(0.08, 0.08, 0.09, 1.0)) } else { ui.white.clone() };
+    // Relleno: círculo de tinta con el glifo del color contrario
+    let b = if filled { let c = 0.08 + 0.9 * ui.ink; ui.brush(rgba(c, c, c + 0.01, 1.0)) } else { ui.white.clone() };
     ui.glyph(f, g, cx - r, cy - r, r * 2.0, r * 2.0, &b);
     ui.hit(rect(cx - r, cy - r, cx + r, cy + r), id);
 }
 
-const WD_SHORT: [&str; 7] = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
-const WD_LONG: [&str; 7] = ["DOMINGO", "LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO"];
-const MONTHS: [&str; 12] = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
 
 // ---------------------------------------------------------------- calendario
 /// `slide`: avance del cambio de mes (±1 → 0); `dir`: hacia dónde (para dibujar también el mes que se va);
@@ -302,17 +300,21 @@ impl Widget for CalendarW {
         let (ty, tm, td) = (now.wYear as i32, now.wMonth as u32, now.wDay as u32);
         approach(&mut self.slide, 0.0, dt, 0.13);
         let red = ui.brush(rgba(1.0, 0.42, 0.40, 1.0));
-        ui.text(&ui.f.lbl, WD_LONG[now.wDayOfWeek as usize % 7], PAD, PAD - 4.0, 18.0, &red);
+        ui.text(&ui.f.lbl, &i18n::weekday(now.wDayOfWeek as usize).to_uppercase(), PAD, PAD - 4.0, 18.0, &red);
         // Fecha y hora ruedan al cambiar (cada minuto, a medianoche…)
         let white = ui.white.clone();
-        self.r_date.draw(ui, &d.big, &format!("{td} de {}", MONTHS[(tm - 1) as usize]), PAD, PAD + 16.0, 34.0, &white, false);
+        // "18 de noviembre" / "November 18"
+        let mes = i18n::month((tm - 1) as usize);
+        let fecha = if i18n::en() { format!("{mes} {td}") } else { format!("{td} de {mes}") };
+        self.r_date.draw(ui, &d.big, &fecha, PAD, PAD + 16.0, 34.0, &white, false);
         self.r_time.draw(ui, &d.big, &format!("{:02}:{:02}", now.wHour, now.wMinute), W - PAD, PAD + 16.0, 34.0, &white, true);
-        ui.text_r(&ui.f.sub, &format!("Semana {}", iso_week(ty, tm, td)), W - PAD, PAD - 4.0, 18.0, &ui.dim);
+        ui.text_r(&ui.f.sub, &i18n::tf("Semana {}", &[&iso_week(ty, tm, td)]), W - PAD, PAD - 4.0, 18.0, &ui.dim);
 
         // Mes que se ve (con flechas o rueda)
         let (y, m) = month_add(ty, tm, self.month_off);
         let gy = 92.0;
-        let title = format!("{}{} {}", MONTHS[(m - 1) as usize][..1].to_uppercase(), &MONTHS[(m - 1) as usize][1..], y);
+        let mn = i18n::month((m - 1) as usize);
+        let title = format!("{}{} {}", mn[..1].to_uppercase(), &mn[1..], y);
         let fname = ui.f.name.clone();
         self.r_title.draw(ui, &fname, &title, PAD, gy, 22.0, &white, false);
         let fi = &ui.f.icon.clone();
@@ -321,7 +323,7 @@ impl Widget for CalendarW {
 
         let cw = (W - PAD * 2.0) / 7.0;
         let hy = gy + 30.0;
-        for (i, l) in ["L", "M", "X", "J", "V", "S", "D"].iter().enumerate() {
+        for (i, l) in i18n::weekday_letters().iter().enumerate() {
             ui.text_c(&ui.f.small, l, PAD + cw * (i as f32 + 0.5), hy, 16.0, &ui.faint);
         }
         // Cambio de mes: el nuevo entra por un lado mientras el anterior sale por el otro
@@ -346,7 +348,7 @@ impl Widget for CalendarW {
             popup::push_alpha(ui.rt, a);
             let dy = 8.0 * self.timer_on;
             ui.glyph(&ui.f.icon_l, G_TIMER, PAD, by + 2.0 + dy, 20.0, 30.0, &ui.dim);
-            ui.text(&ui.f.lbl, "Enfoque", PAD + 26.0, by + 7.0 + dy, 20.0, &ui.dim);
+            ui.text(&ui.f.lbl, i18n::t("Enfoque"), PAD + 26.0, by + 7.0 + dy, 20.0, &ui.dim);
             for (i, mins) in [5u32, 15, 25].iter().enumerate() {
                 let x = W - PAD - (3 - i) as f32 * 62.0 + 6.0;
                 let r = rect(x, by + 2.0 + dy, x + 56.0, by + 32.0 + dy);
@@ -370,7 +372,7 @@ impl Widget for CalendarW {
             let ft = d.title.clone();
             self.r_left.draw(ui, &ft, &live::mmss(l), PAD + 36.0, by + 6.0 + dy, 22.0, &white, false);
             let r = rect(W - PAD - 96.0, by + 2.0 + dy, W - PAD, by + 32.0 + dy);
-            if left.is_some() { pbutton(ui, r, Some(G_STOP), "Parar", 30, false); }
+            if left.is_some() { pbutton(ui, r, Some(G_STOP), i18n::t("Parar"), 30, false); }
             ui.rt_pop();
         }
     }
@@ -420,12 +422,12 @@ struct WeatherW { curve: Vec<f32>, lo: f32, hi: f32, r_temp: Roll, r_desc: Roll,
 impl Widget for WeatherW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
         let (W, _) = size(Kind::Weather);
-        let city = sys::config_value("ciudad").unwrap_or_else(|| "Tu ubicación".into());
+        let city = sys::config_value("ciudad").unwrap_or_else(|| i18n::t("Tu ubicación").into());
         let cur = *WEATHER.lock().unwrap();
         let fc = weather::FORECAST.lock().unwrap().clone();
         ui.text(&d.title, &city, PAD, PAD - 2.0, 22.0, &ui.white);
         let Some(cur) = cur else {
-            ui.text(&ui.f.sub, "Cargando el tiempo…", PAD, PAD + 30.0, 20.0, &ui.dim);
+            ui.text(&ui.f.sub, i18n::t("Cargando el tiempo…"), PAD, PAD + 30.0, 20.0, &ui.dim);
             return;
         };
         // Ancho: temperatura e icono grandes a la izquierda, los detalles en columna a la derecha
@@ -447,13 +449,13 @@ impl Widget for WeatherW {
         self.r_desc.draw(ui, &ftitle, weather_desc(cur.code), W - PAD, PAD - 2.0, 22.0, &white, true);
         if let Some(f) = &fc {
             if let Some(d0) = f.days.first() {
-                ui.text_r(&ui.f.sub, &format!("Máx {:.0}°  ·  Mín {:.0}°", d0.3, d0.2), W - PAD, PAD + 24.0, 18.0, &ui.dim);
+                ui.text_r(&ui.f.sub, &i18n::tf("Máx {}°  ·  Mín {}°", &[&format!("{:.0}", d0.3), &format!("{:.0}", d0.2)]), W - PAD, PAD + 24.0, 18.0, &ui.dim);
             }
             let rain_now = f.rain.first().copied().unwrap_or(0.0);
             let rain_max = f.rain.iter().take(12).cloned().fold(0.0f32, f32::max);
-            ui.text_r(&ui.f.sub, &format!("Lluvia ahora {:.0}%  ·  próximas 12 h {:.0}%", rain_now, rain_max), W - PAD, PAD + 42.0, 18.0, &ui.dim);
+            ui.text_r(&ui.f.sub, &i18n::tf("Lluvia ahora {}%  ·  próximas 12 h {}%", &[&format!("{:.0}", rain_now), &format!("{:.0}", rain_max)]), W - PAD, PAD + 42.0, 18.0, &ui.dim);
             if let Some(d1) = f.days.get(1) {
-                ui.text_r(&ui.f.sub, &format!("Mañana {:.0}° / {:.0}° · {}", d1.3, d1.2, weather_desc(d1.1).to_lowercase()), W - PAD, PAD + 60.0, 18.0, &ui.dim);
+                ui.text_r(&ui.f.sub, &i18n::tf("Mañana {}° / {}° · {}", &[&format!("{:.0}", d1.3), &format!("{:.0}", d1.2), &weather_desc(d1.1).to_lowercase()]), W - PAD, PAD + 60.0, 18.0, &ui.dim);
             }
             // Amanecer y anochecer, bajo la temperatura
             if let Some((rise, set)) = &f.sun {
@@ -502,7 +504,7 @@ impl Widget for WeatherW {
                 let k = ez(t, 0.15, 1.0);
                 unsafe {
                     ui.rt.PushAxisAlignedClip(&rect(0.0, top - 10.0, PAD + (W - PAD * 2.0) * k + 8.0, bot + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                    if let Some(a) = smooth_path(ui.rt, &pts, Some(bot)) { ui.rt.FillGeometry(&a, &ui.p.vgrad(top, bot, rgba(1.0, 1.0, 1.0, 0.13), rgba(1.0, 1.0, 1.0, 0.0)), None); }
+                    if let Some(a) = smooth_path(ui.rt, &pts, Some(bot)) { ui.rt.FillGeometry(&a, &ui.p.vgrad(top, bot, ui.ic(0.13), ui.ic(0.0)), None); }
                     if let Some(l) = smooth_path(ui.rt, &pts, None) {
                         // Caliente arriba (naranja), frío abajo (azul)
                         let g = ui.p.vgrad(top, bot - 16.0, rgba(1.0, 0.70, 0.36, 1.0), rgba(0.49, 0.72, 1.0, 1.0));
@@ -528,7 +530,7 @@ impl Widget for WeatherW {
                 }
                 // Horas
                 for i in (0..n).step_by(3) {
-                    let label = if i == 0 { "Ahora".to_string() } else { format!("{}", f.hours[i].0) };
+                    let label = if i == 0 { i18n::t("Ahora").to_string() } else { format!("{}", f.hours[i].0) };
                     let x = (PAD + i as f32 * step).clamp(PAD + 14.0, W - PAD - 10.0);
                     // Bajo la sonda, las horas se apagan para dejar sitio a su etiqueta
                     let near = (1.0 - ((x - self.probe_x).abs() / 40.0)).clamp(0.0, 1.0) * self.probe_a;
@@ -559,11 +561,11 @@ impl Widget for WeatherW {
                         ui.rt.FillRectangle(&rect(self.probe_x - 0.5, top - 6.0, self.probe_x + 0.5, bot), &ui.wa(0.35 * a));
                         ui.rt.FillEllipse(&ellipse(self.probe_x, yv, 5.5), &ui.wa(a));
                     }
-                    let label = format!("{}:00 · {:.0}°{}", f.hours[near].0, temps[near], f.rain.get(near).filter(|r| **r >= 5.0).map(|r| format!(" · {:.0}% lluvia", r)).unwrap_or_default());
+                    let label = format!("{}:00 · {:.0}°{}", f.hours[near].0, temps[near], f.rain.get(near).filter(|r| **r >= 5.0).map(|r| i18n::tf(" · {}% lluvia", &[&format!("{:.0}", r)])).unwrap_or_default());
                     let lw = ui.p.width(&ui.f.small, &label) + 16.0;
                     let lx = (self.probe_x - lw / 2.0).clamp(PAD - 4.0, W - PAD - lw + 4.0);
                     popup::push_alpha(ui.rt, a);
-                    unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, bot + 2.0, lx + lw, bot + 22.0), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.45))); }
+                    unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, bot + 2.0, lx + lw, bot + 22.0), 10.0), &ui.chip()); }
                     ui.text_c(&ui.f.small, &label, lx + lw / 2.0, bot + 4.0, 16.0, &ui.white);
                     ui.rt_pop();
                 }
@@ -578,7 +580,7 @@ impl Widget for WeatherW {
                 let cx = PAD + cw * (i as f32 + 0.5);
                 let y = dy + 8.0 * (1.0 - k);
                 popup::push_alpha(ui.rt, k);
-                ui.text_c(&ui.f.lbl, if i == 0 { "Hoy" } else { WD_SHORT[*wd as usize % 7] }, cx, y, 18.0, if i == 0 { &ui.white } else { &ui.dim });
+                ui.text_c(&ui.f.lbl, if i == 0 { i18n::t("Hoy") } else { i18n::weekday_short(*wd as usize) }, cx, y, 18.0, if i == 0 { &ui.white } else { &ui.dim });
                 let b = ui.white.clone();
                 weather::draw_icon(ui.rt, &ui.p, &ui.f.icon_l, cx - 14.0, y + 20.0, 28.0, 28.0, *code, true, &b);
                 ui.text_c(&ui.f.lbl, &format!("{:.0}°", mx), cx, y + 52.0, 18.0, &ui.white);
@@ -646,8 +648,8 @@ impl Widget for MusicW {
             let k = ez(t, 0.1, 0.5);
             popup::push_alpha(ui.rt, k);
             ui.glyph(&d.glyph_l, G_MUSIC, 0.0, H / 2.0 - 60.0 + 8.0 * (1.0 - k), W, 40.0, &ui.dim);
-            ui.text_c(&d.title, "Nada sonando", W / 2.0, H / 2.0 - 8.0, 24.0, &ui.white);
-            ui.text_c(&ui.f.sub, "Pon música en Spotify, YouTube Music o el navegador", W / 2.0, H / 2.0 + 18.0, 18.0, &ui.dim);
+            ui.text_c(&d.title, i18n::t("Nada sonando"), W / 2.0, H / 2.0 - 8.0, 24.0, &ui.white);
+            ui.text_c(&ui.f.sub, i18n::t("Pon música en Spotify, YouTube Music o el navegador"), W / 2.0, H / 2.0 + 18.0, 18.0, &ui.dim);
             ui.rt_pop();
             return;
         };
@@ -711,7 +713,7 @@ impl Widget for MusicW {
         let app = player_name(&m.app);
         let kt = ez(since_title, 0.0, 0.45);
         let ka = ez(since_title, 0.06, 0.45);
-        ui.text(&ui.f.small, &format!("Reproduciendo en {app}"), lx, PAD - 4.0, 16.0, &accent);
+        ui.text(&ui.f.small, &i18n::tf("Reproduciendo en {}", &[&app]), lx, PAD - 4.0, 16.0, &accent);
         popup::push_alpha(ui.rt, kt);
         ui.text(&d.big, &trunc(&m.title, (lw / 12.5) as usize), lx, PAD + 12.0 + 10.0 * (1.0 - kt), 32.0, &ui.white);
         ui.rt_pop();
@@ -732,20 +734,20 @@ impl Widget for MusicW {
             popup::push_alpha(ui.rt, ka);
             let mut y = top + 2.0 + 8.0 * (1.0 - ka);
             if !m.album.trim().is_empty() && m.album.trim() != m.title.trim() {
-                ui.text(&ui.f.small, "DEL ÁLBUM", lx, y, 16.0, &ui.faint);
+                ui.text(&ui.f.small, i18n::t("DEL ÁLBUM"), lx, y, 16.0, &ui.faint);
                 ui.text(&ui.f.name, &trunc(&m.album, (lw / 7.5) as usize), lx, y + 18.0, 20.0, &ui.white);
                 y += 52.0;
             }
             if let Some((p, e)) = secs {
-                ui.text(&ui.f.small, "QUEDAN", lx, y, 16.0, &ui.faint);
+                ui.text(&ui.f.small, i18n::t("QUEDAN"), lx, y, 16.0, &ui.faint);
                 ui.text(&d.title, &live::mmss((e - p).max(0.0) as u32), lx, y + 18.0, 22.0, &ui.white);
                 y += 52.0;
             }
-            let msg = if deskdata::ytm_open() { "Sin más temas en la cola" } else { "La cola sale con YouTube Music" };
+            let msg = if deskdata::ytm_open() { i18n::t("Sin más temas en la cola") } else { i18n::t("La cola sale con YouTube Music") };
             ui.text(&ui.f.sub, msg, lx, y.min(bot - 18.0), 18.0, &ui.faint);
             ui.rt_pop();
         } else {
-            ui.text(&ui.f.small, "A CONTINUACIÓN", lx, top + 2.0, 16.0, &ui.faint);
+            ui.text(&ui.f.small, i18n::t("A CONTINUACIÓN"), lx, top + 2.0, 16.0, &ui.faint);
             let rh = 38.0;
             let fit = (((bot - top - 24.0) / rh) as usize).max(1);
             for (i, q) in next.iter().take(fit).enumerate() {
@@ -794,7 +796,7 @@ impl Widget for MusicW {
                 popup::push_alpha(ui.rt, hk);
                 unsafe {
                     ui.rt.FillRectangle(&rect(mx - 0.75, py - 5.0, mx + 0.75, py + 9.0), &ui.wa(0.8));
-                    ui.rt.FillRoundedRectangle(&rrect(rect(bx, py - 30.0, bx + lw2, py - 10.0), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.5)));
+                    ui.rt.FillRoundedRectangle(&rrect(rect(bx, py - 30.0, bx + lw2, py - 10.0), 10.0), &ui.chip());
                 }
                 ui.text_c(&ui.f.small, &lab, bx + lw2 / 2.0, py - 28.0, 16.0, &ui.white);
                 ui.rt_pop();
@@ -907,9 +909,9 @@ fn player_name(app: &str) -> String {
     if a.contains("spotify") { return "Spotify".into(); }
     // La app de YouTube Music (instalada desde el navegador) se anuncia como el navegador
     if !QUEUE.lock().unwrap().is_empty() || deskdata::ytm_open() { return "YouTube Music".into(); }
-    if ["brave", "chrome", "msedge", "firefox", "opera", "vivaldi"].iter().any(|b| a.contains(b)) { return "Navegador".into(); }
+    if ["brave", "chrome", "msedge", "firefox", "opera", "vivaldi"].iter().any(|b| a.contains(b)) { return i18n::t("Navegador").into(); }
     if a.contains("youtube") { return "YouTube Music".into(); }
-    if a.contains("zune") || a.contains("media") { return "Reproductor multimedia".into(); }
+    if a.contains("zune") || a.contains("media") { return i18n::t("Reproductor multimedia").into(); }
     let s = app.split(['!', '_']).next().unwrap_or(app).rsplit('.').next().unwrap_or(app).trim_end_matches(".exe");
     s.to_string()
 }
@@ -934,20 +936,20 @@ struct SystemW {
 
 fn uptime_text(s: u64) -> String {
     let (d, h, m) = (s / 86400, s / 3600 % 24, s / 60 % 60);
-    if d > 0 { format!("Encendido {d} d {h} h") } else if h > 0 { format!("Encendido {h} h {m} min") } else { format!("Encendido {m} min") }
+    if d > 0 { i18n::tf("Encendido {} d {} h", &[&d, &h]) } else if h > 0 { i18n::tf("Encendido {} h {} min", &[&h, &m]) } else { i18n::tf("Encendido {} min", &[&m]) }
 }
 
 impl Widget for SystemW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
         let (W, H) = size(Kind::System);
         let s = SYS.lock().unwrap().clone().unwrap_or_default();
-        header(ui, d, "Sistema", &if s.uptime > 0 { uptime_text(s.uptime) } else { String::new() }, W);
+        header(ui, d, i18n::t("Sistema"), &if s.uptime > 0 { uptime_text(s.uptime) } else { String::new() }, W);
         self.moving = false;
         // ---- Cuatro cifras grandes en fila: los rótulos van en la capa fija y las cifras, que cuentan
         // hacia el valor nuevo, se pintan encima en cada fotograma (`paint_live`)
         let y = PAD + 30.0;
         let iw = W - PAD * 2.0;
-        let labels = ["Procesador".to_string(), format!("Memoria · {} de {}", fmt_bytes(s.ram_used), fmt_bytes(s.ram_total)), "Bajada".into(), "Subida".into()];
+        let labels = [i18n::t("Procesador").to_string(), i18n::tf("Memoria · {} de {}", &[&fmt_bytes(s.ram_used), &fmt_bytes(s.ram_total)]), i18n::t("Bajada").into(), i18n::t("Subida").into()];
         for (i, l) in labels.iter().enumerate() {
             ui.text(&ui.f.small, &trunc(l, 32), PAD + iw * SYS_XS[i], y + 30.0, 16.0, &ui.dim);
         }
@@ -986,9 +988,9 @@ impl Widget for SystemW {
                     rtb.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
                     let base_y = gb - (gt - M);
                     let stroke = round_stroke(rtb);
-                    let w45: Option<ID2D1Brush> = rtb.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 0.45), None).ok().map(|b| b.into());
-                    let w95: Option<ID2D1Brush> = rtb.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 0.95), None).ok().map(|b| b.into());
-                    let fill: Option<ID2D1Brush> = rtb.CreateGradientStopCollection(&[D2D1_GRADIENT_STOP { position: 0.0, color: rgba(1.0, 1.0, 1.0, 0.20) }, D2D1_GRADIENT_STOP { position: 1.0, color: rgba(1.0, 1.0, 1.0, 0.0) }], D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()
+                    let w45: Option<ID2D1Brush> = rtb.CreateSolidColorBrush(&ui.ic(0.45), None).ok().map(|b| b.into());
+                    let w95: Option<ID2D1Brush> = rtb.CreateSolidColorBrush(&ui.ic(0.95), None).ok().map(|b| b.into());
+                    let fill: Option<ID2D1Brush> = rtb.CreateGradientStopCollection(&[D2D1_GRADIENT_STOP { position: 0.0, color: ui.ic(0.20) }, D2D1_GRADIENT_STOP { position: 1.0, color: ui.ic(0.0) }], D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok()
                         .and_then(|c| rtb.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: M }, endPoint: Vector2 { X: 0.0, Y: base_y } }, None, &c).ok()).map(|b| b.into());
                     if let (Some(l), Some(b)) = (smooth_path(rtb, &local(&s.ram), None), &w45) { rtb.DrawGeometry(&l, b, 2.0, stroke.as_ref()); }
                     let cp = local(&s.cpu);
@@ -1011,14 +1013,14 @@ impl Widget for SystemW {
             ui.rt.FillRoundedRectangle(&rrect(rect(PAD + 66.0, gb + 13.0, PAD + 78.0, gb + 16.0), 1.5), &ui.wa(0.45));
         }
         ui.text(&ui.f.small, "CPU", PAD + 18.0, gb + 6.0, 16.0, &ui.dim);
-        ui.text(&ui.f.small, "Memoria", PAD + 84.0, gb + 6.0, 16.0, &ui.dim);
-        ui.text_r(&ui.f.small, "Último minuto", W - PAD, gb + 6.0, 16.0, &ui.faint);
+        ui.text(&ui.f.small, i18n::t("Memoria"), PAD + 84.0, gb + 6.0, 16.0, &ui.dim);
+        ui.text_r(&ui.f.small, i18n::t("Último minuto"), W - PAD, gb + 6.0, 16.0, &ui.faint);
 
         // ---- Abajo: red a la izquierda, apps que más gastan a la derecha
         let by = gb + 34.0;
         let half = (W - PAD * 2.0 - 24.0) / 2.0;
         ui.glyph(&ui.f.icon, G_DOWN, PAD - 2.0, by - 2.0, 16.0, 18.0, &ui.dim);
-        ui.text(&ui.f.small, "RED", PAD + 16.0, by - 2.0, 18.0, &ui.faint);
+        ui.text(&ui.f.small, i18n::t("RED"), PAD + 16.0, by - 2.0, 18.0, &ui.faint);
         let _ = G_UP;
         let nb = 30usize;
         let vals: Vec<f32> = s.down.iter().rev().take(nb).rev().cloned().collect();
@@ -1032,7 +1034,7 @@ impl Widget for SystemW {
             unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(x + 1.0, bb - h, x + bw - 1.5, bb), 1.5), &ui.wa(if last { 0.95 } else { 0.42 })); }
         }
         let ax = PAD + half + 24.0;
-        ui.text(&ui.f.small, "LO QUE MÁS GASTA", ax, by - 2.0, 18.0, &ui.faint);
+        ui.text(&ui.f.small, i18n::t("LO QUE MÁS GASTA"), ax, by - 2.0, 18.0, &ui.faint);
         // Cada app conserva su fila animada: si cambia el orden, se deslizan a su nuevo puesto; las que
         // entran aparecen y las que salen se desvanecen
         let rank: Vec<(String, f32)> = s.top.iter().take(3).cloned().collect();
@@ -1126,12 +1128,12 @@ impl Widget for SystemW {
                     ui.rt.FillEllipse(&ellipse(px, cy, 4.5), &ui.wa(a));
                 }
                 let ago_s = n - 1 - i;
-                let when = if ago_s == 0 { "ahora".to_string() } else { format!("hace {ago_s} s") };
-                let lab = format!("CPU {:.0}% · Memoria {:.0}% · {when}", data.cpu[i], data.ram.get(i).copied().unwrap_or(0.0));
+                let when = if ago_s == 0 { i18n::t("ahora").to_string() } else { i18n::tf("hace {} s", &[&ago_s]) };
+                let lab = i18n::tf("CPU {}% · Memoria {}% · {}", &[&format!("{:.0}", data.cpu[i]), &format!("{:.0}", data.ram.get(i).copied().unwrap_or(0.0)), &when]);
                 let lw = ui.p.width(&ui.f.small, &lab) + 16.0;
                 let lx = (px - lw / 2.0).clamp(PAD - 4.0, W - PAD - lw + 4.0);
                 popup::push_alpha(ui.rt, a);
-                unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, gt - 30.0, lx + lw, gt - 10.0), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.5))); }
+                unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, gt - 30.0, lx + lw, gt - 10.0), 10.0), &ui.chip()); }
                 ui.text_c(&ui.f.small, &lab, lx + lw / 2.0, gt - 28.0, 16.0, &ui.white);
                 ui.rt_pop();
             }
@@ -1151,7 +1153,7 @@ impl Widget for StorageW {
         let (W, H) = size(Kind::Storage);
         let st = STORE.lock().unwrap().clone();
         let n = st.as_ref().map(|s| s.drives.len()).unwrap_or(0);
-        header(ui, d, "Almacenamiento", &match n { 0 => String::new(), 1 => "1 unidad".into(), n => format!("{n} unidades") }, W);
+        header(ui, d, i18n::t("Almacenamiento"), &match n { 0 => String::new(), 1 => i18n::t("1 unidad").into(), n => i18n::tf("{} unidades", &[&n]) }, W);
         let Some(st) = st else { return };
         let mut y = PAD + 36.0;
         self.fills.resize(st.drives.len().min(3), 0.0);
@@ -1161,7 +1163,7 @@ impl Widget for StorageW {
             let used = dr.total - dr.free;
             let frac = used as f32 / dr.total as f32;
             let letter = dr.root.trim_end_matches('\\');
-            let name = if dr.label.is_empty() { format!("Disco ({letter})") } else { format!("{} ({letter})", dr.label) };
+            let name = if dr.label.is_empty() { i18n::tf("Disco ({})", &[&letter]) } else { format!("{} ({letter})", dr.label) };
             let id = 40 + i as u32;
             ui.card_k(rect(PAD - 8.0, y - 4.0, W - PAD + 8.0, y + 44.0), ui.heat(id));
             let hk = ui.heat(id);
@@ -1169,7 +1171,7 @@ impl Widget for StorageW {
             ui.text(&ui.f.name, &trunc(&name, 22), PAD + 28.0 + 4.0 * hk, y, 20.0, &ui.white);
             let dim = ui.dim.clone();
             let fsub = ui.f.sub.clone();
-            self.r_free[i].draw(ui, &fsub, &format!("{} libres de {}", fmt_bytes(dr.free), fmt_bytes(dr.total)), W - PAD, y, 20.0, &dim, true);
+            self.r_free[i].draw(ui, &fsub, &i18n::tf("{} libres de {}", &[&fmt_bytes(dr.free), &fmt_bytes(dr.total)]), W - PAD, y, 20.0, &dim, true);
             // Al aparecer se llena en cascada; después sigue al espacio real con suavidad
             let k = ez(t, 0.15 + i as f32 * 0.12, 0.9);
             if t < 1.1 { self.fills[i] = frac * k; } else { self.moving |= approach(&mut self.fills[i], frac, dt, 0.4); }
@@ -1178,12 +1180,12 @@ impl Widget for StorageW {
             bar(ui, PAD, y + 32.0 - th / 2.0, W - PAD * 2.0, th, self.fills[i], &fill);
             if hk > 0.01 {
                 // Al pasar el ratón: cuánto está lleno, al final del relleno
-                let lab = format!("{:.0} % usado", frac * 100.0);
+                let lab = i18n::tf("{} % usado", &[&format!("{:.0}", frac * 100.0)]);
                 let lw = ui.p.width(&ui.f.small, &lab) + 14.0;
                 let ex = PAD + (W - PAD * 2.0) * self.fills[i];
                 let lx = (ex - lw / 2.0).clamp(PAD, W - PAD - lw);
                 popup::push_alpha(ui.rt, hk);
-                unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, y + 38.0, lx + lw, y + 54.0), 8.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.5))); }
+                unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(lx, y + 38.0, lx + lw, y + 54.0), 8.0), &ui.chip()); }
                 ui.text_c(&ui.f.small, &lab, lx + lw / 2.0, y + 38.0, 16.0, &ui.white);
                 ui.rt_pop();
             }
@@ -1211,23 +1213,23 @@ impl Widget for StorageW {
             ui.glyph(&d.glyph_m, G_TRASH, PAD, by + 4.0, 44.0, 44.0, &ui.white);
             ui.rt.SetTransform(&base);
         }
-        ui.text(&ui.f.name, "Papelera", PAD + 56.0, by + 6.0, 20.0, &ui.white);
-        let sub = if st.bin_items == 0 { "Vacía".to_string() } else { format!("{} elemento{} · {}", st.bin_items, if st.bin_items == 1 { "" } else { "s" }, fmt_bytes(st.bin_size)) };
+        ui.text(&ui.f.name, i18n::t("Papelera"), PAD + 56.0, by + 6.0, 20.0, &ui.white);
+        let sub = if st.bin_items == 0 { i18n::t("Vacía").to_string() } else if st.bin_items == 1 { i18n::tf("1 elemento · {}", &[&fmt_bytes(st.bin_size)]) } else { i18n::tf("{} elementos · {}", &[&st.bin_items, &fmt_bytes(st.bin_size)]) };
         let dim = ui.dim.clone();
         let fsub = ui.f.sub.clone();
         self.r_bin.draw(ui, &fsub, &sub, PAD + 56.0, by + 28.0, 18.0, &dim, false);
-        pbutton(ui, rect(W - PAD - 158.0, by + 12.0, W - PAD - 88.0, by + 42.0), None, "Abrir", 10, false);
+        pbutton(ui, rect(W - PAD - 158.0, by + 12.0, W - PAD - 88.0, by + 42.0), None, i18n::t("Abrir"), 10, false);
         // Vaciar en rojo suave (Windows pide confirmación antes de borrar)
         let r = rect(W - PAD - 80.0, by + 12.0, W - PAD, by + 42.0);
         let k = ui.heat(11);
         unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 10.0), &ui.brush(rgba(1.0, 0.35, 0.35, 0.12 + 0.10 * k))); }
         let red = ui.brush(rgba(1.0, 0.55, 0.55, if st.bin_items == 0 { 0.4 } else { 1.0 }));
-        ui.text_c(&ui.f.lbl, "Vaciar…", (r.left + r.right) / 2.0, r.top, r.bottom - r.top, &red);
+        ui.text_c(&ui.f.lbl, i18n::t("Vaciar…"), (r.left + r.right) / 2.0, r.top, r.bottom - r.top, &red);
         if st.bin_items > 0 { ui.hit(r, 11); }
         // ---- Lo más grande de la papelera (si tiene algo)
         let mut fy = by + 62.0;
         if !st.bin_big.is_empty() {
-            ui.text(&ui.f.small, "LO MÁS GRANDE", PAD, fy, 16.0, &ui.faint);
+            ui.text(&ui.f.small, i18n::t("LO MÁS GRANDE"), PAD, fy, 16.0, &ui.faint);
             for (i, (name, size)) in st.bin_big.iter().enumerate() {
                 let yy = fy + 20.0 + i as f32 * 20.0;
                 if yy > H - PAD - 16.0 { break; }
@@ -1246,8 +1248,8 @@ impl Widget for StorageW {
             ui.card_k(r, k);
             ui.glyph(&ui.f.icon_l, "\u{E7F8}", PAD, fy, 20.0, 30.0, &ui.dim);
             let free: u64 = st.drives.iter().map(|d| d.free).sum();
-            ui.text(&ui.f.lbl, "Liberar espacio", PAD + 28.0, fy, 16.0, &ui.white);
-            ui.text(&ui.f.sub, &format!("{} libres en total · Sensor de almacenamiento", fmt_bytes(free)), PAD + 28.0, fy + 16.0, 16.0, &ui.dim);
+            ui.text(&ui.f.lbl, i18n::t("Liberar espacio"), PAD + 28.0, fy, 16.0, &ui.white);
+            ui.text(&ui.f.sub, &i18n::tf("{} libres en total · Sensor de almacenamiento", &[&fmt_bytes(free)]), PAD + 28.0, fy + 16.0, 16.0, &ui.dim);
             ui.glyph(&ui.f.icon, G_RIGHT, W - PAD - 16.0, fy, 16.0, 30.0, &ui.wa(0.35 + 0.6 * k));
             ui.hit(r, 12);
         }
@@ -1317,9 +1319,9 @@ impl Widget for ProjectsW {
         let (W, H) = size(Kind::Projects);
         let ROWS = rows_fit();
         let p = PROJ.lock().unwrap().clone();
-        ui.text(&d.title, "Proyectos", PAD, PAD - 2.0, 22.0, &ui.white);
+        ui.text(&d.title, i18n::t("Proyectos"), PAD, PAD - 2.0, 22.0, &ui.white);
         // Pestañas: el resaltado se desliza de una a otra
-        let tabs = ["En local", "GitHub"];
+        let tabs = [i18n::t("En local"), "GitHub"];
         let mut rs = [rect(0.0, 0.0, 0.0, 0.0); 2];
         let mut x = W - PAD;
         for i in (0..2).rev() {
@@ -1348,12 +1350,12 @@ impl Widget for ProjectsW {
                 let mut sub = String::new();
                 if !r.lang.is_empty() { sub += r.lang; sub += " · "; }
                 sub += &r.branch;
-                match r.dirty { Some(0) => sub += " · limpio", Some(1) => sub += " · 1 cambio", Some(n) => sub += &format!(" · {n} cambios"), None => {} }
+                match r.dirty { Some(0) => sub += i18n::t(" · limpio"), Some(1) => sub += i18n::t(" · 1 cambio"), Some(n) => sub += &i18n::tf(" · {} cambios", &[&n]), None => {} }
                 (r.name.clone(), sub, ago(r.modified), r.color, false)
             }).collect()
         } else {
             p.gh.iter().map(|g| {
-                let mut sub = if g.private { "Privado".to_string() } else { "Público".to_string() };
+                let mut sub = if g.private { i18n::t("Privado").to_string() } else { i18n::t("Público").to_string() };
                 if !g.lang.is_empty() { sub += " · "; sub += &g.lang; }
                 if g.stars > 0 { sub += &format!(" · {} ★", g.stars); }
                 (g.name.clone(), sub, ago(g.pushed), g.color, g.private)
@@ -1362,9 +1364,9 @@ impl Widget for ProjectsW {
         self.scroll = self.scroll.min(rows.len().saturating_sub(ROWS));
         if rows.is_empty() {
             let msg = if self.tab == 0 {
-                if p.scanned { "No hay proyectos con git en el Escritorio ni en las carpetas habituales" } else { "Buscando proyectos…" }
+                i18n::t(if p.scanned { "No hay proyectos con git en el Escritorio ni en las carpetas habituales" } else { "Buscando proyectos…" })
             } else {
-                match p.gh_ok { None => "Cargando tus repos de GitHub…", Some(false) => "Instala GitHub CLI e inicia sesión: gh auth login", Some(true) => "No tienes repos en GitHub" }
+                i18n::t(match p.gh_ok { None => "Cargando tus repos de GitHub…", Some(false) => "Instala GitHub CLI e inicia sesión: gh auth login", Some(true) => "No tienes repos en GitHub" })
             };
             ui.text_c(&ui.f.sub, msg, W / 2.0, H / 2.0 - 10.0, 20.0, &ui.dim);
         }
@@ -1405,9 +1407,9 @@ impl Widget for ProjectsW {
         }
         // Pie: cuántos hay y cómo se usa
         if rows.len() > ROWS {
-            ui.text(&ui.f.small, &format!("{}–{} de {}", self.scroll + 1, (self.scroll + ROWS).min(rows.len()), rows.len()), PAD, H - PAD - 14.0, 16.0, &ui.faint);
+            ui.text(&ui.f.small, &i18n::tf("{}–{} de {}", &[&(self.scroll + 1), &(self.scroll + ROWS).min(rows.len()), &rows.len()]), PAD, H - PAD - 14.0, 16.0, &ui.faint);
         }
-        ui.text_r(&ui.f.small, "Clic derecho: más opciones", W - PAD, H - PAD - 14.0, 16.0, &ui.faint);
+        ui.text_r(&ui.f.small, i18n::t("Clic derecho: más opciones"), W - PAD, H - PAD - 14.0, 16.0, &ui.faint);
         let _ = (G_STAR, G_PIN);
     }
     fn click(&mut self, id: Option<u32>, right: bool, pt: POINT) -> Option<Box<dyn FnOnce()>> {
@@ -1442,7 +1444,9 @@ impl Widget for ProjectsW {
                 if r.remote.is_some() { items.push("Ver en GitHub"); }
                 items.push("");
                 items.push("Copiar ruta");
-                match desk::context_menu(&items, pt).map(|k| items[k]) {
+                // Se enseña traducido; se compara con el texto original
+                let shown: Vec<&str> = items.iter().map(|s| i18n::t(*s)).collect();
+                match desk::context_menu(&shown, pt).map(|k| items[k]) {
                     Some("Abrir en el Explorador") => sys::open(&r.path),
                     Some("Abrir en VS Code") => open_vscode(&r.path),
                     Some("Abrir terminal aquí") => open_terminal(r.path.clone()),
@@ -1460,7 +1464,9 @@ impl Widget for ProjectsW {
                 if local.is_some() { items.push(""); items.push("Abrir la carpeta local"); }
                 items.push("");
                 items.push("Copiar URL");
-                match desk::context_menu(&items, pt).map(|k| items[k]) {
+                // Se enseña traducido; se compara con el texto original
+                let shown: Vec<&str> = items.iter().map(|s| i18n::t(*s)).collect();
+                match desk::context_menu(&shown, pt).map(|k| items[k]) {
                     Some("Abrir en GitHub") => sys::open(&g.url),
                     Some("Issues") => sys::open(&format!("{}/issues", g.url)),
                     Some("Pull requests") => sys::open(&format!("{}/pulls", g.url)),
@@ -1580,7 +1586,7 @@ impl Widget for PhoneW {
                 let g = ui.p.vgrad(fy, fy + fh, rgba(0.36, 0.45, 0.62, 0.55), rgba(0.10, 0.12, 0.18, 0.55));
                 ui.rt.FillRoundedRectangle(&fr, &g);
                 ui.glyph(&ui.f.icon_l, G_PHOTO, fx, fy + fh / 2.0 - 24.0, fw, 28.0, &ui.wa(0.55));
-                ui.text_c(&ui.f.small, "Fondo", fx + fw / 2.0, fy + fh / 2.0 + 6.0, 16.0, &ui.wa(0.55));
+                ui.text_c(&ui.f.small, i18n::t("Fondo"), fx + fw / 2.0, fy + fh / 2.0 + 6.0, 16.0, &ui.wa(0.55));
             },
         }
         unsafe {
@@ -1595,7 +1601,7 @@ impl Widget for PhoneW {
         let x0 = fx + fw + 18.0;
         let k1 = ez(t, 0.08, 0.45);
         popup::push_alpha(ui.rt, k1);
-        let name = if st.name.is_empty() { "Tu móvil".to_string() } else { st.name.clone() };
+        let name = if st.name.is_empty() { i18n::t("Tu móvil").to_string() } else { st.name.clone() };
         ui.text(&d.title, &trunc(&name, 20), x0 + 8.0 * (1.0 - k1), fy + 4.0, 26.0, &ui.white);
         // Iconos de estado: conexión y batería (la batería solo si se conoce)
         let iy = fy + 36.0;
@@ -1618,10 +1624,10 @@ impl Widget for PhoneW {
         let py = fy + 72.0;
         let pr = rect(x0, py, W - PAD, py + 40.0);
         unsafe { ui.rt.FillRoundedRectangle(&rrect(pr, 10.0), &ui.wa(0.08)); }
-        let (okc, okg) = if st.running { (rgba(0.33, 0.78, 0.42, 1.0), "\u{E73E}") } else { (rgba(1.0, 1.0, 1.0, 0.3), "\u{E711}") };
+        let (okc, okg) = if st.running { (rgba(0.33, 0.78, 0.42, 1.0), "\u{E73E}") } else { (ui.ic(0.3), "\u{E711}") };
         unsafe { ui.rt.FillEllipse(&ellipse(x0 + 22.0, py + 20.0, 10.0), &ui.brush(okc)); }
         ui.glyph(&ui.f.small, okg, x0 + 12.0, py + 10.0, 20.0, 20.0, &ui.brush(rgba(0.0, 0.0, 0.0, 0.85)));
-        ui.text(&ui.f.name, if st.running { "Conectado" } else { "Sin conectar" }, x0 + 40.0, py, 40.0, &ui.white);
+        ui.text(&ui.f.name, if st.running { i18n::t("Conectado") } else { i18n::t("Sin conectar") }, x0 + 40.0, py, 40.0, &ui.white);
         unsafe { ui.rt.FillRectangle(&rect(W - PAD - 44.0, py + 8.0, W - PAD - 43.0, py + 32.0), &ui.wa(0.15)); }
         // El botón de actualizar gira un poco mientras se busca de nuevo
         let spin = self.sync_at.map(|s| s.elapsed().as_secs_f32()).filter(|s| *s < 0.8);
@@ -1634,7 +1640,7 @@ impl Widget for PhoneW {
         }
         round_btn(ui, &ui.f.icon.clone(), "\u{E72C}", scx, scy, 16.0, 15, false);
         unsafe { ui.rt.SetTransform(&base); }
-        let sub = match st.battery { Some((_, when)) if !st.running || deskdata::now_unix().saturating_sub(when) > 120 => format!("Batería vista {}", ago(when)), _ => String::new() };
+        let sub = match st.battery { Some((_, when)) if !st.running || deskdata::now_unix().saturating_sub(when) > 120 => i18n::tf("Batería vista {}", &[&ago(when)]), _ => String::new() };
         if !sub.is_empty() { ui.text(&ui.f.small, &sub, x0 + 2.0, py + 44.0, 18.0, &ui.faint); }
         ui.rt_pop();
 
@@ -1666,7 +1672,7 @@ impl Widget for PhoneW {
         let mut ny = ay + 44.0 + 24.0;
         if !st.photos.is_empty() {
             ui.sep(ny - 8.0);
-            ui.text(&ui.f.small, "FOTOS RECIENTES", PAD, ny, 18.0, &ui.faint);
+            ui.text(&ui.f.small, i18n::t("FOTOS RECIENTES"), PAD, ny, 18.0, &ui.faint);
             let gap = 8.0;
             let side = (W - PAD * 2.0 - gap * 2.0) / 3.0;
             let py = ny + 24.0;
@@ -1691,7 +1697,7 @@ impl Widget for PhoneW {
                 }
                 if ph.video {
                     unsafe { ui.rt.FillEllipse(&ellipse(cx, cy, 15.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.45))); }
-                    ui.glyph(&ui.f.icon, G_PLAY, cx - 15.0, cy - 15.0, 30.0, 30.0, &ui.white);
+                    ui.glyph(&ui.f.icon, G_PLAY, cx - 15.0, cy - 15.0, 30.0, 30.0, &ui.brush(rgba(1.0, 1.0, 1.0, 0.95)));
                 }
                 ui.rt_pop();
                 unsafe { ui.rt.SetTransform(&base); }
@@ -1702,21 +1708,21 @@ impl Widget for PhoneW {
 
         // ---- Notificaciones del móvil
         ui.sep(ny - 8.0);
-        ui.text(&ui.f.small, "NOTIFICACIONES", PAD, ny, 18.0, &ui.faint);
+        ui.text(&ui.f.small, i18n::t("NOTIFICACIONES"), PAD, ny, 18.0, &ui.faint);
         if !st.notifs.is_empty() { ui.text_r(&ui.f.small, &st.notifs.len().to_string(), W - PAD, ny, 18.0, &ui.faint); }
         let ly = ny + 26.0;
         if st.ready && !st.access {
             ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 30.0, W, 50.0, &ui.wa(0.4));
-            ui.text_c(&ui.f.sub, "Para ver aquí los avisos del móvil,", W / 2.0, ly + 88.0, 18.0, &ui.dim);
-            ui.text_c(&ui.f.sub, "macbar necesita leer las notificaciones", W / 2.0, ly + 106.0, 18.0, &ui.dim);
-            pbutton(ui, rect(W / 2.0 - 70.0, ly + 136.0, W / 2.0 + 70.0, ly + 168.0), None, "Dar permiso", 20, false);
+            ui.text_c(&ui.f.sub, i18n::t("Para ver aquí los avisos del móvil,"), W / 2.0, ly + 88.0, 18.0, &ui.dim);
+            ui.text_c(&ui.f.sub, i18n::t("macbar necesita leer las notificaciones"), W / 2.0, ly + 106.0, 18.0, &ui.dim);
+            pbutton(ui, rect(W / 2.0 - 70.0, ly + 136.0, W / 2.0 + 70.0, ly + 168.0), None, i18n::t("Dar permiso"), 20, false);
             return;
         }
         if st.ready && st.notifs.is_empty() {
             let k = ez(t, 0.3, 0.5);
             popup::push_alpha(ui.rt, k);
             ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 40.0, W, 50.0, &ui.wa(0.3));
-            ui.text_c(&ui.f.sub, "Sin notificaciones del móvil", W / 2.0, ly + 98.0, 18.0, &ui.dim);
+            ui.text_c(&ui.f.sub, i18n::t("Sin notificaciones del móvil"), W / 2.0, ly + 98.0, 18.0, &ui.dim);
             ui.rt_pop();
             return;
         }

@@ -42,6 +42,8 @@ mod ccenter;
 mod desk;
 mod deskdata;
 mod deskw;
+mod i18n;
+mod i18n_tabla;
 mod live;
 mod menus;
 mod phone;
@@ -83,27 +85,27 @@ fn ease_back(t: f32) -> f32 { let t = t.clamp(0.0, 1.0) - 1.0; 1.0 + 2.70158 * t
 fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
     use live::Hud::*;
     match h {
-        Volume(v, m) => (if m || v <= 0.001 { "\u{E74F}" } else if v < 0.34 { "\u{E993}" } else if v < 0.67 { "\u{E994}" } else { "\u{E995}" }, if m { "Silencio".into() } else { "Volumen".into() }, true),
-        Bright(_) => ("\u{E706}", "Brillo".into(), true),
-        Power(_, ch) => (if ch { "\u{EA93}" } else { "\u{E83F}" }, if ch { "Cargando".into() } else { "Con batería".into() }, true),
-        TimerDone => ("\u{EA8F}", "Se acabó el tiempo".into(), false),
-        Net(true) => ("\u{E701}", "Conectado a internet".into(), false),
-        Net(false) => ("\u{F384}", "Sin conexión".into(), false),
-        LowBat(_) => ("\u{E851}", "Batería baja".into(), true),
-        Caps(on) => ("\u{E765}", if on { "Bloq Mayús activado".into() } else { "Bloq Mayús desactivado".into() }, false),
+        Volume(v, m) => (if m || v <= 0.001 { "\u{E74F}" } else if v < 0.34 { "\u{E993}" } else if v < 0.67 { "\u{E994}" } else { "\u{E995}" }, if m { i18n::t("Silencio").into() } else { i18n::t("Volumen").into() }, true),
+        Bright(_) => ("\u{E706}", i18n::t("Brillo").into(), true),
+        Power(_, ch) => (if ch { "\u{EA93}" } else { "\u{E83F}" }, if ch { i18n::t("Cargando").into() } else { i18n::t("Con batería").into() }, true),
+        TimerDone => ("\u{EA8F}", i18n::t("Se acabó el tiempo").into(), false),
+        Net(true) => ("\u{E701}", i18n::t("Conectado a internet").into(), false),
+        Net(false) => ("\u{F384}", i18n::t("Sin conexión").into(), false),
+        LowBat(_) => ("\u{E851}", i18n::t("Batería baja").into(), true),
+        Caps(on) => ("\u{E765}", if on { i18n::t("Bloq Mayús activado").into() } else { i18n::t("Bloq Mayús desactivado").into() }, false),
         Audio => ("\u{E7F5}", trunc(&live::AUDIO_NAME.lock().unwrap(), 34), false),
-        Claude(_) => ("", "Uso semanal".into(), true),
+        Claude(_) => ("", i18n::t("Uso semanal").into(), true),
         Download => ("\u{E896}", live::LAST_FILE.lock().unwrap().as_ref().map(|f| trunc(f.0.rsplit('\\').next().unwrap_or(""), 30)).unwrap_or_default(), false),
-        Shot => ("\u{E722}", "Captura guardada".into(), false),
-        Copied => ("\u{E8C8}", format!("Copiado  {}", live::CLIP.lock().unwrap()), false),
-        Shelf => ("\u{E8B7}", { let n = live::SHELF.lock().unwrap().len(); if n == 1 { "1 archivo en la bandeja".to_string() } else { format!("{n} archivos en la bandeja") } }, false),
-        Mic(muted) => (if muted { "\u{F781}" } else { "\u{E720}" }, if muted { "Micrófono silenciado".into() } else { "Micrófono activado".into() }, false),
-        Num(on) => ("\u{E75F}", if on { "Bloq Num activado".into() } else { "Bloq Num desactivado".into() }, false),
+        Shot => ("\u{E722}", i18n::t("Captura guardada").into(), false),
+        Copied => ("\u{E8C8}", i18n::tf("Copiado  {}", &[&*live::CLIP.lock().unwrap()]), false),
+        Shelf => ("\u{E8B7}", { let n = live::SHELF.lock().unwrap().len(); if n == 1 { i18n::t("1 archivo en la bandeja").to_string() } else { i18n::tf("{} archivos en la bandeja", &[&n]) } }, false),
+        Mic(muted) => (if muted { "\u{F781}" } else { "\u{E720}" }, if muted { i18n::t("Micrófono silenciado").into() } else { i18n::t("Micrófono activado").into() }, false),
+        Num(on) => ("\u{E75F}", if on { i18n::t("Bloq Num activado").into() } else { i18n::t("Bloq Num desactivado").into() }, false),
         Lang => ("\u{E8D3}", live::LANG.lock().unwrap().clone(), false),
         Desk(..) => ("\u{E7C4}", trunc(&live::DESK_NAME.lock().unwrap(), 26), false),
         // Sin barra lineal: lleva un anillo radial pequeño a la derecha (ver Mode::Hud)
-        Mem(_) => ("\u{E964}", "Memoria casi llena".into(), false),
-        Usb(on) => { let l = live::USB_LETTER.load(Ordering::Relaxed) as char; ("\u{E88E}", if on { format!("USB conectado · {l}:") } else { "USB expulsado".into() }, false) }
+        Mem(_) => ("\u{E964}", i18n::t("Memoria casi llena").into(), false),
+        Usb(on) => { let l = live::USB_LETTER.load(Ordering::Relaxed) as char; ("\u{E88E}", if on { i18n::tf("USB conectado · {}:", &[&l]) } else { i18n::t("USB expulsado").into() }, false) }
     }
 }
 
@@ -121,6 +123,10 @@ pub const BAR_PLAYER: u32 = 7;
 pub const BAR_WIDGETS: u32 = 8;
 /// Del 20 al 25: poner o quitar cada widget del escritorio.
 pub const BAR_WIDGET0: u32 = 20;
+/// Modo del texto de los widgets (auto, oscuro, claro): 40..42
+pub const BAR_INK0: u32 = 40;
+/// Idioma (automático, español, inglés): 50..52
+pub const BAR_LANG0: u32 = 50;
 static WEATHER_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Última ventana activa que no es la barra: destino de los menús y atajos.
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
@@ -151,6 +157,73 @@ const TIMER_GUARD: usize = 12;
 static FOCUS_TARGET: AtomicIsize = AtomicIsize::new(0);
 static KEEP_LEFT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Fondo claro detrás de la barra: texto e iconos oscuros (lo decide `bar_ink_thread`).
+static BAR_LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! { static BAR_INK: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) }; }
+
+/// Mira cada 3 s el fondo justo debajo de la barra (solo donde se ve el escritorio, no ventanas) y
+/// decide la tinta, con histéresis. Con el modo fijo del menú, la tinta es la elegida.
+fn bar_ink_thread() {
+    std::thread::spawn(|| loop {
+        let want = match desk::ink_mode() {
+            1 => Some(true),
+            2 => Some(false),
+            _ => bar_backdrop_luma().map(|l| if BAR_LIGHT.load(Ordering::Relaxed) { l > 0.50 } else { l > 0.62 }),
+        };
+        if let Some(w) = want {
+            if BAR_LIGHT.swap(w, Ordering::Relaxed) != w { unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); } }
+        }
+        std::thread::sleep(Duration::from_millis(if desk::ink_mode() == 0 { 3000 } else { 700 }));
+    });
+}
+
+/// Luminosidad media de una franja bajo la barra, contando solo los puntos donde asoma el escritorio.
+fn bar_backdrop_luma() -> Option<f32> {
+    unsafe {
+        let bar = bar_hwnd();
+        if bar.0.is_null() { return None; }
+        let s = scale_of(bar);
+        let sw = GetSystemMetrics(SM_CXSCREEN);
+        let (y, hh) = (((BAR_H + 4.0) * s) as i32, (10.0 * s) as i32);
+        // Al volver de suspensión la pantalla puede no tener aún tamaño ni escala: no se mide
+        if sw < 96 || hh < 4 || s <= 0.0 { return None; }
+        let sdc = GetDC(None);
+        let mdc = CreateCompatibleDC(Some(sdc));
+        let bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: sw, biHeight: -hh, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let mut out = None;
+        if let Ok(dib) = CreateDIBSection(Some(mdc), &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            let old = SelectObject(mdc, dib.into());
+            if BitBlt(mdc, 0, 0, sw, hh, Some(sdc), 0, y, SRCCOPY).is_ok() && !bits.is_null() {
+                let px = std::slice::from_raw_parts(bits as *const u8, (sw * hh * 4) as usize);
+                let (mut sum, mut n) = (0.0f32, 0u32);
+                for i in 0..48 {
+                    if px.is_empty() { break; }
+                    let x = sw * (2 * i + 1) / 96;
+                    // ¿Es escritorio (fondo o un widget) lo que hay ahí, o una ventana?
+                    let wnd = WindowFromPoint(POINT { x, y: y + hh / 2 });
+                    let mut cls = [0u16; 32];
+                    let n_ = GetClassNameW(wnd, &mut cls) as usize;
+                    let c = String::from_utf16_lossy(&cls[..n_]);
+                    if !["Progman", "WorkerW", "SHELLDLL_DefView", "SysListView32", "MacBarDesk"].contains(&c.as_str()) { continue; }
+                    for yy in [1, hh / 2, hh - 2] {
+                        let k = ((yy * sw + x) * 4) as usize;
+                        if k + 2 >= px.len() { continue; }
+                        sum += (0.2126 * px[k + 2] as f32 + 0.7152 * px[k + 1] as f32 + 0.0722 * px[k] as f32) / 255.0;
+                        n += 1;
+                    }
+                }
+                // Con menos de un tercio de escritorio a la vista no se cambia nada
+                if n >= 48 { out = Some(sum / n as f32); }
+            }
+            SelectObject(mdc, old);
+            let _ = DeleteObject(dib.into());
+        }
+        let _ = DeleteDC(mdc);
+        ReleaseDC(None, sdc);
+        out
+    }
+}
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const ART_PX: u32 = 96;
 const FONT: PCWSTR = w!("Segoe UI Variable Display");
@@ -446,9 +519,8 @@ fn reserved_ok(hwnd: HWND) -> bool {
 // ---------------------------------------------------------------- datos de widgets
 fn clock_text() -> String {
     let t = unsafe { GetLocalTime() };
-    let dias = ["Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"];
-    let meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
-    format!("{}, {} {}  {}:{:02}", dias[t.wDayOfWeek as usize % 7], t.wDay, meses[(t.wMonth as usize + 11) % 12], t.wHour, t.wMinute)
+    // "Mié, 18 nov  14:05" / "Wed, Nov 18  14:05"
+    format!("{}, {}  {}:{:02}", i18n::weekday_short(t.wDayOfWeek as usize), i18n::day_month_short(t.wDay as u32, (t.wMonth as usize + 11) % 12), t.wHour, t.wMinute)
 }
 
 /// (porcentaje, cargando). None si el equipo no tiene batería.
@@ -464,12 +536,12 @@ fn last_fg() -> HWND { HWND(LAST_FG.load(Ordering::Relaxed) as *mut _) }
 /// Nombre bonito de la app de una ventana. "Escritorio" si es el fondo.
 fn app_name_of(fg: HWND) -> Option<String> {
     if fg.0.is_null() { return None; }
-    if sys::is_shell_window(fg) { return Some("Escritorio".into()); }
+    if sys::is_shell_window(fg) { return Some(i18n::t("Escritorio").into()); }
     let path = sys::process_path(sys::real_pid(fg))?;
     let file = path.rsplit('\\').next()?;
     let stem = file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file);
     Some(match stem.to_lowercase().as_str() {
-        "explorer" => "Explorador".to_string(),
+        "explorer" => i18n::t("Explorador").to_string(),
         "msedge" => "Edge".to_string(),
         "windowsterminal" => "Terminal".to_string(),
         "applicationframehost" => return None,
@@ -478,11 +550,11 @@ fn app_name_of(fg: HWND) -> Option<String> {
 }
 
 fn weather_desc(code: i32) -> &'static str {
-    match code {
+    i18n::t(match code {
         0 => "Despejado", 1 => "Casi despejado", 2 => "Parcialmente nuboso", 3 => "Nublado",
         45 | 48 => "Niebla", 51..=57 => "Llovizna", 61..=67 => "Lluvia", 71..=77 => "Nieve",
         80..=82 => "Chubascos", 85 | 86 => "Chubascos de nieve", 95..=99 => "Tormenta", _ => "—",
-    }
+    })
 }
 
 fn load_file_square(path: &str) -> Option<Vec<u8>> {
@@ -821,6 +893,8 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_PLAYER => run(Act::OpenPlayer),
         BAR_WIDGETS => desk::toggle(),
         i if (BAR_WIDGET0..BAR_WIDGET0 + 7).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
+        i if (BAR_INK0..BAR_INK0 + 3).contains(&i) => desk::set_ink_mode((i - BAR_INK0) as i8),
+        i if (BAR_LANG0..BAR_LANG0 + 3).contains(&i) => { i18n::set_mode((i - BAR_LANG0) as i8); desk::repaint_all(); unsafe { let _ = InvalidateRect(Some(hwnd), None, false); } }
         _ => {}
     }
 }
@@ -1297,31 +1371,46 @@ fn paint(hwnd: HWND) {
             let p = Painter { rt: &rt, dw: &g.dwrite, cache: &g.wcache, h, s: scale };
             let mut eq_rect = None;
             // ---- Paleta (medida sobre la referencia) ----
-            let white = p.brush(rgba(1.0, 1.0, 1.0, 0.96));
-            let soft = p.brush(rgba(1.0, 1.0, 1.0, 0.86));
-            let dim = p.brush(rgba(1.0, 1.0, 1.0, 0.52));
-            let shadow = p.brush(rgba(0.0, 0.0, 0.0, 0.38));
+            // Tinta de la barra: texto blanco sobre fondos oscuros; casi negro sobre fondos claros (con
+            // un fundido al cambiar). La isla va siempre en blanco: su cápsula es negra.
+            let bk = BAR_INK.with(|c| {
+                let to = if BAR_LIGHT.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+                let mut v = c.get();
+                let step = (g.last_frame.elapsed().as_secs_f32()).min(1.0 / 30.0);
+                if (to - v).abs() > 0.004 { v += (to - v) * (1.0 - (-step / 0.18).exp()); } else { v = to; }
+                c.set(v);
+                v
+            });
+            let ink_moving = bk > 0.0 && bk < 1.0;
+            let ic = |a: f32| popup::ink_color(bk, a);
+            let (bar_white, bar_soft, bar_dim) = (p.brush(ic(0.96)), p.brush(ic(0.86)), p.brush(ic(0.52)));
+            // Sombra bajo el texto: oscura con tinta blanca, un halo claro muy suave con tinta oscura
+            let bar_shadow = p.brush(rgba(bk, bk, bk, 0.38 * (1.0 - bk) + 0.10 * bk));
+            let (isl_white, isl_soft, isl_dim, isl_shadow) = (p.brush(rgba(1.0, 1.0, 1.0, 0.96)), p.brush(rgba(1.0, 1.0, 1.0, 0.86)), p.brush(rgba(1.0, 1.0, 1.0, 0.52)), p.brush(rgba(0.0, 0.0, 0.0, 0.38)));
+            let (white, soft, dim, shadow) = (bar_white.clone(), bar_soft.clone(), bar_dim.clone(), bar_shadow.clone());
             let black = p.brush(rgba(0.0, 0.0, 0.0, 1.0));
-            let hover_b = p.brush(rgba(1.0, 1.0, 1.0, 0.13));
-            let sep = p.brush(rgba(1.0, 1.0, 1.0, 0.12));
+            let hover_b = p.brush(ic(0.13));
+            let sep = p.brush(ic(0.12));
             let sh = Some(&shadow);
             let mut hits: Vec<(D2D_RECT_F, Act)> = Vec::new();
             let py = (h - PILL_H) / 2.0;
             let pb = py + PILL_H;
             let cy = h / 2.0;
             // Cristal: degradado vertical (arriba algo más claro) + borde con luz arriba
-            let glass = p.vgrad(py, pb, rgba(0.16, 0.17, 0.19, 0.66), rgba(0.05, 0.055, 0.065, 0.70));
-            let edge = p.vgrad(py, pb, rgba(1.0, 1.0, 1.0, 0.20), rgba(1.0, 1.0, 1.0, 0.06));
+            // Con tinta oscura, las píldoras son de cristal claro
+            let mx = |a: f32, b: f32| a + (b - a) * bk;
+            let glass = p.vgrad(py, pb, rgba(mx(0.16, 0.98), mx(0.17, 0.98), mx(0.19, 0.99), mx(0.66, 0.62)), rgba(mx(0.05, 0.93), mx(0.055, 0.93), mx(0.065, 0.95), mx(0.70, 0.66)));
+            let edge = p.vgrad(py, pb, ic(0.20), ic(0.06));
             let (sy, sb) = (py + 3.0, pb - 3.0); // sub-píldoras de 24
-            let sub_fill = p.vgrad(sy, sb, rgba(1.0, 1.0, 1.0, 0.09), rgba(1.0, 1.0, 1.0, 0.045));
-            let sub_edge = p.vgrad(sy, sb, rgba(1.0, 1.0, 1.0, 0.16), rgba(1.0, 1.0, 1.0, 0.05));
+            let sub_fill = p.vgrad(sy, sb, ic(0.09), ic(0.045));
+            let sub_edge = p.vgrad(sy, sb, ic(0.16), ic(0.05));
             let isl_edge = p.vgrad(py, pb, rgba(1.0, 1.0, 1.0, 0.14), rgba(1.0, 1.0, 1.0, 0.03));
 
             // ---- Reloj de animación: un paso por fotograma, con dt acotado (tras un rato quieta no salta)
             let now = Instant::now();
             let dt = (now - g.last_frame).as_secs_f32().min(1.0 / 30.0);
             g.last_frame = now;
-            let mut animating = false;
+            let mut animating = ink_moving;
             let mut born = std::mem::take(&mut g.born);
             let mut seen: Vec<&'static str> = Vec::new();
             // Elemento opcional que aparece: devuelve 0..1 (fundido y ancho)
@@ -1343,7 +1432,7 @@ fn paint(hwnd: HWND) {
             popup::push_alpha(&rt, intro);
 
             // Sombra suave de arriba abajo para que el texto se lea sobre cualquier fondo
-            let veil = p.vgrad(0.0, h, rgba(0.0, 0.0, 0.0, 0.30), rgba(0.0, 0.0, 0.0, 0.0));
+            let veil = p.vgrad(0.0, h, rgba(bk, bk, bk, 0.30 * (1.0 - bk) + 0.22 * bk), rgba(bk, bk, bk, 0.0));
             rt.FillRectangle(&rect(-1.0, -8.0, w + 1.0, h), &veil);
 
             // ============ IZQUIERDA: estilo menú de macOS (sin píldora, texto sobre la barra) ============
@@ -1384,6 +1473,8 @@ fn paint(hwnd: HWND) {
                 p.text(&g.f.app, &app, x, &white, sh);
             }
             hits.push((rect(x - 9.0, sy, x + aw + 9.0, sb), Act::AppMenu));
+            let (white, soft, dim, shadow) = (isl_white.clone(), isl_soft.clone(), isl_dim.clone(), isl_shadow.clone());
+            let sh = Some(&shadow);
             // ============ ISLA CENTRAL REACTIVA: música, temporizador y avisos (volumen, brillo, cargador) ============
             let ytm_red = p.brush(rgba(1.0, 0.0, 0.2, 1.0));
             let orange = p.brush(rgba(1.0, 0.62, 0.22, 1.0));
@@ -1481,7 +1572,7 @@ fn paint(hwnd: HWND) {
             };
             let media_compact = if timer.is_some() { 4.0 + 22.0 + 12.0 + count_w + 13.0 } else { 4.0 + 22.0 + 12.0 + 22.0 + 13.0 };
             let timer_compact = 12.0 + 16.0 + 10.0 + count_w + 14.0;
-            let timer_full = timer_compact + p.width(&g.f.small, "Temporizador") + 8.0 + 30.0;
+            let timer_full = timer_compact + p.width(&g.f.small, i18n::t("Temporizador")) + 8.0 + 30.0;
             const HUD_W: f32 = 250.0;
             // Bandeja de archivos: iconos subidos a la GPU solo cuando cambia
             let shelf_n = live::SHELF.lock().unwrap().len();
@@ -1652,7 +1743,7 @@ fn paint(hwnd: HWND) {
                         if t > 0.3 {
                             let k = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
                             let da = p.brush(rgba(1.0, 1.0, 1.0, 0.6 * k));
-                            p.text(&g.f.small, "Temporizador", ix + 12.0 + 16.0 + 10.0, &da, None);
+                            p.text(&g.f.small, i18n::t("Temporizador"), ix + 12.0 + 16.0 + 10.0, &da, None);
                             let sx = ix + iw - 14.0 - count_w - 8.0 - 26.0;
                             let wa = p.brush(rgba(1.0, 1.0, 1.0, 0.96 * k));
                             p.glyph(&g.f.icon_s, "\u{E711}", sx, 26.0, &wa, None);
@@ -1800,6 +1891,8 @@ fn paint(hwnd: HWND) {
             }
             let _ = (&glass, &edge, &soft, &dim, &sub_fill, &sub_edge);
 
+            let (white, soft, dim, shadow) = (bar_white.clone(), bar_soft.clone(), bar_dim.clone(), bar_shadow.clone());
+            let sh = Some(&shadow);
             // ============ DERECHA (de derecha a izquierda) ============
             let mut rx = w - 11.0;
             // Fecha y hora
@@ -1828,7 +1921,7 @@ fn paint(hwnd: HWND) {
                 Some(bmp) => {
                     p.art(bmp, p.snap(rx), ay, 22.0, None);
                     let ring = D2D1_ELLIPSE { point: Vector2 { X: p.snap(rx) + 11.0, Y: ay + 11.0 }, radiusX: 11.0, radiusY: 11.0 };
-                    let rb = p.brush(rgba(1.0, 1.0, 1.0, 0.22));
+                    let rb = p.brush(ic(0.22));
                     rt.DrawEllipse(&ring, &rb, 1.0 / scale, None);
                 }
                 None => {
@@ -1863,7 +1956,7 @@ fn paint(hwnd: HWND) {
             }
             // Iconos de estado (ranuras de 34), de derecha a izquierda: red, batería, iconos ocultos,
             // búsqueda, Claude, escritorio. Los inactivos (sin conexión, Claude cerrado) van atenuados.
-            let off_b = p.brush(rgba(1.0, 1.0, 1.0, 0.45));
+            let off_b = p.brush(ic(0.45));
             let bat = battery();
             let bat_glyph = bat.map(|(pct, ch)| {
                 let n = (pct as u32 / 10).min(10);
@@ -1994,7 +2087,7 @@ fn paint(hwnd: HWND) {
                 g.glide = (nr, na);
                 if na > 0.004 {
                     let rr = rect(p.snap(nr.left), p.snap(nr.top), p.snap(nr.right), p.snap(nr.bottom));
-                    let b = p.brush(rgba(1.0, 1.0, 1.0, na));
+                    let b = p.brush(ic(na));
                     rt.FillRoundedRectangle(&rrect(rr, (rr.bottom - rr.top) / 2.0), &b);
                 }
             }
@@ -2010,7 +2103,7 @@ fn paint(hwnd: HWND) {
                 if *cur > 0.004 {
                     let rr = rect(p.snap(r.left), p.snap(r.top), p.snap(r.right), p.snap(r.bottom));
                     let rad = (rr.bottom - rr.top) / 2.0;
-                    let b = p.brush(rgba(1.0, 1.0, 1.0, *cur));
+                    let b = p.brush(ic(*cur));
                     rt.FillRoundedRectangle(&rrect(rr, rad), &b);
                 }
             }
@@ -2473,7 +2566,7 @@ fn statusline_mode() {
         if std::fs::write(&tmp, format!("{pct}\n{resets}\n{now}\n")).is_ok() {
             let _ = std::fs::rename(&tmp, usage_path());
         }
-        let _ = writeln!(std::io::stdout(), "Semana {} %", pct.round() as i64);
+        let _ = writeln!(std::io::stdout(), "{}", i18n::tf("Semana {} %", &[&(pct.round() as i64)]));
     }
 }
 
@@ -2556,14 +2649,63 @@ fn read_usage() -> Option<(f32, u64)> {
     Some((pct, resets as u64))
 }
 
+/// ¿Ya falló 3 veces en el último minuto? (mira las horas de las últimas líneas de crash.log)
+fn restart_storm() -> bool {
+    let Ok(txt) = std::fs::read_to_string(sys::config_dir() + "\\crash.log") else { return false };
+    let now = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    let now_s = |h: u16, m: u16, s: u16| h as i32 * 3600 + m as i32 * 60 + s as i32;
+    let cur = now_s(now.wHour, now.wMinute, now.wSecond);
+    let today = format!("{}-{:02}-{:02}", now.wYear, now.wMonth, now.wDay);
+    txt.lines().rev().take(5).filter(|l| {
+        let Some(rest) = l.strip_prefix(&today) else { return false };
+        let p: Vec<i32> = rest.trim().get(..8).unwrap_or("").split(':').filter_map(|x| x.parse().ok()).collect();
+        p.len() == 3 && (cur - (p[0] * 3600 + p[1] * 60 + p[2])).abs() <= 60
+    }).count() >= 3
+}
+
 fn main() {
     if std::env::args().any(|a| a == "--statusline") { statusline_mode(); return; }
+    // Si algo falla (panic), queda escrito dónde, antes de que el proceso se cierre
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        let msg = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
+        let hilo = std::thread::current().name().unwrap_or("?").to_string();
+        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let line = format!("{}-{:02}-{:02} {:02}:{:02}:{:02} hilo {hilo}: {msg} ({loc})\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        let _ = std::fs::create_dir_all(sys::config_dir());
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(sys::config_dir() + "\\crash.log") { let _ = f.write_all(line.as_bytes()); }
+        // Y se vuelve a abrir sola (salvo que ya haya fallado 3 veces en el último minuto: así no entra en bucle)
+        if !restart_storm() {
+            if let Ok(exe) = std::env::current_exe() {
+                use std::os::windows::process::CommandExt;
+                let _ = std::process::Command::new(exe).arg("--tras-fallo").creation_flags(0x0000_0008 /* DETACHED_PROCESS */).spawn();
+            }
+        }
+    }));
+    // Prueba del relanzado: MACBAR_FALLO_PRUEBA=1 provoca un fallo a los 3 s (solo esa vez)
+    if std::env::var_os("MACBAR_FALLO_PRUEBA").is_some() && !std::env::args().any(|a| a == "--tras-fallo") {
+        std::thread::spawn(|| { std::thread::sleep(Duration::from_secs(3)); panic!("fallo de prueba"); });
+    }
     if let Ok(q) = std::env::var("MACBAR_SEARCHTEST") { search::selftest(&q); return; }
     if std::env::var("MACBAR_PHONETEST").is_ok() { phone::selftest(); return; }
     unsafe {
         // Una sola instancia
-        let _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));
-        if GetLastError() == ERROR_ALREADY_EXISTS { return; }
+        let mut _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            // Relanzada tras un fallo: la instancia que cae aún está cerrándose; se espera a que suelte el sitio
+            if !std::env::args().any(|a| a == "--tras-fallo") { return; }
+            let mut ok = false;
+            for _ in 0..40 {
+                std::thread::sleep(Duration::from_millis(250));
+                if let Ok(h) = _mutex.as_ref() { let _ = CloseHandle(*h); }
+                _mutex = CreateMutexW(None, true, w!("macbar-single-instance"));
+                if GetLastError() != ERROR_ALREADY_EXISTS { ok = true; break; }
+            }
+            if !ok { return; }
+        }
+        // Si cae por otra causa (no un panic), Windows la vuelve a abrir (tras llevar abierta al menos un minuto)
+        let _ = windows::Win32::System::Recovery::RegisterApplicationRestart(w!("--tras-fallo"), windows::Win32::System::Recovery::REGISTER_APPLICATION_RESTART_FLAGS(0));
 
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -2620,7 +2762,7 @@ fn main() {
         if !fg.0.is_null() && fg != hwnd { LAST_FG.store(fg.0 as isize, Ordering::Relaxed); }
         GFX.with(|g| *g.borrow_mut() = Some(Gfx {
             factory, dwrite, target: None, f,
-            app_name: app_name_of(fg).unwrap_or_else(|| "Escritorio".into()),
+            app_name: app_name_of(fg).unwrap_or_else(|| i18n::t("Escritorio").into()),
             user, hits: Vec::new(), hover: None,
             open: None, avatar_px, avatar_path, usage: current_usage(), claude_geo: None, isl_w: 0.0, isl_target: 0.0, isl_hover: false, isl_rect: D2D_RECT_F::default(), expand_until: None, track_key: String::new(), avatar: None, art: None, meter: None,
             eq: [0.0; 5], eq_rect: None, wcache: RefCell::new(Default::default()), t0: Instant::now(),
@@ -2658,6 +2800,7 @@ fn main() {
         tray::prewarm();
         // Widgets del escritorio (si están activados)
         desk::start();
+        bar_ink_thread();
         // Reloj, batería e idioma: un timer lento
         SetTimer(Some(hwnd), TIMER_TICK, 10_000, None);
         SetTimer(Some(hwnd), TIMER_GUARD, 2_000, None);

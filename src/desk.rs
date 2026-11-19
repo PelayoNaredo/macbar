@@ -21,7 +21,7 @@ impl Kind {
         match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil" }
     }
     fn label(self) -> &'static str {
-        match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)" }
+        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)" })
     }
 }
 
@@ -107,6 +107,10 @@ struct Dw {
     layer_hits: Vec<(D2D_RECT_F, u32)>,
     /// Ratón dentro del widget (DIP; negativo si está fuera)
     mouse: (f32, f32),
+    /// Fondo claro detrás: texto oscuro. `ink` es la tinta animada (0..1) hacia ese objetivo.
+    light: bool,
+    ink: f32,
+    lum_n: u32,
 }
 
 thread_local! {
@@ -374,7 +378,8 @@ fn create(kind: Kind, x: i32, y: i32, wpx: i32, hpx: i32, order: usize) {
         DESKS.with(|ds| ds.borrow_mut().push(Dw { hwnd, kind, target: None, dw, cache: RefCell::new(Caches::default()), f, d, hits: Vec::new(), hover: None,
             glow: HashMap::new(), last_paint: Instant::now(), born, w, drag: None, rdown: false,
             pressed: None, press: HashMap::new(), lift: 0.0, glide: None, dying: None,
-            layer: None, lcache: RefCell::new(Caches::default()), layer_hits: Vec::new(), mouse: (-1.0, -1.0) }));
+            layer: None, lcache: RefCell::new(Caches::default()), layer_hits: Vec::new(), mouse: (-1.0, -1.0),
+            light: ink_mode() == 1, ink: if ink_mode() == 1 { 1.0 } else { 0.0 }, lum_n: 0 }));
         let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         SetTimer(Some(hwnd), TIMER_SEC, 1000, None);
         SetTimer(Some(hwnd), TIMER_FADE, 15, None);
@@ -490,18 +495,110 @@ fn make_target(hwnd: HWND) -> Option<Gpu> {
 }
 
 /// Pinceles y medidas comunes con los que se pinta un widget (en su ventana o en su capa fija).
-fn make_ui<'a>(p: Painter<'a>, rt: &'a ID2D1RenderTarget, f: &'a popup::Fonts, w: f32, s: f32, glow: HashMap<u32, f32>, hover: Option<u32>, fl: bool) -> Ui<'a> {
+fn make_ui<'a>(p: Painter<'a>, rt: &'a ID2D1RenderTarget, f: &'a popup::Fonts, w: f32, s: f32, glow: HashMap<u32, f32>, hover: Option<u32>, fl: bool, ink: f32) -> Ui<'a> {
     // Flotantes: sin tarjeta, así que los grises suben un poco y el texto lleva sombra
     let (dim, faint, track) = if fl { (0.72, 0.50, 0.24) } else { (0.58, 0.32, 0.14) };
+    let c = |a: f32| popup::ink_color(ink, a);
+    // La sombra va al revés que la tinta: oscura bajo texto blanco, clara bajo texto oscuro
+    let sh = 1.0 - ink;
     Ui {
         glow,
-        white: p.brush(rgba(1.0, 1.0, 1.0, 0.97)), dim: p.brush(rgba(1.0, 1.0, 1.0, dim)), faint: p.brush(rgba(1.0, 1.0, 1.0, faint)),
-        card: p.brush(rgba(1.0, 1.0, 1.0, 0.075)), card_edge: p.brush(rgba(1.0, 1.0, 1.0, if fl { 0.16 } else { 0.10 })),
-        off: p.brush(rgba(1.0, 1.0, 1.0, 0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
-        hov: p.brush(rgba(1.0, 1.0, 1.0, 0.07)), track: p.brush(rgba(1.0, 1.0, 1.0, track)),
-        shadow: fl.then(|| p.brush(rgba(0.0, 0.0, 0.0, 0.21))),
-        p, rt, f, w, s, hover, hits: Vec::new(),
+        white: p.brush(c(0.97)), dim: p.brush(c(dim)), faint: p.brush(c(faint)),
+        card: p.brush(c(0.075)), card_edge: p.brush(c(if fl { 0.16 } else { 0.10 })),
+        off: p.brush(c(0.13)), on: p.brush(rgba(0.23, 0.51, 0.96, 1.0)),
+        hov: p.brush(c(0.07)), track: p.brush(c(track)),
+        // Bajo texto oscuro, el halo claro casi desaparece (si no, el texto parece en relieve)
+        shadow: fl.then(|| p.brush(rgba(1.0 - sh, 1.0 - sh, 1.0 - sh, 0.21 * (1.0 - ink) + 0.07 * ink))),
+        p, rt, f, w, s, hover, hits: Vec::new(), ink,
     }
+}
+
+// ---------------------------------------------------------------- texto claro u oscuro
+/// Tinta de los widgets: 0 = automática (según el fondo de cada uno), 1 = oscura (fondos claros),
+/// 2 = clara (fondos oscuros). -1 = sin leer aún.
+static INK_MODE: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+pub fn ink_mode() -> i8 {
+    let v = INK_MODE.load(Ordering::Relaxed);
+    if v >= 0 { return v; }
+    let m = match ini_get(&ini(), "texto").as_deref() { Some("oscuro") => 1, Some("claro") => 2, _ => 0 };
+    INK_MODE.store(m, Ordering::Relaxed);
+    m
+}
+/// Repinta todos los widgets (al cambiar el idioma).
+pub fn repaint_all() {
+    let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
+    for h in all { with_dw(h, |w| w.layer = None); unsafe { let _ = InvalidateRect(Some(h), None, false); } }
+}
+
+/// Cambia el modo (menú de la barra) y lo guarda.
+pub fn set_ink_mode(m: i8) {
+    INK_MODE.store(m, Ordering::Relaxed);
+    let txt = ini();
+    let mut out: Vec<String> = txt.lines().filter(|l| !l.trim_start().starts_with("texto")).map(str::to_string).collect();
+    out.push(format!("texto = {}", match m { 1 => "oscuro", 2 => "claro", _ => "auto" }));
+    let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
+    let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
+    for h in all { refresh_ink(h, true); }
+}
+
+/// Luminosidad media (0..1) del fondo que rodea al widget: una franja justo por fuera de su borde, que
+/// es fondo de escritorio visible (lo de debajo del widget no se puede ver sin quitarlo).
+fn backdrop_luma(hwnd: HWND) -> Option<f32> {
+    unsafe {
+        let mut r = RECT::default();
+        GetWindowRect(hwnd, &mut r).ok()?;
+        let m = 18;
+        let (x0, y0, w, h) = (r.left - m, r.top - m, r.right - r.left + 2 * m, r.bottom - r.top + 2 * m);
+        // Ventana sin tamaño todavía (o pantalla dormida): no se mide
+        if w <= 2 * m + 16 || h <= 2 * m + 16 { return None; }
+        let sdc = GetDC(None);
+        let mdc = CreateCompatibleDC(Some(sdc));
+        let bi = BITMAPINFO { bmiHeader: BITMAPINFOHEADER { biSize: size_of::<BITMAPINFOHEADER>() as u32, biWidth: w, biHeight: -h, biPlanes: 1, biBitCount: 32, ..Default::default() }, ..Default::default() };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(Some(mdc), &bi, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+        let mut out = None;
+        if let Some(dib) = dib {
+            let old = SelectObject(mdc, dib.into());
+            if BitBlt(mdc, 0, 0, w, h, Some(sdc), x0, y0, SRCCOPY).is_ok() && !bits.is_null() {
+                let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
+                let (mut sum, mut n) = (0.0f32, 0u32);
+                // Cada 3 píxeles de la franja exterior (12 px de ancho, dejando 6 de margen)
+                for y in (0..h).step_by(3) {
+                    for x in (0..w).step_by(3) {
+                        let inside_out = x < m - 6 || x >= w - m + 6 || y < m - 6 || y >= h - m + 6;
+                        if !inside_out { continue; }
+                        let i = ((y * w + x) * 4) as usize;
+                        if i + 2 >= px.len() { continue; }
+                        let (b, g, rr) = (px[i] as f32, px[i + 1] as f32, px[i + 2] as f32);
+                        sum += (0.2126 * rr + 0.7152 * g + 0.0722 * b) / 255.0;
+                        n += 1;
+                    }
+                }
+                if n > 0 { out = Some(sum / n as f32); }
+            }
+            SelectObject(mdc, old);
+            let _ = DeleteObject(dib.into());
+        }
+        let _ = DeleteDC(mdc);
+        ReleaseDC(None, sdc);
+        out
+    }
+}
+
+/// Decide la tinta de un widget (con histéresis: no parpadea en fondos de luminosidad media).
+fn refresh_ink(hwnd: HWND, force: bool) {
+    let mode = ink_mode();
+    let want = match mode {
+        1 => Some(true),
+        2 => Some(false),
+        _ => {
+            let cur = with_dw(hwnd, |w| w.light).unwrap_or(false);
+            backdrop_luma(hwnd).map(|l| if cur { l > 0.50 } else { l > 0.62 })
+        }
+    };
+    let Some(light) = want else { return };
+    let ch = with_dw(hwnd, |w| { let c = w.light != light; w.light = light; c }).unwrap_or(false);
+    if ch || force { unsafe { let _ = InvalidateRect(Some(hwnd), None, false); } }
 }
 
 fn paint_real(hwnd: HWND) {
@@ -542,6 +639,10 @@ fn paint_real(hwnd: HWND) {
             let lift_to = if w.drag.is_some_and(|d| d.2) { 1.0 } else { 0.0 };
             if (lift_to - w.lift).abs() > 0.005 { w.lift += (lift_to - w.lift) * (1.0 - (-dt / 0.09).exp()); moving = true; } else { w.lift = lift_to; }
             let fl = floating();
+            // La tinta pasa de clara a oscura (o al revés) con un fundido corto
+            let ink_to = if w.light { 1.0 } else { 0.0 };
+            if (ink_to - w.ink).abs() > 0.004 { w.ink += (ink_to - w.ink) * (1.0 - (-dt / 0.18).exp()); moving = true; } else { w.ink = ink_to; }
+            let ink = w.ink;
             let (ww, wh) = size(w.kind);
             let t = age(w.born).max(0.0);
             // Capa fija: lo que cambia como mucho una vez por segundo se pinta en una imagen y en cada
@@ -559,7 +660,7 @@ fn paint_real(hwnd: HWND) {
                         brt.BeginDraw();
                         brt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
                         let p2 = Painter { rt: brt, dw: &w.dw, cache: &w.lcache, h: 100.0, s };
-                        let mut ui2 = make_ui(p2, brt, &w.f, ww, s, w.glow.clone(), w.hover, fl);
+                        let mut ui2 = make_ui(p2, brt, &w.f, ww, s, w.glow.clone(), w.hover, fl, ink);
                         w.w.paint(&mut ui2, &w.d, t, dt);
                         w.layer_hits = std::mem::take(&mut ui2.hits);
                         drop(ui2);
@@ -568,7 +669,7 @@ fn paint_real(hwnd: HWND) {
                 }
             }
             let p = Painter { rt: &rt, dw: &w.dw, cache: &w.cache, h: 100.0, s };
-            let mut ui = make_ui(p, &rt, &w.f, ww, s, w.glow.clone(), w.hover, fl);
+            let mut ui = make_ui(p, &rt, &w.f, ww, s, w.glow.clone(), w.hover, fl, ink);
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
             // Fundido de entrada y de salida dentro del propio dibujo (sin ventanas "layered", que
@@ -577,9 +678,11 @@ fn paint_real(hwnd: HWND) {
             if !fl {
                 // Tarjeta: algo más tapada que los paneles, encima del fondo de pantalla hace falta contraste
                 // (con la composición por GPU, Windows ya no redondea la ventana: la tarjeta lo hace sola)
-                let tint = ui.brush(rgba(0.10, 0.11, 0.12, 0.58));
+                // Con tinta oscura, la tarjeta es clara (cristal blanco)
+                let mix = |a: f32, b: f32| a + (b - a) * ink;
+                let tint = ui.brush(rgba(mix(0.10, 0.96), mix(0.11, 0.96), mix(0.12, 0.97), mix(0.58, 0.62)));
                 rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, ww, wh), 16.0), &tint);
-                rt.DrawRoundedRectangle(&rrect(rect(0.5, 0.5, ww - 0.5, wh - 0.5), 15.5), &ui.brush(rgba(1.0, 1.0, 1.0, 0.10)), 1.0, None);
+                rt.DrawRoundedRectangle(&rrect(rect(0.5, 0.5, ww - 0.5, wh - 0.5), 15.5), &ui.wa(0.10), 1.0, None);
             }
             // Entrada: sube 12 px mientras crece de 0,965 a 1 con un pelín de rebote (desde el centro)
             let rise = 1.0 - popup::ease_out((t / 0.55).min(1.0));
@@ -683,6 +786,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     TIMER_SEC => {
                         let r = with_dw(hwnd, |w| w.w.tick()).unwrap_or(false);
                         let hidden = covered_w(hwnd);
+                        // El fondo se mira cada 4 s, y solo si se ve (tapado, se leería la ventana de encima)
+                        let tick_n = with_dw(hwnd, |w| { w.lum_n = w.lum_n.wrapping_add(1); w.lum_n }).unwrap_or(0);
+                        if !hidden && tick_n % 4 == 1 { refresh_ink(hwnd, false); }
                         // El primero de la lista decide si los hilos de datos trabajan
                         if DESKS.with(|d| d.borrow().first().map(|w| w.hwnd) == Some(hwnd)) { deskdata::VISIBLE.store(!covered(), Ordering::Relaxed); }
                         // Al destaparse retoma también las animaciones (el pintado vuelve a pedir fotogramas)
@@ -819,8 +925,8 @@ fn click(hwnd: HWND, x: i32, y: i32, right: bool) {
         None if right => {
             let Some(kind) = with_dw(hwnd, |w| w.kind) else { return };
             let others: Vec<(usize, &str)> = ALL.iter().enumerate().filter(|(_, k)| !shown(**k)).map(|(i, k)| (i, k.label())).collect();
-            let mut items: Vec<String> = vec![format!("Quitar «{}»", kind.label()), if floating() { "Con fondo".into() } else { "Sin fondo (flotantes)".into() }];
-            if !others.is_empty() { items.push(String::new()); for (_, l) in &others { items.push(format!("Añadir «{l}»")); } }
+            let mut items: Vec<String> = vec![i18n::tf("Quitar «{}»", &[&kind.label()]), if floating() { i18n::t("Con fondo").into() } else { i18n::t("Sin fondo (flotantes)").into() }];
+            if !others.is_empty() { items.push(String::new()); for (_, l) in &others { items.push(i18n::tf("Añadir «{}»", &[l])); } }
             let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
             match context_menu(&refs, pt) {
                 Some(0) => { if let Some(i) = ALL.iter().position(|k| *k == kind) { toggle_kind(i); } return; }

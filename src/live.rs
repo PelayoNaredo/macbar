@@ -375,7 +375,7 @@ fn desktop_now() -> Option<(u8, u8, String)> {
     let total = ids.len() / 16;
     let i = ids.chunks(16).position(|c| c == cur.as_slice())?;
     let name = reg_sz(&format!("{VD}\\Desktops\\{}", guid_of(&cur)), "Name").filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Escritorio {}", i + 1));
+        .unwrap_or_else(|| crate::i18n::tf("Escritorio {}", &[&(i + 1)]));
     Some(((i + 1) as u8, total as u8, name))
 }
 
@@ -588,10 +588,10 @@ pub fn clipboard_changed(hwnd: HWND) {
                 } else if IsClipboardFormatAvailable(15 /* CF_HDROP */).is_ok() {
                     if let Ok(h) = GetClipboardData(15) {
                         let n = DragQueryFileW(HDROP(h.0), u32::MAX, None);
-                        desc = if n == 1 { "1 archivo".into() } else { format!("{n} archivos") };
+                        desc = if n == 1 { crate::i18n::t("1 archivo").into() } else { crate::i18n::tf("{} archivos", &[&n]) };
                     }
                 } else if IsClipboardFormatAvailable(8 /* CF_DIB */).is_ok() {
-                    desc = "Imagen".into();
+                    desc = crate::i18n::t("Imagen").into();
                 }
                 let _ = CloseClipboard();
                 break;

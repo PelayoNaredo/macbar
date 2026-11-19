@@ -257,7 +257,7 @@ fn pretty_exe(exe: &str) -> String {
         ("msmpeng", "Defender"), ("macbar", "macbar"), ("studio64", "Android Studio"), ("java", "Java"), ("node", "Node.js"), ("cargo", "Cargo"), ("rustc", "Rust"),
         ("unity", "Unity"), ("powershell", "PowerShell"), ("pwsh", "PowerShell"), ("windowsterminal", "Terminal"), ("searchhost", "Búsqueda"), ("audiodg", "Audio")];
     let l = stem.to_lowercase();
-    if let Some((_, n)) = known.iter().find(|(k, _)| *k == l) { return n.to_string(); }
+    if let Some((_, n)) = known.iter().find(|(k, _)| *k == l) { return i18n::t(*n).to_string(); }
     let mut c = stem.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
@@ -707,24 +707,25 @@ pub fn fmt_bytes(b: u64) -> String {
     let (v, u) = if b >= 1 << 40 { (b as f64 / (1u64 << 40) as f64, "TB") } else if b >= 1 << 30 { (b as f64 / (1u64 << 30) as f64, "GB") }
         else if b >= 1 << 20 { (b as f64 / (1u64 << 20) as f64, "MB") } else if b >= 1 << 10 { (b as f64 / 1024.0, "KB") } else { (b as f64, "B") };
     let s = if v >= 100.0 || u == "B" { format!("{v:.0}") } else { format!("{v:.1}") };
-    format!("{} {u}", s.replace('.', ","))
+    // Coma decimal en español, punto en inglés
+    if i18n::en() { format!("{s} {u}") } else { format!("{} {u}", s.replace('.', ",")) }
 }
 
 pub fn fmt_rate(bps: f32) -> String {
-    if bps >= 1e6 { format!("{:.1} MB/s", bps / 1e6).replace('.', ",") } else if bps >= 1e3 { format!("{:.0} KB/s", bps / 1e3) } else { format!("{:.0} B/s", bps) }
+    if bps >= 1e6 { let s = format!("{:.1} MB/s", bps / 1e6); if i18n::en() { s } else { s.replace('.', ",") } } else if bps >= 1e3 { format!("{:.0} KB/s", bps / 1e3) } else { format!("{:.0} B/s", bps) }
 }
 
 pub fn ago(unix: u64) -> String {
     if unix == 0 { return String::new(); }
     let d = now_unix().saturating_sub(unix);
     match d {
-        0..=59 => "ahora".into(),
-        60..=3599 => format!("hace {} min", d / 60),
-        3600..=86399 => format!("hace {} h", d / 3600),
-        86400..=172799 => "ayer".into(),
-        172800..=604799 => format!("hace {} días", d / 86400),
-        604800..=2591999 => { let w = d / 604800; if w == 1 { "hace 1 semana".into() } else { format!("hace {w} semanas") } }
-        _ => { let m = d / 2592000; if m <= 1 { "hace 1 mes".into() } else if m < 12 { format!("hace {m} meses") } else { format!("hace {} años", m / 12) } }
+        0..=59 => i18n::t("ahora").into(),
+        60..=3599 => i18n::tf("hace {} min", &[&(d / 60)]),
+        3600..=86399 => i18n::tf("hace {} h", &[&(d / 3600)]),
+        86400..=172799 => i18n::t("ayer").into(),
+        172800..=604799 => i18n::tf("hace {} días", &[&(d / 86400)]),
+        604800..=2591999 => { let w = d / 604800; if w == 1 { i18n::t("hace 1 semana").into() } else { i18n::tf("hace {} semanas", &[&w]) } }
+        _ => { let m = d / 2592000; if m <= 1 { i18n::t("hace 1 mes").into() } else if m < 12 { i18n::tf("hace {} meses", &[&m]) } else { i18n::tf("hace {} años", &[&(m / 12)]) } }
     }
 }
 

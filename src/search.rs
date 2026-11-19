@@ -26,10 +26,10 @@ enum Sec { Calc, Best, Recent, Apps, Settings, Files, Web }
 
 impl Sec {
     fn label(self) -> &'static str {
-        match self {
+        i18n::t(match self {
             Sec::Calc => "Calculadora", Sec::Best => "Mejor resultado", Sec::Recent => "Recientes",
             Sec::Apps => "Aplicaciones", Sec::Settings => "Configuración", Sec::Files => "Archivos y carpetas", Sec::Web => "Web",
-        }
+        })
     }
 }
 
@@ -146,54 +146,57 @@ fn unary(b: &[u8], i: &mut usize) -> Option<f64> {
 }
 
 // ---------------------------------------------------------------- configuración
-const SETTINGS: &[(&str, &str, &str)] = &[
-    ("Wi-Fi", "ms-settings:network-wifi", "wifi red internet inalambrica"),
-    ("Red e Internet", "ms-settings:network", "red ethernet proxy conexion"),
-    ("VPN", "ms-settings:network-vpn", "vpn"),
-    ("Modo avión", "ms-settings:network-airplanemode", "avion"),
-    ("Bluetooth y dispositivos", "ms-settings:bluetooth", "bluetooth dispositivos auriculares"),
-    ("Ratón", "ms-settings:mousetouchpad", "raton mouse cursor puntero"),
-    ("Panel táctil", "ms-settings:devices-touchpad", "touchpad"),
-    ("Impresoras y escáneres", "ms-settings:printers", "impresora escaner"),
-    ("Pantalla", "ms-settings:display", "pantalla resolucion brillo escala monitor"),
-    ("Luz nocturna", "ms-settings:nightlight", "noche luz azul"),
-    ("Sonido", "ms-settings:sound", "sonido audio volumen altavoces microfono"),
-    ("Notificaciones", "ms-settings:notifications", "avisos no molestar"),
-    ("Energía y batería", "ms-settings:powersleep", "energia bateria suspension apagado"),
-    ("Almacenamiento", "ms-settings:storagesense", "almacenamiento disco espacio liberar"),
-    ("Multitarea", "ms-settings:multitasking", "ventanas ajustar escritorios"),
-    ("Portapapeles", "ms-settings:clipboard", "historial copiar"),
-    ("Personalización", "ms-settings:personalization", "personalizar apariencia"),
-    ("Fondo de escritorio", "ms-settings:personalization-background", "fondo pantalla wallpaper imagen"),
-    ("Colores", "ms-settings:colors", "modo oscuro claro color acento tema"),
-    ("Temas", "ms-settings:themes", "tema"),
-    ("Barra de tareas", "ms-settings:taskbar", "taskbar"),
-    ("Aplicaciones instaladas", "ms-settings:appsfeatures", "apps programas desinstalar"),
-    ("Aplicaciones predeterminadas", "ms-settings:defaultapps", "navegador predeterminado abrir con"),
-    ("Aplicaciones de inicio", "ms-settings:startupapps", "arranque inicio automatico"),
-    ("Tu información", "ms-settings:yourinfo", "cuenta usuario perfil"),
-    ("Opciones de inicio de sesión", "ms-settings:signinoptions", "contrasena pin hello huella"),
-    ("Fecha y hora", "ms-settings:dateandtime", "hora reloj zona horaria"),
-    ("Idioma y región", "ms-settings:regionlanguage", "idioma teclado region"),
-    ("Juegos", "ms-settings:gaming-gamebar", "game bar juegos captura"),
-    ("Accesibilidad", "ms-settings:easeofaccess", "lupa narrador contraste"),
-    ("Privacidad y seguridad", "ms-settings:privacy", "permisos camara microfono ubicacion"),
-    ("Windows Update", "ms-settings:windowsupdate", "actualizaciones actualizar update"),
-    ("Seguridad de Windows", "windowsdefender:", "antivirus defender firewall"),
-    ("Acerca de", "ms-settings:about", "sistema equipo nombre especificaciones"),
-    ("Configuración", "ms-settings:", "ajustes configuracion"),
+/// (nombre, uri, palabras clave en español, palabras clave en inglés). El nombre se traduce al mostrarlo.
+const SETTINGS: &[(&str, &str, &str, &str)] = &[
+    ("Wi-Fi", "ms-settings:network-wifi", "wifi red internet inalambrica", "wifi network internet wireless"),
+    ("Red e Internet", "ms-settings:network", "red ethernet proxy conexion", "network ethernet proxy connection"),
+    ("VPN", "ms-settings:network-vpn", "vpn", "vpn"),
+    ("Modo avión", "ms-settings:network-airplanemode", "avion", "airplane flight"),
+    ("Bluetooth y dispositivos", "ms-settings:bluetooth", "bluetooth dispositivos auriculares", "bluetooth devices headphones"),
+    ("Ratón", "ms-settings:mousetouchpad", "raton mouse cursor puntero", "mouse cursor pointer"),
+    ("Panel táctil", "ms-settings:devices-touchpad", "touchpad", "touchpad trackpad"),
+    ("Impresoras y escáneres", "ms-settings:printers", "impresora escaner", "printer scanner"),
+    ("Pantalla", "ms-settings:display", "pantalla resolucion brillo escala monitor", "display screen resolution brightness scale monitor"),
+    ("Luz nocturna", "ms-settings:nightlight", "noche luz azul", "night light blue"),
+    ("Sonido", "ms-settings:sound", "sonido audio volumen altavoces microfono", "sound audio volume speakers microphone"),
+    ("Notificaciones", "ms-settings:notifications", "avisos no molestar", "alerts do not disturb"),
+    ("Energía y batería", "ms-settings:powersleep", "energia bateria suspension apagado", "power battery sleep shutdown"),
+    ("Almacenamiento", "ms-settings:storagesense", "almacenamiento disco espacio liberar", "storage disk space free"),
+    ("Multitarea", "ms-settings:multitasking", "ventanas ajustar escritorios", "windows snap desktops"),
+    ("Portapapeles", "ms-settings:clipboard", "historial copiar", "history copy"),
+    ("Personalización", "ms-settings:personalization", "personalizar apariencia", "personalize appearance"),
+    ("Fondo de escritorio", "ms-settings:personalization-background", "fondo pantalla wallpaper imagen", "background wallpaper picture"),
+    ("Colores", "ms-settings:colors", "modo oscuro claro color acento tema", "dark light mode color accent theme"),
+    ("Temas", "ms-settings:themes", "tema", "theme"),
+    ("Barra de tareas", "ms-settings:taskbar", "taskbar", "taskbar"),
+    ("Aplicaciones instaladas", "ms-settings:appsfeatures", "apps programas desinstalar", "apps programs uninstall"),
+    ("Aplicaciones predeterminadas", "ms-settings:defaultapps", "navegador predeterminado abrir con", "default browser open with"),
+    ("Aplicaciones de inicio", "ms-settings:startupapps", "arranque inicio automatico", "startup boot automatic"),
+    ("Tu información", "ms-settings:yourinfo", "cuenta usuario perfil", "account user profile"),
+    ("Opciones de inicio de sesión", "ms-settings:signinoptions", "contrasena pin hello huella", "password pin hello fingerprint"),
+    ("Fecha y hora", "ms-settings:dateandtime", "hora reloj zona horaria", "time clock time zone"),
+    ("Idioma y región", "ms-settings:regionlanguage", "idioma teclado region", "language keyboard region"),
+    ("Juegos", "ms-settings:gaming-gamebar", "game bar juegos captura", "game bar gaming capture"),
+    ("Accesibilidad", "ms-settings:easeofaccess", "lupa narrador contraste", "magnifier narrator contrast accessibility"),
+    ("Privacidad y seguridad", "ms-settings:privacy", "permisos camara microfono ubicacion", "permissions camera microphone location"),
+    ("Windows Update", "ms-settings:windowsupdate", "actualizaciones actualizar update", "updates update"),
+    ("Seguridad de Windows", "windowsdefender:", "antivirus defender firewall", "antivirus defender firewall security"),
+    ("Acerca de", "ms-settings:about", "sistema equipo nombre especificaciones", "system pc name specs about"),
+    ("Configuración", "ms-settings:", "ajustes configuracion", "settings preferences"),
 ];
 
 fn settings_for(q: &str) -> Vec<Item> {
-    let mut v: Vec<Item> = SETTINGS.iter().filter_map(|(n, uri, kw)| {
-        let s = score(q, &fold(n)).or_else(|| {
-            // Palabras clave: valen menos que el nombre
-            let words: Vec<&str> = kw.split(' ').collect();
+    let mut v: Vec<Item> = SETTINGS.iter().filter_map(|(n, uri, kw, kw_en)| {
+        // Vale tanto el nombre en español como el traducido
+        let name = i18n::t(n);
+        let s = score(q, &fold(n)).max(score(q, &fold(name))).or_else(|| {
+            // Palabras clave (en los dos idiomas): valen menos que el nombre
+            let words: Vec<&str> = kw.split(' ').chain(kw_en.split(' ')).collect();
             q.split_whitespace().all(|x| words.iter().any(|w| w.starts_with(x))).then_some(420)
         })?;
         // Las coincidencias sueltas de letras en ajustes solo meten ruido
         if s < 400 { return None; }
-        Some(Item { cat: Cat::Setting, title: n.to_string(), sub: "Configuración".into(), target: uri.to_string(), icon: None, score: s - 30 })
+        Some(Item { cat: Cat::Setting, title: name.to_string(), sub: i18n::t("Configuración").into(), target: uri.to_string(), icon: None, score: s - 30 })
     }).collect();
     v.sort_by(|a, b| b.score.cmp(&a.score));
     v.truncate(3);
@@ -377,8 +380,10 @@ fn worker(rx: std::sync::mpsc::Receiver<Job>) {
                     Cat::File | Cat::Folder => { if !std::path::Path::new(t).exists() { return None; } icon_of(&mut icons, t, &|| path_icon(&wic, t)) }
                     _ => None,
                 };
-                let sub = match c { Cat::App => "Aplicación".into(), Cat::Setting => "Configuración".into(), _ => ltrunc(&parent_of(t), 46) };
-                Some(Item { cat: *c, title: n.clone(), sub, target: t.clone(), icon, score: 0 })
+                let sub = match c { Cat::App => i18n::t("Aplicación").into(), Cat::Setting => i18n::t("Configuración").into(), _ => ltrunc(&parent_of(t), 46) };
+                // Ajustes: el nombre en el idioma actual, aunque se guardara en el otro
+                let title = match c { Cat::Setting => SETTINGS.iter().find(|s| s.1 == t).map(|s| i18n::t(s.0).to_string()).unwrap_or_else(|| n.clone()), _ => n.clone() };
+                Some(Item { cat: *c, title, sub, target: t.clone(), icon, score: 0 })
             }).collect();
             let mut o = OUT.lock().unwrap();
             *o = Out { ver, recent: items, files_done: true, ..Default::default() };
@@ -399,7 +404,7 @@ fn worker(rx: std::sync::mpsc::Receiver<Job>) {
         let app_items: Vec<Item> = found.iter().map(|(s, i)| {
             let a = &apps[*i];
             let icon = icon_of(&mut icons, &a.parsing, &|| shell_icon(&wic, &a.item));
-            Item { cat: Cat::App, title: a.name.clone(), sub: "Aplicación".into(), target: a.parsing.clone(), icon, score: *s }
+            Item { cat: Cat::App, title: a.name.clone(), sub: i18n::t("Aplicación").into(), target: a.parsing.clone(), icon, score: *s }
         }).collect();
         let settings = settings_for(&fq);
         // Una cuenta ("12*3") no es un nombre de archivo
@@ -554,7 +559,7 @@ impl SearchPanel {
         let q = self.query.trim().to_string();
         let mut list: Vec<(Item, Sec)> = Vec::new();
         if let Some(c) = &self.calc {
-            list.push((Item { cat: Cat::Calc, title: format!("= {c}"), sub: "Intro para copiar el resultado".into(), target: c.clone(), icon: None, score: 0 }, Sec::Calc));
+            list.push((Item { cat: Cat::Calc, title: format!("= {c}"), sub: i18n::t("Intro para copiar el resultado").into(), target: c.clone(), icon: None, score: 0 }, Sec::Calc));
         }
         // Los recientes se guardan: al borrarlo todo aparecen ya, sin encoger y volver a crecer
         if o.ver == self.ver && q.is_empty() { self.recent = o.recent.clone(); }
@@ -578,7 +583,7 @@ impl SearchPanel {
             for it in apps.into_iter().take(4) { list.push((it, Sec::Apps)); }
             for it in settings.into_iter().take(3) { list.push((it, Sec::Settings)); }
             for it in files.into_iter().take(5) { list.push((it, Sec::Files)); }
-            list.push((Item { cat: Cat::Web, title: format!("Buscar «{}» en la web", trunc(&q, 40)), sub: "Google".into(), target: q.clone(), icon: None, score: 0 }, Sec::Web));
+            list.push((Item { cat: Cat::Web, title: i18n::tf("Buscar «{}» en la web", &[&trunc(&q, 40)]), sub: "Google".into(), target: q.clone(), icon: None, score: 0 }, Sec::Web));
         }
         self.files_pending = !q.is_empty() && !(o.ver == self.ver && o.files_done);
         drop(o);
@@ -691,7 +696,7 @@ impl Content for SearchPanel {
         ui.glyph(&ui.f.icon_l, "\u{E721}", PAD + 6.0, PAD, 30.0, INPUT_H, &ui.dim);
         let tx = PAD + 44.0;
         if self.query.is_empty() {
-            ui.text(&ui.f.q, "Buscar apps, archivos, ajustes y web", tx, PAD, INPUT_H, &ui.faint);
+            ui.text(&ui.f.q, i18n::t("Buscar apps, archivos, ajustes y web"), tx, PAD, INPUT_H, &ui.faint);
         } else {
             let tw = ui.p.width(&ui.f.q, &self.query);
             if self.all {
@@ -720,7 +725,7 @@ impl Content for SearchPanel {
         if self.rows.is_empty() {
             if self.query.trim().is_empty() {
                 let b = popup::rise(rt, popup::stagger(since, 0.08, 0.3));
-                ui.text(&ui.f.sub, "Escribe para buscar · ↑↓ para elegir · Intro para abrir", tx, PAD + INPUT_H, 30.0, &ui.faint);
+                ui.text(&ui.f.sub, i18n::t("Escribe para buscar · ↑↓ para elegir · Intro para abrir"), tx, PAD + INPUT_H, 30.0, &ui.faint);
                 popup::rise_end(rt, b);
             }
             return;
