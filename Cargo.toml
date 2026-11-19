@@ -1,6 +1,6 @@
 [package]
 name = "macbar"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Native macOS-style menu bar for Windows 11 with Dynamic Island, Control Center, weather and media controls (Rust + Direct2D)"
 license = "MIT"
