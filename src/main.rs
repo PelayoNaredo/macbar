@@ -38,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 mod calendar;
+mod card;
 mod ccenter;
 mod desk;
 mod deskdata;
@@ -182,6 +183,7 @@ const TIMER_FX: usize = 7;
 const TIMER_COUNT: usize = 8;
 /// Fin de un aviso de la isla
 const TIMER_HUD: usize = 9;
+const WM_CARDTEST: u32 = WM_USER + 97;
 /// Progreso de la canción (isla desplegada)
 const TIMER_PROG: usize = 10;
 /// Nueva petición del hueco tras volver de suspensión
@@ -547,6 +549,7 @@ pub fn windows_taskbar(show: bool) {
 /// Cambia la posición (menú): se guarda y macbar se reinicia para colocarlo todo de nuevo.
 pub fn set_bar_bottom(bottom: bool) {
     if bottom == bar_bottom() { return; }
+    card::close(card::Why::BarMoved);
     sys::set_config_value("posicion", if bottom { "abajo" } else { "arriba" });
     if !bottom { windows_taskbar(true); }
     profiles::relaunch();
@@ -810,6 +813,10 @@ fn media_thread(rx: Receiver<Cmd>) {
             }
             *MEDIA.lock().unwrap() = Some(MediaInfo { title: "Tumblr Girls (feat. Christoph Andersson)".into(), artist: "G-Eazy".into(), playing: true, art_ver: 1, app: "Spotify.exe".into(), can_prev: true, can_next: true, album: "These Things Happen".into() });
             *WEATHER.lock().unwrap() = Some(Weather { temp: 18.0, is_day: false, code: 0 });
+            if TIMELINE.lock().unwrap().is_none() {
+                let now = unsafe { let f = windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime(); ((f.dwHighDateTime as i64) << 32) | f.dwLowDateTime as i64 };
+                *TIMELINE.lock().unwrap() = Some((72 * 10_000_000, 215 * 10_000_000, now));
+            }
             unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_MEDIA, WPARAM(0), LPARAM(0)); }
             continue;
         }
@@ -1085,6 +1092,9 @@ fn run(a: Act) {
             live::dismiss();
             unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); }
         }
+        // Clic en la isla de música: abre la tarjeta (o, con «tarjeta_clic = pausar», pausa como antes)
+        Act::Island if card::click_opens() && MEDIA.lock().unwrap().is_some() => card::open(card::Origin::Click),
+        Act::OpenPlayer if card::click_opens() => card::open(card::Origin::Click),
         Act::Island | Act::Toggle => media(Cmd::Toggle),
         Act::Prev => media(Cmd::Prev),
         Act::Next => media(Cmd::Next),
@@ -1802,10 +1812,14 @@ fn paint(hwnd: HWND) {
             g.isl_rect = ir;
             // 0 = compacta, 1 = desplegada del todo (según el ancho real de ahora)
             let open_t = |m: Mode| { let (c, f) = mode_size(m); if f > c + 1.0 { ((iw - c) / (f - c)).clamp(0.0, 1.0) } else { 0.0 } };
+            // La tarjeta copia la isla tal cual está: le apunta cuánto está desplegada
+            card::ISL_OPEN.store(if mode == Mode::Media { open_t(Mode::Media) } else { 0.0 }.to_bits(), Ordering::Relaxed);
+            // Con la tarjeta abierta, la isla la pinta ella (aquí solo se sigue midiendo)
+            let card_owns = card::owns_island();
             // Mientras cambia de ancho se estira un poco a lo alto (como la Dynamic Island al transformarse)
             let sq = (g.isl_v.abs() / 2200.0).min(1.0) * 2.5;
             let ir_draw = rect(ir.left, ir.top - sq, ir.right, ir.bottom + sq);
-            if pill_a > 0.01 {
+            if pill_a > 0.01 && !card_owns {
                 popup::push_alpha(&rt, pill_a);
                 // Sonando: el borde de la isla brilla con el color de la carátula
                 if mode == Mode::Media && media.as_ref().is_some_and(|m| m.playing) {
@@ -2108,8 +2122,10 @@ fn paint(hwnd: HWND) {
                 rt.PopLayer();
             };
             // El contenido anterior se desvanece mientras entra el nuevo
-            if let Some(pm) = g.isl_prev { draw_mode(pm, 1.0 - mode_k, false, &mut hits, &mut eq_rect); }
-            draw_mode(mode, mode_k, true, &mut hits, &mut eq_rect);
+            if !card_owns {
+                if let Some(pm) = g.isl_prev { draw_mode(pm, 1.0 - mode_k, false, &mut hits, &mut eq_rect); }
+                draw_mode(mode, mode_k, true, &mut hits, &mut eq_rect);
+            }
             if animating_cell.get() { animating = true; }
             rt.PopAxisAlignedClip();
             // Puntos de privacidad (como en macOS), junto a la isla: verde = cámara, naranja = micrófono
@@ -2625,7 +2641,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
+            WM_CARDTEST => { if wp.0 == 1 { card::open(card::Origin::Click); } else { card::close(card::Why::Toggle); } LRESULT(0) }
             WM_MEDIA => {
+                card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
                 // Canción nueva: la isla se despliega 3,5 s para enseñarla y vuelve a encogerse
                 let key = MEDIA.lock().unwrap().as_ref().map(|m| format!("{}\u{1}{}", m.title, m.artist)).unwrap_or_default();
@@ -2771,6 +2789,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 // App a pantalla completa (vídeo, juegos): la barra se esconde detrás
                 // Windows también lo avisa cuando solo queda el escritorio: no nos fiamos y lo comprobamos
                 if wp.0 as u32 == ABN_FULLSCREENAPP { sync_fullscreen(hwnd); }
+                LRESULT(0)
+            }
+            WM_MBUTTONUP => {
+                // Clic central sobre la isla: pausa o reanuda (el clic normal abre la tarjeta)
+                let s = scale_of(hwnd);
+                let (mx, my) = ((lp.0 & 0xFFFF) as i16 as f32 / s, ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s);
+                let in_isl = GFX.with(|g| g.borrow().as_ref().is_some_and(|g| { let r = g.isl_rect; mx >= r.left && mx <= r.right && my >= r.top && my <= r.bottom }));
+                if in_isl && MEDIA.lock().unwrap().is_some() { media(Cmd::Toggle); }
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
@@ -3067,6 +3093,15 @@ fn main() {
         bar_ink_thread();
         hang_watch();
         search_extra::clip_start();
+        // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
+        if std::env::var_os("MACBAR_CARDTEST").is_some() {
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_secs(3));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(1), LPARAM(0)); }
+                std::thread::sleep(Duration::from_secs(4));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(0), LPARAM(0)); }
+            });
+        }
         // Prueba visual de los avisos de la isla: MACBAR_HUDTEST=1 los enseña uno tras otro (3 s cada uno)
         if std::env::var_os("MACBAR_HUDTEST").is_some() {
             std::thread::spawn(|| {
