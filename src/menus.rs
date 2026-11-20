@@ -347,6 +347,11 @@ pub fn bar_menu() -> Menu {
     }
     m.item(format!("      {}", t("Exportar tema…")), A::Bar(crate::BAR_THEME_EXPORT))
         .item(format!("      {}", t("Importar tema…")), A::Bar(crate::BAR_THEME_IMPORT));
+    // Tarjeta de la isla
+    m.sep().info(t("Tarjeta de la isla"));
+    m.check(format!("      {}", t("Abrir con un clic en la isla")), crate::card::opt(crate::card::OPT_CLICK), A::Bar(crate::BAR_CARD_CLICK))
+        .check(format!("      {}", t("Abrir al dejar el ratón encima")), crate::card::opt(crate::card::OPT_HOVER), A::Bar(crate::BAR_CARD_HOVER))
+        .check(format!("      {}", t("Vistazo con la isla vacía")), crate::card::opt(crate::card::OPT_GLANCE), A::Bar(crate::BAR_CARD_GLANCE));
     // Posición de la barra
     m.sep().info(t("Posición de la barra"));
     let b = crate::bar_bottom();

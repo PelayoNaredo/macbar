@@ -160,6 +160,9 @@ pub const BAR_PRESENT: u32 = 85;
 pub const BAR_CAFFEINE: u32 = 88;
 pub const BAR_PICKER: u32 = 89;
 pub const BAR_POMODORO: u32 = 90;
+pub const BAR_CARD_CLICK: u32 = 91;
+pub const BAR_CARD_HOVER: u32 = 92;
+pub const BAR_CARD_GLANCE: u32 = 93;
 /// Posición: arriba 86, abajo 87
 pub const BAR_POS_TOP: u32 = 86;
 pub const BAR_POS_BOTTOM: u32 = 87;
@@ -184,6 +187,8 @@ const TIMER_FX: usize = 7;
 const TIMER_COUNT: usize = 8;
 /// Fin de un aviso de la isla
 const TIMER_HUD: usize = 9;
+/// Ratón quieto sobre la isla: abre la tarjeta (si está activado).
+const TIMER_CARD_HOVER: usize = 14;
 const WM_CARDTEST: u32 = WM_USER + 97;
 /// Progreso de la canción (isla desplegada)
 const TIMER_PROG: usize = 10;
@@ -372,7 +377,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance,
 }
 
 impl Act {
@@ -1066,6 +1071,9 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_PRESENT => profiles::toggle_present(),
         BAR_CAFFEINE => live::caffeine_toggle(),
         BAR_PICKER => pick_color(),
+        BAR_CARD_CLICK => card::toggle_opt(card::OPT_CLICK),
+        BAR_CARD_HOVER => card::toggle_opt(card::OPT_HOVER),
+        BAR_CARD_GLANCE => card::toggle_opt(card::OPT_GLANCE),
         BAR_POMODORO => if live::POMO.load(Ordering::Relaxed) != 0 { live::timer_stop() } else { live::pomodoro_start() },
         BAR_POS_TOP => set_bar_bottom(false),
         BAR_POS_BOTTOM => set_bar_bottom(true),
@@ -1098,6 +1106,7 @@ fn run(a: Act) {
         Act::TimerStop => live::timer_stop(),
         Act::Caffeine => live::caffeine_toggle(),
         Act::ShelfCard => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)),
+        Act::Glance => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)),
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
         Act::ShelfShare => {
@@ -2158,6 +2167,8 @@ fn paint(hwnd: HWND) {
                 draw_mode(mode, mode_k, true, &mut hits, &mut eq_rect);
             }
             if animating_cell.get() { animating = true; }
+            // Sin nada en la isla y con Vistazo activado: su hueco en el centro de la barra lo abre
+            if mode == Mode::Idle && !card_owns && card::glance_on() { hits.push((rect(w / 2.0 - 70.0, py, w / 2.0 + 70.0, pb), Act::Glance)); }
             rt.PopAxisAlignedClip();
             // Puntos de privacidad (como en macOS), junto a la isla: verde = cámara, naranja = micrófono
             let mut dx = ir.right + 9.0;
@@ -2600,6 +2611,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         match msg {
             WM_PAINT => { paint(hwnd); LRESULT(0) }
             WM_ERASEBKGND => LRESULT(1),
+            WM_TIMER if wp.0 == TIMER_CARD_HOVER => {
+                let _ = KillTimer(Some(hwnd), TIMER_CARD_HOVER);
+                let still = GFX.with(|g| g.borrow().as_ref().is_some_and(|g| g.isl_hover && g.pressed.is_none() && matches!(g.isl_mode, Mode::Media | Mode::Timer | Mode::Shelf)));
+                if still && card::hover_opens() && GetAsyncKeyState(VK_LBUTTON.0 as i32) >= 0 { card::open_tab(card::Origin::Hover, None); }
+                LRESULT(0)
+            }
             WM_TIMER => {
                 // Un fotograma más de animación (el pintado vuelve a pedirlo mientras algo se mueva)
                 if wp.0 == TIMER_COLLAPSE || wp.0 == TIMER_FX || wp.0 == TIMER_HUD || wp.0 == TIMER_PROG {
@@ -2672,7 +2689,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), _ => card::close(card::Why::Toggle) } LRESULT(0) }
+            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
@@ -2734,7 +2751,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 LRESULT(1)
             }
-            WM_WEATHER | live::WM_HUD | live::WM_NET => { let _ = InvalidateRect(Some(hwnd), None, false); LRESULT(0) }
+            WM_WEATHER | live::WM_HUD | live::WM_NET => { card::media_changed(); let _ = InvalidateRect(Some(hwnd), None, false); LRESULT(0) }
             WM_POWERBROADCAST if wp.0 == 0x12 /* PBT_APMRESUMEAUTOMATIC */ || wp.0 == 7 /* PBT_APMRESUMESUSPEND */ => {
                 // Al volver de suspensión Windows rehace las pantallas: la barra vuelve a mostrarse y pide el hueco otra vez (ahora y en 2 s)
                 FULLSCREEN.store(false, Ordering::Relaxed);
@@ -2777,6 +2794,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let c = g.isl_hover != o; g.isl_hover = o; c
                 }).unwrap_or(false));
                 if over { let _ = InvalidateRect(Some(hwnd), None, false); }
+                // Abrir al pasar el ratón: 450 ms quieto encima de la isla (cada movimiento reinicia la espera)
+                if card::hover_opens() && GFX.with(|g| g.borrow().as_ref().is_some_and(|g| g.isl_hover && g.isl_w > 20.0)) && !card::is_open() {
+                    SetTimer(Some(hwnd), TIMER_CARD_HOVER, 450, None);
+                }
                 let changed = GFX.with(|g| g.borrow_mut().as_mut().map(|g| { let c = g.hover != h; g.hover = h; c }).unwrap_or(false));
                 if changed { let _ = InvalidateRect(Some(hwnd), None, false); }
                 let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
@@ -3127,7 +3148,26 @@ fn main() {
         hang_watch();
         search_extra::clip_start();
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
-        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "3") {
+        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "4") {
+            // Variante del Vistazo y de un aviso dentro de la tarjeta
+            std::thread::spawn(|| {
+                let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };
+                std::thread::sleep(Duration::from_millis(3000));
+                post(8, 0);
+                std::thread::sleep(Duration::from_millis(2000));
+                live::show(live::Hud::Volume(0.55, false), 2200);
+                std::thread::sleep(Duration::from_millis(1000));
+                live::show(live::Hud::Volume(0.7, false), 1500);
+                std::thread::sleep(Duration::from_millis(3000));
+                post(1, 0);
+                std::thread::sleep(Duration::from_millis(100));
+                post(1, 0);
+                std::thread::sleep(Duration::from_millis(1500));
+                live::show(live::Hud::Copied, 2000);
+                std::thread::sleep(Duration::from_millis(3000));
+                post(0, 0);
+            });
+        } else         if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "3") {
             // Variante de la bandeja: 6 archivos, su pestaña, archivos arrastrados encima y 2 más
             std::thread::spawn(|| {
                 let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };

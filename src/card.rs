@@ -15,9 +15,9 @@ pub const CARD_H: f32 = 168.0;
 
 /// Pestañas de la tarjeta (orden fijo).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Tab { Media, Timer, Shelf }
+pub enum Tab { Media, Timer, Shelf, Glance }
 
-impl Tab { fn idx(self) -> u8 { match self { Tab::Media => 0, Tab::Timer => 1, Tab::Shelf => 2 } } }
+impl Tab { fn idx(self) -> u8 { match self { Tab::Media => 0, Tab::Timer => 1, Tab::Shelf => 2, Tab::Glance => 3 } } }
 
 /// Alto máximo de la ventana (la bandeja con dos filas es lo más alto).
 pub const WIN_H: f32 = 230.0;
@@ -27,7 +27,7 @@ pub fn shelf_h(n: usize) -> f32 { if n == 0 { 168.0 } else { 52.0 + n.div_ceil(4
 
 /// Tamaño de la tarjeta en cada pestaña (DIP).
 pub fn tab_size(t: Tab) -> (f32, f32) {
-    match t { Tab::Media => (CARD_W, CARD_H), Tab::Timer => (340.0, 150.0), Tab::Shelf => (CARD_W, shelf_h(live::SHELF.lock().unwrap().len())) }
+    match t { Tab::Media => (CARD_W, CARD_H), Tab::Timer => (340.0, 150.0), Tab::Shelf => (CARD_W, shelf_h(live::SHELF.lock().unwrap().len())), Tab::Glance => (360.0, 150.0) }
 }
 
 /// Pestaña con la que se abre: la del modo de la isla (1 = música, 2 = temporizador), si tiene contenido;
@@ -55,7 +55,7 @@ pub enum Origin { Click, #[allow(dead_code)] Hover, Drop }
 
 /// Motivo del cierre.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Why { Leave, ClickOutside, Escape, Toggle, Empty, Fullscreen, OtherPanel, BarMoved }
+pub enum Why { Leave, ClickOutside, Escape, Toggle, Empty, Fullscreen, OtherPanel, BarMoved, Alert }
 
 /// Lo que se mira para decidir si cerrar (ver la tabla del plan, sección 4).
 #[derive(Clone, Copy, Debug)]
@@ -115,8 +115,64 @@ pub static ISL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// ¿La isla la pinta la tarjeta (la barra no debe pintarla)?
 pub fn owns_island() -> bool { OWNS.load(Ordering::Relaxed) }
 
+// ---------------------------------------------------------------- ajustes
+/// Bits: 1 = el clic en la isla abre la tarjeta, 2 = se abre al pasar el ratón, 4 = Vistazo con la isla vacía.
+/// 0xFF = sin leer todavía de config.ini.
+static OPTS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0xFF);
+pub const OPT_CLICK: u8 = 1;
+pub const OPT_HOVER: u8 = 2;
+pub const OPT_GLANCE: u8 = 4;
+
+fn opts() -> u8 {
+    let v = OPTS.load(Ordering::Relaxed);
+    if v != 0xFF { return v; }
+    let is = |k: &str, val: &str| sys::config_value(k).is_some_and(|x| x.eq_ignore_ascii_case(val));
+    let mut b = 0;
+    if !is("tarjeta_clic", "pausar") { b |= OPT_CLICK; }
+    if is("tarjeta_hover", "si") { b |= OPT_HOVER; }
+    if is("tarjeta_vistazo", "si") { b |= OPT_GLANCE; }
+    OPTS.store(b, Ordering::Relaxed);
+    b
+}
+pub fn opt(bit: u8) -> bool { opts() & bit != 0 }
+
+/// Cambia un ajuste y lo guarda en config.ini.
+pub fn toggle_opt(bit: u8) {
+    let b = opts() ^ bit;
+    OPTS.store(b, Ordering::Relaxed);
+    match bit {
+        OPT_CLICK => sys::set_config_value("tarjeta_clic", if b & bit != 0 { "abrir" } else { "pausar" }),
+        OPT_HOVER => sys::set_config_value("tarjeta_hover", if b & bit != 0 { "si" } else { "no" }),
+        _ => sys::set_config_value("tarjeta_vistazo", if b & bit != 0 { "si" } else { "no" }),
+    }
+}
+
 /// ¿El clic en la isla abre la tarjeta? (ajuste «tarjeta_clic»; «pausar» = como antes)
-pub fn click_opens() -> bool { !sys::config_value("tarjeta_clic").is_some_and(|v| v.eq_ignore_ascii_case("pausar")) }
+pub fn click_opens() -> bool { opt(OPT_CLICK) }
+pub fn hover_opens() -> bool { opt(OPT_HOVER) && !crate::profiles::presenting() }
+pub fn glance_on() -> bool { opt(OPT_GLANCE) }
+
+/// Valor (0..1) de la barra de un aviso, como en la isla.
+fn hud_value(h: live::Hud) -> f32 {
+    use live::Hud::*;
+    match h {
+        Volume(v, m) => if m { 0.0 } else { v },
+        Bright(b) => b,
+        Power(pc, _) | LowBat(pc) | Claude(pc) | Mem(pc) | Disk(pc) => pc as f32 / 100.0,
+        Full => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Avisos que cierran la tarjeta para verse en la isla como siempre.
+fn hud_closes(h: live::Hud, tab: Tab) -> bool {
+    matches!(h, live::Hud::LowBat(_) | live::Hud::Present(true)) || (h == live::Hud::TimerDone && tab != Tab::Timer)
+}
+
+/// Avisos que no hace falta repetir dentro de la tarjeta (la propia pestaña ya lo enseña).
+fn hud_skip(h: live::Hud, tab: Tab) -> bool {
+    matches!(h, live::Hud::Shelf) || (tab == Tab::Timer && matches!(h, live::Hud::Pomo(..) | live::Hud::TimerDone))
+}
 
 // ---------------------------------------------------------------- superficie con alfa por píxel
 struct Surface { dc: HDC, bmp: HBITMAP, old: HGDIOBJ, w: i32, h: i32 }
@@ -146,7 +202,7 @@ impl Drop for Surface {
     fn drop(&mut self) { unsafe { SelectObject(self.dc, self.old); let _ = DeleteObject(self.bmp.into()); let _ = DeleteDC(self.dc); } }
 }
 
-struct CardFonts { icon_s: IDWriteTextFormat, big: IDWriteTextFormat, lbl: IDWriteTextFormat, title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
+struct CardFonts { clock: IDWriteTextFormat, icon_s: IDWriteTextFormat, big: IDWriteTextFormat, lbl: IDWriteTextFormat, title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
     // Los de la isla (para el primer y el último fotograma, idénticos a los de la barra)
     i_title: IDWriteTextFormat, i_small: IDWriteTextFormat, i_icon: IDWriteTextFormat }
 
@@ -237,6 +293,10 @@ struct Card {
     press_item: Option<(usize, i32, i32)>,
     /// Hay un menú nativo abierto (sus clics no cuentan como «clic fuera»).
     menu_open: bool,
+    /// Aviso dentro de la tarjeta: el último (para su salida), cuánto se ve (0..1) y su barra animada.
+    hud_last: Option<live::Hud>,
+    hud_k: f32,
+    hud_val: f32,
 }
 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
@@ -267,7 +327,7 @@ fn ensure() -> Option<()> {
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         let mk = |fam, size, wt| make_format(&dw, fam, size, wt);
         let f = CardFonts {
-            icon_s: mk(ICONS, 13.0, DWRITE_FONT_WEIGHT_NORMAL), big: mk(FONT, 20.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), lbl: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            clock: mk(FONT, 36.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), icon_s: mk(ICONS, 13.0, DWRITE_FONT_WEIGHT_NORMAL), big: mk(FONT, 20.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), lbl: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD),
             title: mk(FONT, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), sub: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_NORMAL), small: mk(FONT, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), tiny: mk(FONT, 8.5, DWRITE_FONT_WEIGHT_BOLD),
             icon: mk(ICONS, 17.0, DWRITE_FONT_WEIGHT_NORMAL), icon_l: mk(ICONS, 24.0, DWRITE_FONT_WEIGHT_NORMAL),
             i_title: mk(FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), i_small: mk(FONT, 11.5, DWRITE_FONT_WEIGHT_NORMAL), i_icon: mk(ICONS, 12.5, DWRITE_FONT_WEIGHT_NORMAL),
@@ -281,7 +341,7 @@ fn ensure() -> Option<()> {
             title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
             drag: None, bar_k: 0.0, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default(),
             tab: Tab::Media, tab_prev: None, tab_x: f32::NAN, roll: Roll::default(),
-            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false };
+            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false, hud_last: None, hud_k: 0.0, hud_val: 0.0 };
         CARD.with(|x| *x.borrow_mut() = Some(c));
         // Soltar archivos sobre la tarjeta: a la bandeja
         dnd::register(hwnd, true);
@@ -305,6 +365,7 @@ pub fn open_tab(origin: Origin, want: Option<Tab>) {
         Some(Tab::Media) if has_media => Tab::Media,
         // Al arrastrar archivos se abre la bandeja aunque esté vacía (es donde se sueltan)
         Some(Tab::Shelf) if has_shelf || origin == Origin::Drop => Tab::Shelf,
+        Some(Tab::Glance) => Tab::Glance,
         _ => match initial_tab(ISL_MODE.load(Ordering::Relaxed), has_media, has_timer, has_shelf) { Some(t) => t, None => return },
     };
     if ensure().is_none() { dbg("ensure falló"); return; }
@@ -358,6 +419,8 @@ pub fn open_tab(origin: Origin, want: Option<Tab>) {
         c.dropping = origin == Origin::Drop;
         c.press_item = None;
         c.menu_open = false;
+        c.hud_last = None;
+        c.hud_k = 0.0;
         // Los archivos que ya estaban no hacen su entrada
         let old = Instant::now() - Duration::from_secs(5);
         c.seen = live::SHELF.lock().unwrap().iter().map(|x| (x.0.clone(), old)).collect();
@@ -579,14 +642,14 @@ fn render() -> bool {
         let done = if timer.is_none() { (*live::LAST_DONE.lock().unwrap()).filter(|d| d.1.elapsed().as_secs() < 60) } else { None };
         // La pestaña se quedó sin contenido: se pasa a la otra si tiene
         let shelf: Vec<(String, Option<Arc<Vec<u8>>>)> = live::SHELF.lock().unwrap().clone();
-        let has = |t: Tab| match t { Tab::Media => media.is_some(), Tab::Timer => timer.is_some() || done.is_some(), Tab::Shelf => !shelf.is_empty() };
+        let has = |t: Tab| match t { Tab::Media => media.is_some(), Tab::Timer => timer.is_some() || done.is_some(), Tab::Shelf => !shelf.is_empty(), Tab::Glance => false };
         if c.open && !has(c.tab) && !(c.tab == Tab::Shelf && c.dropping) {
             // La pestaña se quedó vacía: a la siguiente que tenga algo (la bandeja vacía se queda si se acaba de vaciar)
             let to = [Tab::Media, Tab::Timer, Tab::Shelf].into_iter().find(|t| *t != c.tab && has(*t));
-            let keep = c.tab == Tab::Shelf || (c.tab == Tab::Timer && media.is_none() && shelf.is_empty());
+            let keep = c.tab == Tab::Shelf || c.tab == Tab::Glance || (c.tab == Tab::Timer && media.is_none() && shelf.is_empty());
             if let Some(t) = to.filter(|_| !keep) { c.tab_prev = Some((c.tab, now, if t.idx() > c.tab.idx() { 1.0 } else { -1.0 })); c.tab = t; }
         }
-        let tabs: Vec<Tab> = [Tab::Media, Tab::Timer, Tab::Shelf].into_iter().filter(|t| has(*t) || *t == c.tab).collect();
+        let tabs: Vec<Tab> = [Tab::Media, Tab::Timer, Tab::Shelf, Tab::Glance].into_iter().filter(|t| has(*t) || *t == c.tab).collect();
         // Iconos de la bandeja en la GPU, solo cuando cambia
         let sv = live::SHELF_VER.load(Ordering::Relaxed);
         if c.shelf_bmps.0 != sv {
@@ -899,7 +962,63 @@ fn render() -> bool {
                             txt(&p, &c.f.title, t, cl + cw / 2.0 - tw / 2.0, ct + chh / 2.0 - 9.0, 18.0, &wa(0.6 * row(1.0)));
                         }
                     }
-                    Tab::Shelf => {
+                    Tab::Glance => {
+                        let k1 = row(1.0);
+                        let t = GetLocalTime();
+                        // Hora grande y segundos al lado, en gris
+                        let hm = format!("{}:{:02}", t.wHour, t.wMinute);
+                        txt(&p, &c.f.clock, &hm, cl + 20.0, ct + 18.0 + lift(k1), 40.0, &wa(0.96 * k1));
+                        let hw = p.width(&c.f.clock, &hm);
+                        txt(&p, &c.f.sub, &format!(":{:02}", t.wSecond), cl + 22.0 + hw, ct + 30.0 + lift(k1), 24.0, &wa(0.45 * k1));
+                        let (wd, mo) = (i18n::weekday(t.wDayOfWeek as usize), i18n::month(t.wMonth as usize + 11));
+                        let date = if i18n::en() { format!("{wd}, {mo} {}", t.wDay) } else { format!("{wd}, {} de {mo}", t.wDay) };
+                        let date: String = date.chars().enumerate().map(|(i, ch)| if i == 0 { ch.to_uppercase().next().unwrap_or(ch) } else { ch }).collect();
+                        let k2 = row(2.0);
+                        txt(&p, &c.f.sub, &date, cl + 20.0, ct + 62.0 + lift(k2), 16.0, &wa(0.6 * k2));
+                        // A la derecha: el tiempo, la batería y el uso semanal de Claude
+                        // Con el selector de pestañas arriba a la derecha, el tiempo se aparta
+                        let rx0 = cl + cw - 20.0 - if tabs_on { 30.0 * tabs.len() as f32 + 4.0 } else { 0.0 };
+                        if let Some(w) = *WEATHER.lock().unwrap() {
+                            let temp = format!("{}°", w.temp.round() as i32);
+                            let tw = p.width(&c.f.big, &temp);
+                            txt(&p, &c.f.big, &temp, rx0 - tw, ct + 20.0 + lift(k1), 26.0, &wa(0.96 * k1));
+                            weather::draw_icon(&rt, &p, &c.f.icon_l, rx0 - tw - 34.0, ct + 20.0 + lift(k1), 30.0, 26.0, w.code, w.is_day, &wa(0.9 * k1));
+                        }
+                        let mut gx = rx0;
+                        let usage = GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().and_then(|g| g.usage.map(|u| u.0))));
+                        // Uso semanal de Claude (naranja Claude) y batería (verde)
+                        for (val, col) in [(usage.map(|u| u / 100.0), (0.85, 0.47, 0.34)), (battery().map(|b| b.0 as f32 / 100.0), (0.30, 0.85, 0.45))] {
+                            let Some(v) = val else { continue };
+                            let pct = format!("{}%", (v * 100.0).round() as i32);
+                            let pw = p.width(&c.f.small, &pct);
+                            txt(&p, &c.f.small, &pct, gx - pw, ct + 58.0 + lift(k2), 16.0, &wa(0.8 * k2));
+                            let rcx = gx - pw - 12.0;
+                            ring(&rt, &c.fac, cap.as_ref(), rcx, ct + 66.0 + lift(k2), 6.5, 2.2, v.clamp(0.0, 1.0), &col_b(col, k2), &col_b(col, 0.22 * k2));
+                            gx = rcx - 16.0;
+                        }
+                        // Atajos: cafeína, pomodoro, cuentagotas y captura
+                        let k3 = row(3.0);
+                        if k3 > 0.01 {
+                            let by = ct + chh - 46.0 + lift(k3);
+                            let mut bx = cl + 20.0;
+                            let caf = live::caffeine_on();
+                            for (id, gl, lbl, on) in [(40u8, "\u{EC32}", i18n::t("Cafeína"), caf), (41, "\u{E916}", i18n::t("Pomodoro"), false), (42, "\u{E790}", i18n::t("Color"), false), (43, "\u{E722}", i18n::t("Captura"), false)] {
+                                let w = p.width(&c.f.small, lbl) + 34.0;
+                                let r = rect(bx, by, bx + w, by + 30.0);
+                                let gk = c.glow[id as usize];
+                                let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.92 } else { 1.0 };
+                                scaled(&rt, bx + w / 2.0, by + 15.0, sc, || {
+                                    let bg = if on { col_b((1.0, 0.62, 0.22), (0.85 + 0.15 * gk) * k3) } else { wa((0.10 + 0.08 * gk) * k3) };
+                                    rt.FillRoundedRectangle(&rrect(r, 15.0), &bg);
+                                    let ink = if on { p.brush(rgba(0.0, 0.0, 0.0, 0.9 * k3)) } else { wa(0.92 * k3) };
+                                    glyph_c(&p, &c.f.icon_s, gl, bx + 15.0, by + 15.0, &ink);
+                                    txt(&p, &c.f.small, lbl, bx + 26.0, by, 30.0, &ink);
+                                });
+                                if k3 > 0.9 && live_t { hits.push((r, id)); }
+                                bx += w + 6.0;
+                            }
+                        }
+                    }                    Tab::Shelf => {
                         let n = shelf.len();
                         let k1 = row(1.0);
                         // Cabecera: «Bandeja», cuántos y, a la derecha, Compartir y Vaciar
@@ -1091,12 +1210,40 @@ fn render() -> bool {
                     if d.abs() > 0.2 { c.tab_x += d * (1.0 - (-dt / 0.06).exp()); moving = true; } else { c.tab_x = target; }
                     rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: r0 + c.tab_x, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.16 * ka));
                     for (i, t) in tabs.iter().enumerate() {
-                        let (id, gl) = match t { Tab::Media => (10u8, "\u{E8D6}"), Tab::Timer => (11, "\u{E916}"), Tab::Shelf => (12, "\u{E8B7}") };
+                        let (id, gl) = match t { Tab::Media => (10u8, "\u{E8D6}"), Tab::Timer => (11, "\u{E916}"), Tab::Shelf => (12, "\u{E8B7}"), Tab::Glance => (13, "\u{E823}") };
                         let x = x_of(i);
                         let gk = c.glow[id as usize];
                         if gk > 0.01 && c.tab != *t { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.08 * gk * ka)); }
                         glyph_c(&p, &c.f.icon_s, gl, x, t0 + 13.0, &wa(if c.tab == *t { 0.96 } else { 0.5 } * ka));
                         if ka > 0.9 && c.open { hits.push((rect(x - 13.0, t0, x + 13.0, t0 + 26.0), id)); }
+                    }
+                }
+            }            // ---- Aviso dentro de la tarjeta: la isla no se ve mientras está abierta, así que baja aquí
+            {
+                let hud = live::current().filter(|h| !hud_skip(*h, c.tab));
+                if hud.is_some() { c.hud_last = hud; }
+                if ease_to(&mut c.hud_k, if hud.is_some() && c.open { 1.0 } else { 0.0 }, 0.08, dt) { moving = true; }
+                if hud.is_some() { moving = true; }
+                if let Some(h) = c.hud_last.filter(|_| c.hud_k > 0.01) {
+                    let k = c.hud_k;
+                    let (gl, lbl, bar) = hud_parts(h);
+                    if ease_to(&mut c.hud_val, hud_value(h), 0.07, dt) { moving = true; }
+                    let drop = -40.0 * (1.0 - ease_out(k));
+                    let r = rect(sh.left + 10.0, sh.top + 10.0 + drop, sh.right - 10.0, sh.top + 44.0 + drop);
+                    rt.FillRoundedRectangle(&rrect(rect(r.left, r.top + 3.0, r.right, r.bottom + 3.0), 17.0), &p.brush(rgba(0.0, 0.0, 0.0, 0.4 * k)));
+                    rt.FillRoundedRectangle(&rrect(r, 17.0), &p.brush(rgba(0.13, 0.13, 0.14, 0.98 * k)));
+                    rt.DrawRoundedRectangle(&rrect(r, 17.0), &wa(0.08 * k), 1.0 / s, None);
+                    let cy2 = (r.top + r.bottom) / 2.0;
+                    if !gl.is_empty() { glyph_c(&p, &c.f.icon_s, gl, r.left + 20.0, cy2, &wa(0.96 * k)); }
+                    txt(&p, &c.f.lbl, &lbl, r.left + 36.0, r.top, 34.0, &wa(0.96 * k));
+                    if bar {
+                        let pct = format!("{}%", (c.hud_val * 100.0).round() as i32);
+                        let pw = p.width(&c.f.lbl, "100%");
+                        txt(&p, &c.f.lbl, &pct, r.right - 14.0 - p.width(&c.f.lbl, &pct), r.top, 34.0, &wa(0.96 * k));
+                        let (bl, br) = (r.right - 14.0 - pw - 10.0 - 84.0, r.right - 14.0 - pw - 10.0);
+                        rt.FillRoundedRectangle(&rrect(rect(bl, cy2 - 2.5, br, cy2 + 2.5), 2.5), &wa(0.18 * k));
+                        let fx = bl + (br - bl) * c.hud_val.clamp(0.0, 1.0);
+                        if fx > bl + 0.5 { rt.FillRoundedRectangle(&rrect(rect(bl, cy2 - 2.5, fx.max(bl + 5.0), cy2 + 2.5), 2.5), &wa(0.96 * k)); }
                     }
                 }
             }            rt.PopAxisAlignedClip();
@@ -1146,7 +1293,8 @@ fn poll() {
         let inside = inside || std::env::var_os("MACBAR_CARDTEST").is_some();
         if inside { c.outside_since = None; } else if c.outside_since.is_none() { c.outside_since = Some(now); }
         // Con contenido: música, temporizador, uno recién terminado (6 s) o los atajos del temporizador con el ratón encima
-        let has = media_on || timer_on || done_recent || shelf_on || (matches!(c.tab, Tab::Timer | Tab::Shelf) && inside);
+        let has = media_on || timer_on || done_recent || shelf_on || (matches!(c.tab, Tab::Timer | Tab::Shelf | Tab::Glance) && inside);
+        if live::current().is_some_and(|h| hud_closes(h, c.tab)) { return Some(Why::Alert); }
         if has { c.empty_since = None; } else if c.empty_since.is_none() { c.empty_since = Some(now); }
         let inside = inside || c.dropping;
         let pressed_now = !c.menu_open && ((l && !c.btn_prev.0) || (r && !c.btn_prev.1));
@@ -1232,7 +1380,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let _ = KillTimer(Some(hwnd), TIMER_ANIM);
                     if render() { SetTimer(Some(hwnd), TIMER_ANIM, 15, None); }
                     // Quieta y sonando: un repintado por segundo para el progreso
-                    else if is_open() && (MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) || (live::timer_left().is_some() && !live::timer_paused())) { SetTimer(Some(hwnd), TIMER_ANIM, 250, None); }
+                    else if is_open() && (MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) || (live::timer_left().is_some() && !live::timer_paused()) || CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.tab == Tab::Glance))) { SetTimer(Some(hwnd), TIMER_ANIM, 250, None); }
                 }
                 LRESULT(0)
             }
@@ -1308,6 +1456,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     Some(10) => switch_tab(Tab::Media),
                     Some(11) => switch_tab(Tab::Timer),
                     Some(12) => switch_tab(Tab::Shelf),
+                    Some(13) => switch_tab(Tab::Glance),
+                    Some(40) => live::caffeine_toggle(),
+                    Some(41) => { live::pomodoro_start(); switch_tab(Tab::Timer); }
+                    Some(42) => { close(Why::Toggle); crate::pick_color(); }
+                    Some(43) => { close(Why::Toggle); sys::open("ms-screenclip:"); }
                     Some(28) => { let paths: Vec<String> = live::SHELF.lock().unwrap().iter().map(|x| x.0.clone()).collect(); let _ = share::files(bar_hwnd(), &paths); close(Why::Toggle); }
                     Some(29) => live::shelf_clear(),
                     Some(i @ 32..=39) => {
@@ -1367,6 +1520,7 @@ pub fn test_hover(id: Option<u8>) {
 
 /// Archivos arrastrados que llegan a la isla: la tarjeta se abre en la bandeja (sin quitar el foco).
 pub fn open_for_drop() {
+    if crate::profiles::presenting() { return; }
     if is_open() { if CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.tab != Tab::Shelf)) { switch_tab(Tab::Shelf); } drop_hover(true); return; }
     open_tab(Origin::Drop, Some(Tab::Shelf));
 }
@@ -1417,7 +1571,7 @@ pub fn test_switch(t: Tab) {
     if let Some(h) = h { unsafe { SetTimer(Some(h), TIMER_ANIM, 1, None); } }
 }
 
-/// Cuando cambia la música, la tarjeta abierta se repinta.
+/// Algo cambió (música, aviso nuevo): la tarjeta abierta se repinta.
 pub fn media_changed() {
     let h = CARD.with(|c| c.borrow().as_ref().filter(|c| c.open).map(|c| c.hwnd));
     if let Some(h) = h { unsafe { SetTimer(Some(h), TIMER_ANIM, 1, None); } }
@@ -1472,6 +1626,21 @@ mod tests {
         assert!(shelf_h(5) > shelf_h(4));
         assert_eq!(initial_tab(3, true, false, true), Some(Tab::Shelf));
         assert_eq!(initial_tab(0, false, false, true), Some(Tab::Shelf));
+    }
+
+    #[test]
+    fn avisos_en_la_tarjeta() {
+        // Batería baja y presentación cierran la tarjeta; «se acabó el tiempo» solo si no está en su pestaña
+        assert!(hud_closes(live::Hud::LowBat(8), Tab::Media));
+        assert!(hud_closes(live::Hud::TimerDone, Tab::Media));
+        assert!(!hud_closes(live::Hud::TimerDone, Tab::Timer));
+        assert!(!hud_closes(live::Hud::Volume(0.4, false), Tab::Media));
+        // La bandeja y el pomodoro no se repiten donde ya se ven
+        assert!(hud_skip(live::Hud::Shelf, Tab::Shelf));
+        assert!(hud_skip(live::Hud::Pomo(true, 25), Tab::Timer));
+        assert!(!hud_skip(live::Hud::Pomo(true, 25), Tab::Media));
+        assert_eq!(hud_value(live::Hud::Volume(0.4, true)), 0.0);
+        assert_eq!(hud_value(live::Hud::Power(80, true)), 0.8);
     }
 
     #[test]

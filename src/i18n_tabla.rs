@@ -386,4 +386,11 @@ pub static EN: &[(&str, &str)] = &[
     ("Arrastra archivos aquí", "Drag files here"),
     ("Mostrar en la carpeta", "Show in folder"),
     ("Quitar de la bandeja", "Remove from shelf"),
+    ("Tarjeta de la isla", "Island card"),
+    ("Abrir con un clic en la isla", "Open with a click on the island"),
+    ("Abrir al dejar el ratón encima", "Open when hovering"),
+    ("Vistazo con la isla vacía", "Glance when the island is empty"),
+    ("Cafeína", "Caffeine"),
+    ("Color", "Color"),
+    ("Captura", "Capture"),
 ];
