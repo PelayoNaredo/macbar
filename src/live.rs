@@ -704,8 +704,25 @@ pub fn nudge_volume(steps: i32) {
 pub static SHELF: Mutex<Vec<(String, Option<Arc<Vec<u8>>>)>> = Mutex::new(Vec::new());
 pub static SHELF_VER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Icono del explorador para un archivo (el mismo que se ve en las carpetas).
+/// Miniatura de un archivo: la del propio explorador (fotos, vídeos, PDF… y, si no tiene, su icono
+/// grande), recortada en cuadrado. Si falla, el icono normal.
 pub fn file_icon(path: &str) -> Option<Vec<u8>> {
+    unsafe {
+        let wic: Option<IWICImagingFactory> = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
+        if let (Some(wic), Ok(f)) = (&wic, SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(&HSTRING::from(path), None::<&windows::Win32::System::Com::IBindCtx>)) {
+            // Al doble de tamaño: aunque la foto no sea cuadrada, el recorte central queda nítido
+            if let Ok(hb) = f.GetImage(SIZE { cx: 2 * ART_PX as i32, cy: 2 * ART_PX as i32 }, SIIGBF_RESIZETOFIT) {
+                let src = wic.CreateBitmapFromHBITMAP(hb, HPALETTE::default(), WICBitmapUsePremultipliedAlpha).ok();
+                let _ = DeleteObject(hb.into());
+                if let Some(px) = src.and_then(|s| wic_square(wic, &s.into())) { return Some(px); }
+            }
+        }
+        file_icon_small(path)
+    }
+}
+
+/// Icono del explorador para un archivo (el mismo que se ve en las carpetas).
+fn file_icon_small(path: &str) -> Option<Vec<u8>> {
     unsafe {
         let mut fi = SHFILEINFOW::default();
         let r = SHGetFileInfoW(&HSTRING::from(path), windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut fi), size_of::<SHFILEINFOW>() as u32, SHGFI_ICON | SHGFI_LARGEICON);
