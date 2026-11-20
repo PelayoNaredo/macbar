@@ -1614,10 +1614,22 @@ fn item_menu(hwnd: HWND, i: usize) {
     let pick = unsafe {
         let m = CreatePopupMenu().ok();
         m.map(|m| {
-            for (id, t) in [(1usize, i18n::t("Abrir")), (2, i18n::t("Mostrar en la carpeta")), (3, i18n::t("Compartir")), (4, i18n::t("Quitar de la bandeja"))] {
-                let w = HSTRING::from(t);
-                let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(w.as_ptr()));
+            let add = |id: usize, t: &str| { let w = HSTRING::from(t); let _ = AppendMenuW(m, MF_STRING, id, PCWSTR(w.as_ptr())); };
+            let sep = || { let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null()); };
+            add(1, i18n::t("Abrir"));
+            add(2, i18n::t("Mostrar en la carpeta"));
+            add(3, i18n::t("Compartir"));
+            sep();
+            // Herramientas: convertir y leer el texto (imágenes) y comprimir
+            if fileops::is_image(&path) {
+                add(5, i18n::t("Convertir a PNG"));
+                add(6, i18n::t("Convertir a JPG"));
+                add(7, i18n::t("Copiar el texto (OCR)"));
             }
+            add(8, i18n::t("Comprimir en ZIP"));
+            if live::SHELF.lock().unwrap().len() > 1 { add(9, i18n::t("Comprimir todo en ZIP")); }
+            sep();
+            add(4, i18n::t("Quitar de la bandeja"));
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
             let r = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None).0 as usize;
@@ -1631,6 +1643,11 @@ fn item_menu(hwnd: HWND, i: usize) {
         2 => { sys::open_args("explorer.exe", &format!("/select,\"{path}\"")); close(Why::Toggle); }
         3 => { let _ = share::files(bar_hwnd(), &[path]); close(Why::Toggle); }
         4 => live::shelf_remove(&path),
+        5 => fileops::convert(path, true),
+        6 => fileops::convert(path, false),
+        7 => fileops::ocr(path),
+        8 => fileops::zip(vec![path]),
+        9 => fileops::zip(live::SHELF.lock().unwrap().iter().map(|x| x.0.clone()).collect()),
         _ => {}
     }
 }

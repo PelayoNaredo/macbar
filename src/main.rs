@@ -44,6 +44,7 @@ mod desk;
 mod deskdata;
 mod deskw;
 mod dnd;
+mod fileops;
 mod i18n;
 mod i18n_tabla;
 mod live;
@@ -85,7 +86,7 @@ impl Mode {
             Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
-            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35,
+            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36,
         }
     }
 }
@@ -118,6 +119,15 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         // Sin barra lineal: lleva un anillo radial pequeño a la derecha (ver Mode::Hud)
         Mem(_) => ("\u{E964}", i18n::t("Memoria casi llena").into(), false),
         Cpu(pc) => ("\u{E950}", i18n::tf("Procesador al {} %", &[&pc]), false),
+        FileOp(k, ok) => match (k, ok) {
+            (0, true) => ("\u{E7B8}", i18n::t("ZIP listo en la bandeja").into(), false),
+            (1, true) => ("\u{E91B}", i18n::t("Convertida a PNG").into(), false),
+            (2, true) => ("\u{E91B}", i18n::t("Convertida a JPG").into(), false),
+            (3, true) => ("\u{E8C8}", i18n::tf("Texto copiado  {}", &[&*live::CLIP.lock().unwrap()]), false),
+            (0, false) => ("\u{E783}", i18n::t("No se pudo comprimir").into(), false),
+            (3, false) => ("\u{E783}", i18n::t("No se encontró texto").into(), false),
+            _ => ("\u{E783}", i18n::t("No se pudo convertir").into(), false),
+        },
         Profile(i) => ("\u{E77B}", i18n::tf("Perfil «{}» guardado", &[&i18n::t(profiles::NAMES[(i as usize).min(2)])]), false),
         Phone => { let (app, title) = live::PHONE_NOTE.lock().unwrap().clone(); ("\u{E8EA}", trunc(&if app.is_empty() { title } else { format!("{app} · {title}") }, 38), false) }
         CamOn => ("\u{E722}", i18n::t("La cámara se está usando").into(), false),
@@ -2096,7 +2106,8 @@ fn paint(hwnd: HWND) {
                         let (gl, lbl, has_bar) = hud_parts(hh);
                         let (icon_b, fill_b) = match hh {
                             live::Hud::TimerDone => (&orange, &orange),
-                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn => (&green, &green),
+                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn | live::Hud::FileOp(_, true) => (&green, &green),
+                            live::Hud::FileOp(_, false) => (&red, &red),
                             live::Hud::MicOn | live::Hud::Disk(_) | live::Hud::Saver(true) | live::Hud::Pomo(true, _) | live::Hud::Caffeine(true) => (&orange, &orange),
                             live::Hud::Pomo(false, _) => (&green, &green),
                             live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true) => (&red, &red),
