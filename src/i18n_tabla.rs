@@ -395,4 +395,7 @@ pub static EN: &[(&str, &str)] = &[
     ("Captura", "Capture"),
     ("Procesador al {} %", "CPU at {} %"),
     ("Barra sólida con ventanas maximizadas", "Solid bar with maximized windows"),
+    ("Nota rápida (no sale al compartir pantalla)", "Quick note (hidden when sharing the screen)"),
+    ("Nota", "Note"),
+    ("oculta al compartir", "hidden when sharing"),
 ];

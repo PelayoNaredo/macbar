@@ -48,6 +48,7 @@ mod i18n;
 mod i18n_tabla;
 mod live;
 mod menus;
+mod notes;
 mod phone;
 mod picker;
 mod popup;
@@ -165,6 +166,7 @@ pub const BAR_CARD_CLICK: u32 = 91;
 pub const BAR_CARD_HOVER: u32 = 92;
 pub const BAR_CARD_GLANCE: u32 = 93;
 pub const BAR_SOLID: u32 = 94;
+pub const BAR_NOTE: u32 = 95;
 /// Posición: arriba 86, abajo 87
 pub const BAR_POS_TOP: u32 = 86;
 pub const BAR_POS_BOTTOM: u32 = 87;
@@ -1110,6 +1112,7 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_CARD_HOVER => card::toggle_opt(card::OPT_HOVER),
         BAR_CARD_GLANCE => card::toggle_opt(card::OPT_GLANCE),
         BAR_SOLID => toggle_solid_bar(),
+        BAR_NOTE => notes::toggle(),
         BAR_POMODORO => if live::POMO.load(Ordering::Relaxed) != 0 { live::timer_stop() } else { live::pomodoro_start() },
         BAR_POS_TOP => set_bar_bottom(false),
         BAR_POS_BOTTOM => set_bar_bottom(true),
@@ -3082,6 +3085,16 @@ fn main() {
     if std::env::args().any(|a| a == "--statusline") { statusline_mode(); return; }
     // Prueba del cuentagotas: `macbar --picker` lo abre y escribe el color elegido (nada si se cancela)
     if std::env::args().any(|a| a == "--picker") { if let Some((r, g, b)) = picker::pick() { println!("#{r:02X}{g:02X}{b:02X}"); } return; }
+    // Prueba de la nota: `macbar --nota` la abre con un bucle de mensajes mínimo (sale al cerrarla)
+    if std::env::args().any(|a| a == "--nota") {
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            notes::toggle();
+            let mut msg = MSG::default();
+            while notes::is_open() && GetMessageW(&mut msg, None, 0, 0).as_bool() { let _ = TranslateMessage(&msg); DispatchMessageW(&msg); }
+        }
+        return;
+    }
     // Si algo falla (panic), queda escrito dónde, antes de que el proceso se cierre
     std::panic::set_hook(Box::new(|info| {
         let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
