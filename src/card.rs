@@ -112,7 +112,7 @@ impl Drop for Surface {
     fn drop(&mut self) { unsafe { SelectObject(self.dc, self.old); let _ = DeleteObject(self.bmp.into()); let _ = DeleteDC(self.dc); } }
 }
 
-struct CardFonts { title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
+struct CardFonts { title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
     // Los de la isla (para el primer y el último fotograma, idénticos a los de la barra)
     i_title: IDWriteTextFormat, i_small: IDWriteTextFormat, i_icon: IDWriteTextFormat }
 
@@ -157,7 +157,7 @@ struct Card {
     // Ratón
     hover: Option<u8>,
     pressed: Option<u8>,
-    glow: [f32; 5],
+    glow: [f32; 8],
     hits: Vec<(D2D_RECT_F, u8)>,
     outside_since: Option<Instant>,
     empty_since: Option<Instant>,
@@ -172,6 +172,17 @@ struct Card {
     lines: (String, f32, Vec<String>),
     play: (bool, Instant),
     last: Instant,
+    /// Arrastrando la barra de progreso: fracción (0..1) bajo el ratón.
+    drag: Option<f32>,
+    /// Barra de progreso «activa» (ratón encima o arrastrando): engorda y sale el círculo.
+    bar_k: f32,
+    bar_at: Instant,
+    /// Tras un salto, la posición que se enseña mientras el reproductor se pone al día.
+    hold: Option<(f32, Instant)>,
+    /// Extremos de la barra de progreso (DIP) y duración, para convertir el ratón en tiempo.
+    bar_span: (f32, f32, f32),
+    /// Ventana que tenía el foco antes de abrir (se le devuelve al cerrar).
+    prev_fg: HWND,
 }
 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
@@ -202,15 +213,16 @@ fn ensure() -> Option<()> {
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         let mk = |fam, size, wt| make_format(&dw, fam, size, wt);
         let f = CardFonts {
-            title: mk(FONT, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), sub: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_NORMAL), small: mk(FONT, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            title: mk(FONT, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), sub: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_NORMAL), small: mk(FONT, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), tiny: mk(FONT, 8.5, DWRITE_FONT_WEIGHT_BOLD),
             icon: mk(ICONS, 17.0, DWRITE_FONT_WEIGHT_NORMAL), icon_l: mk(ICONS, 24.0, DWRITE_FONT_WEIGHT_NORMAL),
             i_title: mk(FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), i_small: mk(FONT, 11.5, DWRITE_FONT_WEIGHT_NORMAL), i_icon: mk(ICONS, 12.5, DWRITE_FONT_WEIGHT_NORMAL),
         };
         let old = Instant::now() - Duration::from_secs(5);
         let c = Card { hwnd, fac, rt: None, surf: None, dw, cache: RefCell::new(Caches::default()), f, win: (0, 0, 1, 1), off: (0, 0), s: 1.0, bottom: false,
-            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 5], hits: Vec::new(),
+            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 8], hits: Vec::new(),
             outside_since: None, empty_since: None, btn_prev: (false, false, false), art: None, art_at: old, art_k: 1.0, shown_title: Default::default(), prev_title: Default::default(),
-            title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now() };
+            title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
+            drag: None, bar_k: 0.0, bar_at: old, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default() };
         CARD.with(|x| *x.borrow_mut() = Some(c));
     }
     Some(())
@@ -266,6 +278,8 @@ pub fn open(origin: Origin) {
         // Lo pulsado ahora mismo (el clic que la abrió) no cuenta como «clic fuera»
         c.btn_prev = (true, true, true);
         c.last = Instant::now();
+        c.drag = None;
+        c.hold = None;
         Some(c.hwnd)
     });
     let Some(hwnd) = hwnd else { return };
@@ -277,13 +291,19 @@ pub fn open(origin: Origin) {
         let _ = InvalidateRect(Some(bar_hwnd()), None, false);
         SetTimer(Some(hwnd), TIMER_POLL, 30, None);
         SetTimer(Some(hwnd), TIMER_ANIM, 15, None);
+        // Abierta con clic: recibe el teclado (espacio, flechas, Esc); al cerrar devuelve el foco
+        if origin == Origin::Click {
+            let fg = GetForegroundWindow();
+            CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.prev_fg = if fg == hwnd { c.prev_fg } else { fg }; });
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 }
 
 /// Cierra la tarjeta: vuelve a encogerse hasta la isla. Algunos motivos la quitan al momento.
 pub fn close(why: Why) {
     let instant = matches!(why, Why::Fullscreen | Why::BarMoved);
-    let hwnd = CARD.with(|c| c.borrow_mut().as_mut().filter(|c| c.open).map(|c| { c.open = false; c.closed_at = Instant::now(); c.pressed = None; c.hwnd }));
+    let hwnd = CARD.with(|c| c.borrow_mut().as_mut().filter(|c| c.open).map(|c| { c.open = false; c.closed_at = Instant::now(); c.pressed = None; c.drag = None; c.hwnd }));
     let Some(hwnd) = hwnd else { return };
     if instant { finish(hwnd); return; }
     unsafe { SetTimer(Some(hwnd), TIMER_ANIM, 15, None); }
@@ -292,7 +312,10 @@ pub fn close(why: Why) {
 /// Fin del cierre: la barra vuelve a pintar la isla y, después, se oculta la tarjeta.
 fn finish(hwnd: HWND) {
     OWNS.store(false, Ordering::Relaxed);
+    let prev = CARD.with(|c| c.borrow_mut().as_mut().map(|c| std::mem::take(&mut c.prev_fg))).unwrap_or_default();
     unsafe {
+        if GetForegroundWindow() == hwnd && !prev.0.is_null() && IsWindow(Some(prev)).as_bool() { let _ = SetForegroundWindow(prev); }
+        if GetCapture() == hwnd { let _ = ReleaseCapture(); }
         let _ = InvalidateRect(Some(bar_hwnd()), None, false);
         let _ = UpdateWindow(bar_hwnd());
         let _ = ShowWindow(hwnd, SW_HIDE);
@@ -373,6 +396,42 @@ fn draw_art(rt: &ID2D1RenderTarget, bmp: &ID2D1Bitmap, x: f32, y: f32, size: f32
     }
 }
 
+/// Flecha circular con «15» dentro (saltar 15 s atrás o adelante), como la de los reproductores de iOS.
+fn skip_icon(rt: &ID2D1RenderTarget, fac: &ID2D1Factory, p: &Painter, f: &IDWriteTextFormat, cx: f32, cy: f32, back: bool, b: &ID2D1Brush) {
+    let r = 9.5;
+    // Hacia delante la flecha va en el sentido del reloj y acaba arriba a la izquierda; hacia atrás, en espejo
+    let mx = |x: f32| if back { 2.0 * cx - x } else { x };
+    let at = |deg: f32| { let a = deg.to_radians(); Vector2 { X: mx(cx + r * a.cos()), Y: cy + r * a.sin() } };
+    unsafe {
+        if let Ok(geo) = fac.CreatePathGeometry() {
+            if let Ok(sk) = geo.Open() {
+                sk.BeginFigure(at(-62.0), D2D1_FIGURE_BEGIN_HOLLOW);
+                sk.AddArc(&D2D1_ARC_SEGMENT { point: at(245.0), size: D2D_SIZE_F { width: r, height: r }, rotationAngle: 0.0,
+                    sweepDirection: if back { D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE } else { D2D1_SWEEP_DIRECTION_CLOCKWISE }, arcSize: D2D1_ARC_SIZE_LARGE });
+                sk.EndFigure(D2D1_FIGURE_END_OPEN);
+                let _ = sk.Close();
+                rt.DrawGeometry(&geo, b, 1.6, None);
+            }
+        }
+        // Punta de flecha en el extremo, siguiendo la tangente
+        let a = 245.0_f32.to_radians();
+        let tip0 = at(245.0);
+        let (tx, ty) = (-a.sin() * if back { -1.0 } else { 1.0 }, a.cos());
+        let (nx, ny) = (-ty, tx);
+        if let Ok(geo) = fac.CreatePathGeometry() {
+            if let Ok(sk) = geo.Open() {
+                sk.BeginFigure(Vector2 { X: tip0.X + tx * 3.6, Y: tip0.Y + ty * 3.6 }, D2D1_FIGURE_BEGIN_FILLED);
+                sk.AddLines(&[Vector2 { X: tip0.X + nx * 3.0 - tx * 0.6, Y: tip0.Y + ny * 3.0 - ty * 0.6 }, Vector2 { X: tip0.X - nx * 3.0 - tx * 0.6, Y: tip0.Y - ny * 3.0 - ty * 0.6 }]);
+                sk.EndFigure(D2D1_FIGURE_END_CLOSED);
+                let _ = sk.Close();
+                rt.FillGeometry(&geo, b, None);
+            }
+        }
+    }
+    let w = p.width(f, "15");
+    txt(p, f, "15", cx - w / 2.0, cy - 6.0, 12.5, b);
+}
+
 /// Pinta un fotograma y lo sube a la ventana. Devuelve true mientras algo se mueve.
 fn render() -> bool {
     let mut done: Option<HWND> = None;
@@ -423,18 +482,29 @@ fn render() -> bool {
             }
             let tt = (m.title.clone(), m.artist.clone());
             if c.shown_title.0.is_empty() { c.shown_title = tt.clone(); }
-            if c.shown_title != tt { c.prev_title = std::mem::replace(&mut c.shown_title, tt); c.title_at = now; }
+            if c.shown_title != tt {
+                c.prev_title = std::mem::replace(&mut c.shown_title, tt);
+                c.title_at = now;
+                // Canción nueva a mitad de un arrastre: se cancela (el salto sería en otra canción)
+                c.drag = None;
+                c.hold = None;
+                c.pressed = None;
+            }
             if c.play.0 != m.playing { c.play = (m.playing, now); }
         }
         let playing = media.as_ref().is_some_and(|m| m.playing);
         // En pausa la carátula se encoge un poco (como en el iPhone)
         moving |= ease_to(&mut c.art_k, if playing || media.is_none() { 1.0 } else { 0.92 }, 0.12, dt);
         // Brillo de «ratón encima» de cada botón
-        for i in 0..5 {
+        for i in 0..8 {
             let t = if c.hover == Some(i as u8) { 1.0 } else { 0.0 };
             let tau = if t > c.glow[i] { 0.05 } else { 0.12 };
             moving |= ease_to(&mut c.glow[i], t, tau, dt);
         }
+        // Barra de progreso activa (ratón encima o arrastrando): engorda y sale el círculo
+        moving |= ease_to(&mut c.bar_k, if c.hover == Some(5) || c.drag.is_some() { 1.0 } else { 0.0 }, 0.07, dt);
+        if c.hold.is_some_and(|h| h.1.elapsed().as_secs_f32() > 1.6) { c.hold = None; }
+        let can_seek = media.as_ref().is_some_and(|m| CAN_SEEK.load(Ordering::Relaxed) && *SEEK_BAD_FOR.lock().unwrap() != m.title) && media_secs(false).is_some();
         let (tint, eq) = GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().map(|g| (g.tint_now, g.eq)))).unwrap_or(([1.0; 3], [0.0; 5]));
 
         let sh = shape(c, isl_w);
@@ -566,15 +636,36 @@ fn render() -> bool {
                     let y = ct + 112.0 + lift(k2);
                     match media_secs(m.playing) {
                         Some((pos, dur)) => {
+                            // Arrastrando: el tiempo de destino; tras un salto: el destino mientras el reproductor se pone al día
+                            let pos = match (c.drag, c.hold) {
+                                (Some(fr), _) => fr * dur,
+                                (None, Some((t, at))) => (t + if m.playing { at.elapsed().as_secs_f32() } else { 0.0 }).min(dur),
+                                _ => pos,
+                            };
                             let el = fmt_time(pos);
                             let rem = format!("-{}", fmt_time(dur - pos));
-                            txt(&p, &c.f.small, &el, cl + 16.0, y - 8.0, 16.0, &wa(0.55 * k2));
+                            let tb = wa((0.55 + 0.35 * c.bar_k) * k2);
+                            txt(&p, &c.f.small, &el, cl + 16.0, y - 8.0, 16.0, &tb);
                             let rw = p.width(&c.f.small, &rem);
-                            txt(&p, &c.f.small, &rem, cl + CARD_W - 16.0 - rw, y - 8.0, 16.0, &wa(0.55 * k2));
+                            txt(&p, &c.f.small, &rem, cl + CARD_W - 16.0 - rw, y - 8.0, 16.0, &tb);
                             let (l, r) = (cl + 16.0 + 40.0, cl + CARD_W - 16.0 - 44.0);
+                            c.bar_span = (l, r, dur);
                             let fr = (pos / dur.max(0.1)).clamp(0.0, 1.0);
-                            rt.FillRoundedRectangle(&rrect(rect(l, y - 2.0, r, y + 2.0), 2.0), &wa(0.18 * k2));
-                            if fr > 0.0 { rt.FillRoundedRectangle(&rrect(rect(l, y - 2.0, (l + (r - l) * fr).max(l + 4.0), y + 2.0), 2.0), &wa(0.9 * k2)); }
+                            // Engorda de 4 a 8 DIP al pasar el ratón (solo si se puede saltar)
+                            let bh = 2.0 + if can_seek { 2.0 * c.bar_k } else { 0.0 };
+                            rt.FillRoundedRectangle(&rrect(rect(l, y - bh, r, y + bh), bh), &wa(0.18 * k2));
+                            let fx = (l + (r - l) * fr).max(l + bh * 2.0);
+                            if fr > 0.0 { rt.FillRoundedRectangle(&rrect(rect(l, y - bh, fx, y + bh), bh), &wa(0.9 * k2)); }
+                            if can_seek {
+                                // El círculo de arrastre aparece con un pop
+                                let kr = 6.5 * ease_back(c.bar_k);
+                                if kr > 0.3 {
+                                    let e = D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y }, radiusX: kr, radiusY: kr };
+                                    rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y + 1.0 }, radiusX: kr + 0.5, radiusY: kr + 0.5 }, &p.brush(rgba(0.0, 0.0, 0.0, 0.35 * k2)));
+                                    rt.FillEllipse(&e, &wa(k2));
+                                }
+                                if k2 > 0.9 && c.open { hits.push((rect(l - 8.0, y - 11.0, r + 8.0, y + 11.0), 5)); }
+                            }
                         }
                         None => {
                             let wb = p.brush(rgba(tint[0], tint[1], tint[2], 0.96 * k2));
@@ -601,6 +692,21 @@ fn render() -> bool {
                         glyph_c(&p, if big { &c.f.icon_l } else { &c.f.icon }, gl, bx, y, &wa(if en { 0.96 } else { 0.25 } * k3));
                         rt.SetTransform(&base);
                         if en && k3 > 0.9 && c.open { hits.push((rect(bx - r, y - r, bx + r, y + r), id)); }
+                    }
+                    // -15 s / +15 s: solo si el reproductor deja saltar
+                    if can_seek {
+                        for (id, dx, back) in [(6u8, -118.0, true), (7, 118.0, false)] {
+                            let bx = ccx + dx;
+                            let gk = c.glow[id as usize];
+                            if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: bx, Y: y }, radiusX: 16.0, radiusY: 16.0 }, &wa(0.10 * gk * k3)); }
+                            let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.88 } else { 1.0 };
+                            let mut base = Matrix3x2::default();
+                            rt.GetTransform(&mut base);
+                            if sc < 0.999 { rt.SetTransform(&(Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: bx * (1.0 - sc), M32: y * (1.0 - sc) } * base)); }
+                            skip_icon(&rt, &c.fac, &p, &c.f.tiny, bx, y, back, &wa(0.9 * k3));
+                            rt.SetTransform(&base);
+                            if k3 > 0.9 && c.open { hits.push((rect(bx - 16.0, y - 16.0, bx + 16.0, y + 16.0), id)); }
+                        }
                     }
                 }
             } else {
@@ -661,12 +767,41 @@ fn poll() {
         // En la prueba visual (MACBAR_CARDTEST) el ratón no está encima: cuenta como dentro
         let inside = inside || std::env::var_os("MACBAR_CARDTEST").is_some();
         should_close(&Watch {
-            origin: c.origin, inside, outside_ms: ms(c.outside_since), dragging: c.pressed.is_some() && l,
+            origin: c.origin, inside, outside_ms: ms(c.outside_since), dragging: c.drag.is_some(),
             click_outside: pressed_now && !inside, escape, fullscreen: crate::fullscreen(), other_panel: other,
             has_content: has, empty_ms: ms(c.empty_since),
         })
     });
     if let Some(w) = why { close(w); }
+}
+
+/// Fracción (0..1) de la barra de progreso bajo el ratón.
+fn bar_frac(lp: LPARAM) -> f32 {
+    CARD.with(|cc| cc.borrow().as_ref().map(|c| {
+        let x = (lp.0 & 0xFFFF) as i16 as f32 / c.s;
+        let (l, r, _) = c.bar_span;
+        if r > l { ((x - l) / (r - l)).clamp(0.0, 1.0) } else { 0.0 }
+    }).unwrap_or(0.0))
+}
+
+/// Posición que se ve ahora (con el salto pendiente si lo hay), en segundos, y la duración.
+fn shown_pos() -> Option<(f32, f32)> {
+    let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
+    let (pos, dur) = media_secs(playing)?;
+    let hold = CARD.with(|c| c.borrow().as_ref().and_then(|c| c.hold));
+    Some((hold.map(|(t, at)| t + if playing { at.elapsed().as_secs_f32() } else { 0.0 }).unwrap_or(pos).min(dur), dur))
+}
+
+/// Salta `d` segundos (atrás si es negativo) desde lo que se ve.
+fn jump(d: f32) {
+    let Some((pos, dur)) = shown_pos() else { return };
+    let t = (pos + d).clamp(0.0, (dur - 1.0).max(0.0));
+    seek_to(t);
+    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.hold = Some((t, Instant::now())); });
+}
+
+fn can_seek_now() -> bool {
+    MEDIA.lock().unwrap().as_ref().is_some_and(|m| CAN_SEEK.load(Ordering::Relaxed) && *SEEK_BAD_FOR.lock().unwrap() != m.title) && media_secs(false).is_some()
 }
 
 fn hit_at(lp: LPARAM) -> Option<u8> {
@@ -703,6 +838,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_MOUSEMOVE => {
+                // Arrastrando la barra de progreso: sigue al ratón aunque se salga de ella
+                let dragging = CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.drag.is_some()));
+                if dragging {
+                    let fr = bar_frac(lp);
+                    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.drag = Some(fr); });
+                    SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
+                    return LRESULT(0);
+                }
                 let h = hit_at(lp);
                 let ch = CARD.with(|c| c.borrow_mut().as_mut().map(|c| { let x = c.hover != h; c.hover = h; x }).unwrap_or(false));
                 if ch { SetTimer(Some(hwnd), TIMER_ANIM, 1, None); }
@@ -718,26 +861,68 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_LBUTTONDOWN => {
                 let h = hit_at(lp);
                 CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.pressed = h; });
+                if h == Some(5) {
+                    let fr = bar_frac(lp);
+                    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.drag = Some(fr); });
+                    SetCapture(hwnd);
+                }
                 SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
                 let pressed = CARD.with(|c| c.borrow_mut().as_mut().and_then(|c| c.pressed.take()));
+                // Fin del arrastre: salta adonde se soltó
+                let drag = CARD.with(|c| c.borrow_mut().as_mut().and_then(|c| c.drag.take().map(|fr| (fr, c.bar_span.2))));
+                if let Some((fr, dur)) = drag {
+                    if GetCapture() == hwnd { let _ = ReleaseCapture(); }
+                    let t = fr * dur;
+                    seek_to(t);
+                    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.hold = Some((t, Instant::now())); });
+                    SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
+                    return LRESULT(0);
+                }
                 let h = hit_at(lp);
                 match h.filter(|h| Some(*h) == pressed) {
                     Some(1) => media(Cmd::Prev),
                     Some(2) => media(Cmd::Toggle),
                     Some(3) => media(Cmd::Next),
+                    Some(6) => jump(-15.0),
+                    Some(7) => jump(15.0),
                     Some(4) => { if let Some(m) = MEDIA.lock().unwrap().clone() { open_player(&m.app); } close(Why::Toggle); }
                     _ => if h.is_none() && pressed.is_none() && in_island_band(lp) { close(Why::Toggle); },
                 }
                 SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
                 LRESULT(0)
             }
+            // Con el foco (abierta con clic): espacio pausa, flechas saltan 5 s o cambian el volumen, Esc cierra
+            WM_KEYDOWN => {
+                match VIRTUAL_KEY(wp.0 as u16) {
+                    VK_SPACE => media(Cmd::Toggle),
+                    VK_LEFT if can_seek_now() => jump(-5.0),
+                    VK_RIGHT if can_seek_now() => jump(5.0),
+                    VK_UP => live::nudge_volume(3),
+                    VK_DOWN => live::nudge_volume(-3),
+                    VK_ESCAPE => close(Why::Escape),
+                    _ => {}
+                }
+                SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
+                LRESULT(0)
+            }
+            WM_CAPTURECHANGED => {
+                // Si otro se queda el ratón a mitad del arrastre, se cancela sin saltar
+                if lp.0 != hwnd.0 as isize { CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.drag = None; c.pressed = None; }); }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
             WM_DISPLAYCHANGE | WM_DPICHANGED => { close(Why::BarMoved); LRESULT(0) }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
+}
+
+/// Prueba visual: simula el ratón encima de un botón (sin pulsarlo).
+pub fn test_hover(id: Option<u8>) {
+    let h = CARD.with(|c| c.borrow_mut().as_mut().map(|c| { c.hover = id; c.hwnd }));
+    if let Some(h) = h { unsafe { SetTimer(Some(h), TIMER_ANIM, 1, None); } }
 }
 
 /// Cuando cambia la música, la tarjeta abierta se repinta.

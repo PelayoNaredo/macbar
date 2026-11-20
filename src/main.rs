@@ -331,6 +331,20 @@ static WEATHER: Mutex<Option<Weather>> = Mutex::new(None);
 static CMD_TX: OnceLock<Sender<Cmd>> = OnceLock::new();
 /// Línea de tiempo de la canción: (posición, duración, cuándo se midió), en unidades de 100 ns.
 static TIMELINE: Mutex<Option<(i64, i64, i64)>> = Mutex::new(None);
+/// ¿El reproductor dice que deja saltar a otro punto de la canción?
+static CAN_SEEK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+/// Canción en la que un salto falló (ahí ya no se ofrecen).
+static SEEK_BAD_FOR: Mutex<String> = Mutex::new(String::new());
+
+/// Hora del sistema en unidades de 100 ns (la misma escala que la línea de tiempo).
+fn filetime_now() -> i64 { unsafe { let f = windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime(); ((f.dwHighDateTime as i64) << 32) | f.dwLowDateTime as i64 } }
+
+/// Salta a `secs` de la canción y lo refleja al momento en la línea de tiempo (sin esperar al reproductor).
+fn seek_to(secs: f32) {
+    let t = (secs.max(0.0) * 1e7) as i64;
+    if let Some(tl) = TIMELINE.lock().unwrap().as_mut() { *tl = (t.min(tl.1), tl.1, filetime_now()); }
+    media(Cmd::Seek(t));
+}
 
 /// Progreso 0..1 de la canción, avanzando solo mientras suena.
 fn media_progress(playing: bool) -> Option<f32> {
@@ -781,8 +795,16 @@ fn media_thread(rx: Receiver<Cmd>) {
                         Cmd::Toggle => s.TryTogglePlayPauseAsync().and_then(|o| o.join()),
                         Cmd::Next => s.TrySkipNextAsync().and_then(|o| o.join()),
                         Cmd::Prev => s.TrySkipPreviousAsync().and_then(|o| o.join()),
-                        // Ir a un punto de la canción (en unidades de 100 ns), si el reproductor lo admite
-                        Cmd::Seek(t) => s.TryChangePlaybackPositionAsync(t).and_then(|o| o.join()),
+                        // Ir a un punto de la canción (en unidades de 100 ns), si el reproductor lo admite.
+                        // Si dice que no, la tarjeta deja de ofrecer saltos en esta canción
+                        Cmd::Seek(t) => {
+                            let r = s.TryChangePlaybackPositionAsync(t).and_then(|o| o.join());
+                            if !matches!(r, Ok(true)) && !sys::demo() {
+                                let title = MEDIA.lock().unwrap().as_ref().map(|m| m.title.clone()).unwrap_or_default();
+                                *SEEK_BAD_FOR.lock().unwrap() = title;
+                            }
+                            r
+                        }
                     };
                 }
                 std::thread::sleep(Duration::from_millis(250));
@@ -839,6 +861,7 @@ fn media_thread(rx: Receiver<Cmd>) {
             let ctl = pi.Controls().ok();
             let can_prev = ctl.as_ref().and_then(|c| c.IsPreviousEnabled().ok()).unwrap_or(true);
             let can_next = ctl.as_ref().and_then(|c| c.IsNextEnabled().ok()).unwrap_or(true);
+            CAN_SEEK.store(ctl.as_ref().and_then(|c| c.IsPlaybackPositionEnabled().ok()).unwrap_or(true), Ordering::Relaxed);
             let app = s.SourceAppUserModelId().map(|h| h.to_string()).unwrap_or_default();
             Some((p, title, artist, playing, app, can_prev, can_next, album))
         })();
@@ -2641,7 +2664,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_CARDTEST => { if wp.0 == 1 { card::open(card::Origin::Click); } else { card::close(card::Why::Toggle); } LRESULT(0) }
+            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
@@ -3098,7 +3121,11 @@ fn main() {
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(3));
                 unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(1), LPARAM(0)); }
-                std::thread::sleep(Duration::from_secs(4));
+                std::thread::sleep(Duration::from_millis(1500));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(2), LPARAM(5)); }
+                std::thread::sleep(Duration::from_millis(1000));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(2), LPARAM(7)); }
+                std::thread::sleep(Duration::from_millis(1500));
                 unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(0), LPARAM(0)); }
             });
         }
