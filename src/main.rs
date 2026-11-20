@@ -37,6 +37,7 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
+mod basket;
 mod calendar;
 mod card;
 mod ccenter;
@@ -3225,6 +3226,8 @@ fn main() {
         DragAcceptFiles(hwnd, true);
         // Arrastrar con OLE: además de soltar, avisa al entrar (la tarjeta se abre en la bandeja)
         dnd::register(hwnd, false);
+        // Agitar el ratón mientras se arrastran archivos: aparece una cesta junto al cursor
+        basket::start();
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
@@ -3249,6 +3252,9 @@ fn main() {
         bar_ink_thread();
         hang_watch();
         search_extra::clip_start();
+        if std::env::var_os("MACBAR_BASKETTEST").is_some() {
+            std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2500)); basket::test_show(1100, 500); });
+        }
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
         if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "5") {
             // Variante para medir el consumo: abierta y quieta 20 s

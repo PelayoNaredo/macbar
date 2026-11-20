@@ -14,10 +14,10 @@ fn hdrop_format() -> FORMATETC {
     FORMATETC { cfFormat: 15 /* CF_HDROP */, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 }
 }
 
-fn has_files(d: &IDataObject) -> bool { unsafe { d.QueryGetData(&hdrop_format()) == windows::Win32::Foundation::S_OK } }
+pub(crate) fn has_files(d: &IDataObject) -> bool { unsafe { d.QueryGetData(&hdrop_format()) == windows::Win32::Foundation::S_OK } }
 
 /// Rutas de los archivos que trae el objeto arrastrado.
-fn paths_of(d: &IDataObject) -> Vec<String> {
+pub(crate) fn paths_of(d: &IDataObject) -> Vec<String> {
     let mut out = Vec::new();
     unsafe {
         let Ok(mut med) = d.GetData(&hdrop_format()) else { return out };
