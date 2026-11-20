@@ -393,4 +393,6 @@ pub static EN: &[(&str, &str)] = &[
     ("Cafeína", "Caffeine"),
     ("Color", "Color"),
     ("Captura", "Capture"),
+    ("Procesador al {} %", "CPU at {} %"),
+    ("Barra sólida con ventanas maximizadas", "Solid bar with maximized windows"),
 ];

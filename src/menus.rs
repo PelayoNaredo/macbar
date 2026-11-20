@@ -356,7 +356,8 @@ pub fn bar_menu() -> Menu {
     m.sep().info(t("Posición de la barra"));
     let b = crate::bar_bottom();
     m.check(format!("      {}", t("Arriba")), !b, A::Bar(crate::BAR_POS_TOP))
-        .check(format!("      {}", t("Abajo")), b, A::Bar(crate::BAR_POS_BOTTOM));
+        .check(format!("      {}", t("Abajo")), b, A::Bar(crate::BAR_POS_BOTTOM))
+        .check(format!("      {}", t("Barra sólida con ventanas maximizadas")), crate::solid_bar(), A::Bar(crate::BAR_SOLID));
     // Idioma de la interfaz
     m.sep().info(t("Idioma"));
     let lm = crate::i18n::mode();

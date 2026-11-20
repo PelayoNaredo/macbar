@@ -158,7 +158,7 @@ fn hud_value(h: live::Hud) -> f32 {
     match h {
         Volume(v, m) => if m { 0.0 } else { v },
         Bright(b) => b,
-        Power(pc, _) | LowBat(pc) | Claude(pc) | Mem(pc) | Disk(pc) => pc as f32 / 100.0,
+        Power(pc, _) | LowBat(pc) | Claude(pc) | Mem(pc) | Cpu(pc) | Disk(pc) => pc as f32 / 100.0,
         Full => 1.0,
         _ => 0.0,
     }
@@ -307,6 +307,8 @@ struct Card {
     hud_val: f32,
     /// Windows tiene las animaciones desactivadas (se mira al abrir).
     reduced: bool,
+    /// Deslizar en horizontal: acumulado, último movimiento y último cambio de pestaña.
+    swipe: (i32, Instant, Instant),
 }
 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
@@ -351,7 +353,7 @@ fn ensure() -> Option<()> {
             title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
             drag: None, bar_k: 0.0, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default(),
             tab: Tab::Media, tab_prev: None, tab_x: f32::NAN, roll: Roll::default(),
-            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false, hud_last: None, hud_k: 0.0, hud_val: 0.0, reduced: false };
+            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false, hud_last: None, hud_k: 0.0, hud_val: 0.0, reduced: false, swipe: (0, old, old) };
         CARD.with(|x| *x.borrow_mut() = Some(c));
         // Soltar archivos sobre la tarjeta: a la bandeja
         dnd::register(hwnd, true);
@@ -1374,6 +1376,14 @@ fn jump(d: f32) {
     CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.hold = Some((t, Instant::now())); });
 }
 
+/// Pestañas con algo que enseñar ahora (y la actual), en su orden.
+fn tabs_now(cur: Tab) -> Vec<Tab> {
+    let media = MEDIA.lock().unwrap().is_some();
+    let timer = live::timer_left().is_some() || live::LAST_DONE.lock().unwrap().is_some();
+    let shelf = !live::SHELF.lock().unwrap().is_empty();
+    [Tab::Media, Tab::Timer, Tab::Shelf, Tab::Glance].into_iter().filter(|t| *t == cur || match t { Tab::Media => media, Tab::Timer => timer, Tab::Shelf => shelf, Tab::Glance => false }).collect()
+}
+
 /// Cambia de pestaña con su fundido hacia el lado que toca.
 fn switch_tab(t: Tab) {
     CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() {
@@ -1522,6 +1532,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_RBUTTONUP => {
                 if let Some(i @ 32..=39) = hit_at(lp) { item_menu(hwnd, (i - 32) as usize); }
+                LRESULT(0)
+            }
+            // Deslizar en horizontal (dos dedos o rueda lateral): pestaña siguiente o anterior
+            0x020E /* WM_MOUSEHWHEEL */ => {
+                let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+                let to = CARD.with(|c| c.borrow_mut().as_mut().and_then(|c| {
+                    if c.swipe.1.elapsed() > Duration::from_millis(300) { c.swipe.0 = 0; }
+                    c.swipe.0 += d;
+                    c.swipe.1 = Instant::now();
+                    if c.swipe.0.abs() < 120 || c.swipe.2.elapsed() < Duration::from_millis(450) { return None; }
+                    let dir = c.swipe.0.signum();
+                    c.swipe = (0, Instant::now(), Instant::now());
+                    let tabs = tabs_now(c.tab);
+                    let i = tabs.iter().position(|t| *t == c.tab)? as i32 + dir;
+                    tabs.get(i as usize).copied().filter(|_| i >= 0)
+                }));
+                if let Some(t) = to { switch_tab(t); SetTimer(Some(hwnd), TIMER_ANIM, 1, None); }
+                LRESULT(0)
+            }
+            // Rueda normal: el volumen (como sobre la isla)
+            WM_MOUSEWHEEL => {
+                let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+                live::nudge_volume(if d > 0 { 1 } else { -1 } * (d.abs() / 120).max(1));
+                SetTimer(Some(hwnd), TIMER_ANIM, 1, None);
                 LRESULT(0)
             }
             // Con el foco (abierta con clic): espacio pausa, flechas saltan 5 s o cambian el volumen, Esc cierra

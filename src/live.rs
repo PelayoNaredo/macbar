@@ -17,7 +17,9 @@ pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(b
     Phone, CamOn, MicOn, Full, Saver(bool), Wifi, Disk(u8),
     /// Pomodoro: empieza un bloque (true = concentración, false = descanso) de tantos minutos;
     /// cafeína encendida o apagada; color copiado con el cuentagotas
-    Pomo(bool, u8), Caffeine(bool), Color(u32) }
+    Pomo(bool, u8), Caffeine(bool), Color(u32),
+    /// Procesador por encima del umbral durante dos minutos seguidos
+    Cpu(u8) }
 
 /// Última notificación del móvil que se enseñó: (app, título)
 pub static PHONE_NOTE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
@@ -581,6 +583,11 @@ fn context_thread() {
     let mut last_hkl = 0isize;
     let mut last_desk: Option<u8> = None;
     let mut mem_warned = false;
+    // Procesador: muestras cada 5 s; si pasa del umbral 2 min seguidos, avisa (y se rearma por debajo del 70 %)
+    let cpu_limit = sys::config_value("alerta_cpu").and_then(|v| v.parse::<u32>().ok()).unwrap_or(90);
+    let mut cpu_prev: Option<(u64, u64)> = None;
+    let mut cpu_high = 0u32;
+    let mut cpu_warned = false;
     let mut n = 0u32;
     loop {
         std::thread::sleep(Duration::from_millis(250));
@@ -609,6 +616,13 @@ fn context_thread() {
             }
         }
         last_desk = idx;
+        if n % 20 == 0 && cpu_limit > 0 {
+            if let Some(pct) = cpu_sample(&mut cpu_prev) {
+                if pct >= cpu_limit { cpu_high += 1; } else { cpu_high = 0; }
+                if cpu_high >= 24 && !cpu_warned { cpu_warned = true; show(Hud::Cpu(pct.min(100) as u8), 4000); }
+                if pct < 70 { cpu_warned = false; }
+            }
+        }
         // Memoria: avisa una vez al pasar del 90 % y se rearma al bajar del 80 %
         if n % 8 == 0 {
             let mut ms = windows::Win32::System::SystemInformation::MEMORYSTATUSEX { dwLength: std::mem::size_of::<windows::Win32::System::SystemInformation::MEMORYSTATUSEX>() as u32, ..Default::default() };
@@ -619,6 +633,18 @@ fn context_thread() {
             }
         }
     }
+}
+
+/// Uso del procesador (%) desde la muestra anterior (tiempos de reposo y totales del sistema).
+fn cpu_sample(prev: &mut Option<(u64, u64)>) -> Option<u32> {
+    let (mut idle, mut kern, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    unsafe { windows::Win32::System::Threading::GetSystemTimes(Some(&mut idle), Some(&mut kern), Some(&mut user)).ok()?; }
+    let v = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    // El tiempo de núcleo ya incluye el de reposo
+    let (i, t) = (v(idle), v(kern) + v(user));
+    let out = prev.map(|(pi, pt)| { let dt = t.saturating_sub(pt).max(1); 100 - (i.saturating_sub(pi) * 100 / dt).min(100) as u32 });
+    *prev = Some((i, t));
+    out
 }
 
 pub fn start() {

@@ -84,7 +84,7 @@ impl Mode {
             Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
-            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34,
+            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35,
         }
     }
 }
@@ -116,6 +116,7 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         Desk(..) => ("\u{E7C4}", trunc(&live::DESK_NAME.lock().unwrap(), 26), false),
         // Sin barra lineal: lleva un anillo radial pequeño a la derecha (ver Mode::Hud)
         Mem(_) => ("\u{E964}", i18n::t("Memoria casi llena").into(), false),
+        Cpu(pc) => ("\u{E950}", i18n::tf("Procesador al {} %", &[&pc]), false),
         Profile(i) => ("\u{E77B}", i18n::tf("Perfil «{}» guardado", &[&i18n::t(profiles::NAMES[(i as usize).min(2)])]), false),
         Phone => { let (app, title) = live::PHONE_NOTE.lock().unwrap().clone(); ("\u{E8EA}", trunc(&if app.is_empty() { title } else { format!("{app} · {title}") }, 38), false) }
         CamOn => ("\u{E722}", i18n::t("La cámara se está usando").into(), false),
@@ -163,6 +164,7 @@ pub const BAR_POMODORO: u32 = 90;
 pub const BAR_CARD_CLICK: u32 = 91;
 pub const BAR_CARD_HOVER: u32 = 92;
 pub const BAR_CARD_GLANCE: u32 = 93;
+pub const BAR_SOLID: u32 = 94;
 /// Posición: arriba 86, abajo 87
 pub const BAR_POS_TOP: u32 = 86;
 pub const BAR_POS_BOTTOM: u32 = 87;
@@ -199,6 +201,34 @@ const TIMER_GUARD: usize = 12;
 static FOCUS_TARGET: AtomicIsize = AtomicIsize::new(0);
 static KEEP_LEFT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// La ventana activa está maximizada en el monitor de la barra.
+static MAXED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// ¿Barra sólida con ventanas maximizadas? (config «barra_solida», por defecto sí)
+static SOLID: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+pub(crate) fn solid_bar() -> bool {
+    match SOLID.load(Ordering::Relaxed) {
+        2 => { let on = !sys::config_value("barra_solida").is_some_and(|v| v.eq_ignore_ascii_case("no")); SOLID.store(on as u8, Ordering::Relaxed); on }
+        v => v == 1,
+    }
+}
+
+fn toggle_solid_bar() {
+    let on = !solid_bar();
+    SOLID.store(on as u8, Ordering::Relaxed);
+    sys::set_config_value("barra_solida", if on { "si" } else { "no" });
+    unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); }
+}
+
+/// Mira si la ventana activa está maximizada en el monitor de la barra; si cambia, repinta.
+fn check_maxed(bar: HWND) {
+    let m = unsafe {
+        let fg = GetForegroundWindow();
+        !fg.0.is_null() && sys::window_pid(fg) != std::process::id() && IsZoomed(fg).as_bool() && !fullscreen()
+            && MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) == MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST)
+    };
+    if MAXED.swap(m, Ordering::Relaxed) != m { unsafe { let _ = InvalidateRect(Some(bar), None, false); } }
+}
 /// ¿Hay una app a pantalla completa? (juego, vídeo, F11). Entonces no se lee nada de otras apps ni de la pantalla.
 pub fn fullscreen() -> bool { FULLSCREEN.load(Ordering::Relaxed) }
 /// Fondo claro detrás de la barra: texto e iconos oscuros (lo decide `bar_ink_thread`).
@@ -458,6 +488,11 @@ struct Gfx {
     round_cap: Option<ID2D1StrokeStyle>,
     glide: (D2D_RECT_F, f32),
     clock_roll: Roll,
+    /// Barra sólida (0..1, animada) cuando hay una ventana maximizada.
+    solid_k: f32,
+    /// Deslizar en horizontal sobre la isla: acumulado, último movimiento y empujón visual (dirección, cuándo).
+    swipe: (i32, Instant, Instant),
+    nudge: (f32, Instant),
     timer_roll: std::cell::RefCell<Roll>,
     temp_roll: Roll,
     morph: HashMap<Act, Morph>,
@@ -1074,6 +1109,7 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_CARD_CLICK => card::toggle_opt(card::OPT_CLICK),
         BAR_CARD_HOVER => card::toggle_opt(card::OPT_HOVER),
         BAR_CARD_GLANCE => card::toggle_opt(card::OPT_GLANCE),
+        BAR_SOLID => toggle_solid_bar(),
         BAR_POMODORO => if live::POMO.load(Ordering::Relaxed) != 0 { live::timer_stop() } else { live::pomodoro_start() },
         BAR_POS_TOP => set_bar_bottom(false),
         BAR_POS_BOTTOM => set_bar_bottom(true),
@@ -1121,6 +1157,7 @@ fn run(a: Act) {
                 (Some(live::Hud::Shot), Some(p)) => sys::open(&p),
                 (Some(live::Hud::Phone), _) => sys::open("ms-phone:"),
                 (Some(live::Hud::Disk(_)), _) => sys::open("ms-settings:storagesense"),
+                (Some(live::Hud::Cpu(_) | live::Hud::Mem(_)), _) => sys::open_args("taskmgr.exe", ""),
                 (Some(live::Hud::Saver(_)), _) => sys::open("ms-settings:batterysaver"),
                 _ => {}
             }
@@ -1588,7 +1625,8 @@ fn paint(hwnd: HWND) {
             // Tinta de la barra: texto blanco sobre fondos oscuros; casi negro sobre fondos claros (con
             // un fundido al cambiar). La isla va siempre en blanco: su cápsula es negra.
             let bk = BAR_INK.with(|c| {
-                let to = if BAR_LIGHT.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+                // Con la barra sólida (ventana maximizada) el fondo es oscuro: tinta blanca
+                let to = if BAR_LIGHT.load(Ordering::Relaxed) && !(MAXED.load(Ordering::Relaxed) && solid_bar()) { 1.0 } else { 0.0 };
                 let mut v = c.get();
                 let step = (g.last_frame.elapsed().as_secs_f32()).min(1.0 / 30.0);
                 if (to - v).abs() > 0.004 { v += (to - v) * (1.0 - (-step / 0.18).exp()); } else { v = to; }
@@ -1648,6 +1686,19 @@ fn paint(hwnd: HWND) {
             // Sombra suave de arriba abajo para que el texto se lea sobre cualquier fondo
             let veil = p.vgrad(0.0, h, rgba(bk, bk, bk, 0.30 * (1.0 - bk) + 0.22 * bk), rgba(bk, bk, bk, 0.0));
             rt.FillRectangle(&rect(-1.0, -8.0, w + 1.0, h), &veil);
+            // Con una ventana maximizada, la barra se vuelve sólida y se une a ella (como macOS con apps a pantalla
+            // completa); vuelve a ser transparente sobre el escritorio
+            {
+                let to = if MAXED.load(Ordering::Relaxed) && solid_bar() { 1.0 } else { 0.0 };
+                let d = to - g.solid_k;
+                if d.abs() > 0.004 { g.solid_k += d * (1.0 - (-dt / 0.14).exp()); animating = true; } else { g.solid_k = to; }
+                if g.solid_k > 0.004 {
+                    let k = g.solid_k;
+                    rt.FillRectangle(&rect(-1.0, -8.0, w + 1.0, h + 1.0), &p.brush(rgba(0.075, 0.075, 0.085, 0.94 * k)));
+                    let line = if bar_bottom() { rect(0.0, 0.0, w, 1.0 / scale) } else { rect(0.0, h - 1.0 / scale, w, h) };
+                    rt.FillRectangle(&line, &p.brush(rgba(1.0, 1.0, 1.0, 0.07 * k)));
+                }
+            }
 
             // ============ IZQUIERDA: estilo menú de macOS (sin píldora, texto sobre la barra) ============
             // Logo de Windows suelto, en el lugar de la manzana
@@ -1748,7 +1799,7 @@ fn paint(hwnd: HWND) {
             let hud_target = match hud.or(g.last_hud) {
                 Some(live::Hud::Volume(v, m)) => if m { 0.0 } else { v },
                 Some(live::Hud::Bright(b)) => b,
-                Some(live::Hud::Power(pc, _)) | Some(live::Hud::LowBat(pc)) | Some(live::Hud::Claude(pc)) | Some(live::Hud::Mem(pc)) | Some(live::Hud::Disk(pc)) => pc as f32 / 100.0,
+                Some(live::Hud::Power(pc, _)) | Some(live::Hud::LowBat(pc)) | Some(live::Hud::Claude(pc)) | Some(live::Hud::Mem(pc)) | Some(live::Hud::Cpu(pc)) | Some(live::Hud::Disk(pc)) => pc as f32 / 100.0,
                 Some(live::Hud::Full) => 1.0,
                 _ => 0.0,
             };
@@ -1806,7 +1857,7 @@ fn paint(hwnd: HWND) {
             let mode_size = |m: Mode| -> (f32, f32) {
                 match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
                     let (_, l, bar) = hud_parts(h);
-                    let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Mem(_) => 26.0, _ => 0.0 };
+                    let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Mem(_) | live::Hud::Cpu(_) => 26.0, _ => 0.0 };
                     // Con barra: texto + hueco + barra (84) + hueco + porcentaje, para que nunca se pisen
                     let w = if bar { (38.0 + p.width(&g.f.title, &l) + 16.0 + 84.0 + 10.0 + p.width(&g.f.title, "100%") + 14.0).max(HUD_W) } else { (38.0 + p.width(&g.f.title, &l) + 18.0 + dots).max(170.0) }; (w, w) } }
             };
@@ -1844,7 +1895,9 @@ fn paint(hwnd: HWND) {
                 let ph = g.isl_mode_at.elapsed().as_secs_f32() % 1.6;
                 if ph < 0.55 { (ph * 42.0).sin() * 7.0 * (1.0 - ph / 0.55) } else { 0.0 }
             } else { 0.0 };
-            let ix = ((w - iw) / 2.0).round() + shake;
+            // Deslizar para cambiar de canción: la isla da un empujón hacia ese lado y vuelve
+            let nudge = { let e = g.nudge.1.elapsed().as_secs_f32(); if e < 0.4 { animating = true; g.nudge.0 * 9.0 * (e / 0.4 * std::f32::consts::PI).sin() * (1.0 - e / 0.4) } else { 0.0 } };
+            let ix = ((w - iw) / 2.0).round() + shake + nudge;
             let ir = rect(ix, py, ix + iw, pb);
             g.isl_rect = ir;
             // 0 = compacta, 1 = desplegada del todo (según el ancho real de ahora)
@@ -1866,7 +1919,7 @@ fn paint(hwnd: HWND) {
                     p.pill(ir_draw, &black, Some(&te));
                 } else if let Some(col) = match mode {
                     Mode::Hud(live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true)) => Some((1.0, 0.36, 0.33)),
-                    Mode::Hud(live::Hud::TimerDone | live::Hud::Mem(_) | live::Hud::Disk(_)) => Some((1.0, 0.62, 0.22)),
+                    Mode::Hud(live::Hud::TimerDone | live::Hud::Mem(_) | live::Hud::Cpu(_) | live::Hud::Disk(_)) => Some((1.0, 0.62, 0.22)),
                     Mode::Timer if timer.is_some_and(|(l, _)| l <= 10) && live::POMO.load(Ordering::Relaxed) == 0 => Some((1.0, 0.36, 0.33)),
                     _ => None,
                 } {
@@ -2045,7 +2098,7 @@ fn paint(hwnd: HWND) {
                             live::Hud::Pomo(false, _) => (&green, &green),
                             live::Hud::LowBat(_) | live::Hud::Net(false) | live::Hud::Mic(true) => (&red, &red),
                             live::Hud::Claude(pc) if pc >= 90 => (&orange, &orange),
-                            live::Hud::Mem(_) => (&orange, &orange),
+                            live::Hud::Mem(_) | live::Hud::Cpu(_) => (&orange, &orange),
                             _ => (&white, &white),
                         };
                         // El icono entra con un "pop" (crece con un pequeño rebote)
@@ -2088,7 +2141,7 @@ fn paint(hwnd: HWND) {
                             }
                         } else {
                             // Avisos de alerta: el icono late suavemente
-                            let alert = matches!(hh, live::Hud::LowBat(_) | live::Hud::Mic(true) | live::Hud::Mem(_) | live::Hud::Net(false) | live::Hud::TimerDone);
+                            let alert = matches!(hh, live::Hud::LowBat(_) | live::Hud::Mic(true) | live::Hud::Mem(_) | live::Hud::Cpu(_) | live::Hud::Net(false) | live::Hud::TimerDone);
                             if alert {
                                 let beat = 0.55 + 0.45 * (g.t0.elapsed().as_secs_f32() * 5.5).cos().abs();
                                 popup::push_alpha(&rt, beat);
@@ -2101,7 +2154,7 @@ fn paint(hwnd: HWND) {
                         let slide = if live { (1.0 - mode_k) * -6.0 } else { 0.0 };
                         p.text(&g.f.title, &lbl, ix + 38.0 + slide, &white, None);
                         // Memoria: anillo radial pequeño que se llena hasta el % de uso (hud_val ya viene animado)
-                        if matches!(hh, live::Hud::Mem(_)) {
+                        if matches!(hh, live::Hud::Mem(_) | live::Hud::Cpu(_)) {
                             let (rcx, rr, sw) = (ix + iw - 14.0 - 8.0, 7.0, 2.4);
                             let ring_bg = p.brush(rgba(1.0, 0.62, 0.22, 0.25));
                             rt.DrawEllipse(&D2D1_ELLIPSE { point: Vector2 { X: rcx, Y: cy }, radiusX: rr, radiusY: rr }, &ring_bg, sw, None);
@@ -2501,6 +2554,7 @@ fn refresh_avatar() {
 }
 
 fn refresh_foreground() {
+    check_maxed(bar_hwnd());
     let fg = unsafe { GetForegroundWindow() };
     // La propia barra (al abrir un menú) no cuenta como app activa
     // Ninguna ventana de la propia barra (menús, centro de control) cuenta como app activa
@@ -2625,7 +2679,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     return LRESULT(0);
                 }
                 if wp.0 == TIMER_RESERVE { let _ = KillTimer(Some(hwnd), TIMER_RESERVE); sync_fullscreen(hwnd); if !FULLSCREEN.load(Ordering::Relaxed) { reserve(hwnd); } return LRESULT(0); }
-                if wp.0 == TIMER_GUARD { guard(hwnd); return LRESULT(0); }
+                if wp.0 == TIMER_GUARD { guard(hwnd); check_maxed(hwnd); return LRESULT(0); }
                 if wp.0 == TIMER_COUNT {
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
@@ -2731,6 +2785,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 if (x - w / 2.0).abs() < 280.0 {
                     let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
                     live::nudge_volume(if d > 0 { 1 } else { -1 } * (d.abs() / 120).max(1));
+                }
+                LRESULT(0)
+            }
+            0x020E /* WM_MOUSEHWHEEL */ => {
+                let x = (lp.0 & 0xFFFF) as i16 as f32 / scale_of(hwnd);
+                let d = ((wp.0 >> 16) & 0xFFFF) as i16 as i32;
+                let m = MEDIA.lock().unwrap().clone();
+                let act = GFX.with(|g| g.borrow_mut().as_mut().and_then(|g| {
+                    let r = g.isl_rect;
+                    if m.is_none() || x < r.left - 24.0 || x > r.right + 24.0 { return None; }
+                    // Un gesto = un salto: se suma el desplazamiento y hay 600 ms de espera entre saltos
+                    if g.swipe.1.elapsed() > Duration::from_millis(300) { g.swipe.0 = 0; }
+                    g.swipe.0 += d;
+                    g.swipe.1 = Instant::now();
+                    if g.swipe.0.abs() < 120 || g.swipe.2.elapsed() < Duration::from_millis(600) { return None; }
+                    let dir = g.swipe.0.signum();
+                    g.swipe.0 = 0;
+                    g.swipe.2 = Instant::now();
+                    g.nudge = (dir as f32, Instant::now());
+                    Some(dir)
+                }));
+                if let (Some(dir), Some(m)) = (act, m) {
+                    if dir > 0 && m.can_next { media(Cmd::Next); } else if dir < 0 && m.can_prev { media(Cmd::Prev); }
+                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
                 LRESULT(0)
             }
@@ -3112,7 +3190,7 @@ fn main() {
             app_prev: String::new(), app_at: Instant::now() - Duration::from_secs(5),
             isl_mode: Mode::Idle, isl_prev: None, isl_mode_at: Instant::now() - Duration::from_secs(5),
             last_hud: None, hud_val: 0.0, count_on: false, eq_visible: false, last_ac: battery().map(|b| b.1), isl_v: 0.0, tray_rot: 0.0, shelf_bmps: (u64::MAX, Vec::new()), hud_bmp: None, usage_disp: 0.0, low_warned: 100, full_warned: true, saver: None, disk_warned: false,
-            art_tint: [1.0; 3], tint_now: [1.0; 3], art_at: Instant::now() - Duration::from_secs(5), desk_x: -1.0, glide: (D2D_RECT_F::default(), 0.0), clock_roll: Roll::default(), timer_roll: Default::default(), temp_roll: Roll::default(), morph: HashMap::new(), play_state: (false, Instant::now() - Duration::from_secs(5)),
+            art_tint: [1.0; 3], tint_now: [1.0; 3], art_at: Instant::now() - Duration::from_secs(5), desk_x: -1.0, glide: (D2D_RECT_F::default(), 0.0), clock_roll: Roll::default(), solid_k: 0.0, swipe: (0, Instant::now(), Instant::now() - Duration::from_secs(5)), nudge: (0.0, Instant::now() - Duration::from_secs(5)), timer_roll: Default::default(), temp_roll: Roll::default(), morph: HashMap::new(), play_state: (false, Instant::now() - Duration::from_secs(5)),
             round_cap,
         }));
 
