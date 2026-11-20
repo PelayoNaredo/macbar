@@ -43,6 +43,7 @@ mod ccenter;
 mod desk;
 mod deskdata;
 mod deskw;
+mod dnd;
 mod i18n;
 mod i18n_tabla;
 mod live;
@@ -371,7 +372,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard,
 }
 
 impl Act {
@@ -382,7 +383,7 @@ impl Act {
     /// Los menús de la derecha se alinean por su borde derecho.
     fn right_side(self) -> bool { matches!(self, Act::Battery | Act::User) }
     /// Botones dentro de la isla: su resaltado es un círculo pequeño, no una píldora de la barra.
-    fn in_island(self) -> bool { matches!(self, Act::Island | Act::OpenPlayer | Act::OpenYtm | Act::HudDismiss | Act::TimerOpen) }
+    fn in_island(self) -> bool { matches!(self, Act::Island | Act::OpenPlayer | Act::OpenYtm | Act::HudDismiss | Act::TimerOpen | Act::ShelfCard) }
 }
 
 // ---------------------------------------------------------------- estado de dibujo
@@ -1096,6 +1097,7 @@ fn run(a: Act) {
         Act::Search => search::toggle(),
         Act::TimerStop => live::timer_stop(),
         Act::Caffeine => live::caffeine_toggle(),
+        Act::ShelfCard => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)),
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
         Act::ShelfShare => {
@@ -2022,6 +2024,8 @@ fn paint(hwnd: HWND) {
                             if t > 0.9 && live { hits.push((rect(xx + 1.0, sy + 1.0, xx + 25.0, sb - 1.0), Act::ShelfClear)); }
                             rt.PopLayer();
                         }
+                        // El resto de la isla de la bandeja abre su pestaña en la tarjeta
+                        if live && card::click_opens() { hits.push((ir, Act::ShelfCard)); }
                     }
                     Mode::Hud(hh) => {
                         let (gl, lbl, has_bar) = hud_parts(hh);
@@ -2668,7 +2672,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), _ => card::close(card::Why::Toggle) } LRESULT(0) }
+            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
@@ -3096,6 +3100,8 @@ fn main() {
         position_appbar(hwnd);
         // Soltar archivos en la barra (bandeja del notch) y avisos al copiar
         DragAcceptFiles(hwnd, true);
+        // Arrastrar con OLE: además de soltar, avisa al entrar (la tarjeta se abre en la bandeja)
+        dnd::register(hwnd, false);
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 
@@ -3121,7 +3127,26 @@ fn main() {
         hang_watch();
         search_extra::clip_start();
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
-        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "2") {
+        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "3") {
+            // Variante de la bandeja: 6 archivos, su pestaña, archivos arrastrados encima y 2 más
+            std::thread::spawn(|| {
+                let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };
+                unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); }
+                let dir = std::env::current_exe().ok().and_then(|p| p.parent()?.parent()?.parent().map(|d| d.to_path_buf())).unwrap_or_default();
+                let f = |n: &str| dir.join(n).to_string_lossy().to_string();
+                std::thread::sleep(Duration::from_millis(1500));
+                live::shelf_add(vec![f("Cargo.toml"), f("README.md"), f("PLAN_TARJETA_ISLA.md"), f("docs\\macbar-search.png"), f("tarjeta_abierta.png"), f("src")]);
+                std::thread::sleep(Duration::from_millis(2500));
+                post(6, 0);
+                std::thread::sleep(Duration::from_millis(1500));
+                post(7, 1);
+                std::thread::sleep(Duration::from_millis(1500));
+                post(7, 0);
+                live::shelf_add(vec![f("Cargo.lock"), f("tarjeta_fase2.png")]);
+                std::thread::sleep(Duration::from_millis(2500));
+                post(0, 0);
+            });
+        } else         if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "2") {
             // Variante del temporizador: uno de 13 s, su pestaña, cambio de pestañas y fin
             std::thread::spawn(|| {
                 let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };

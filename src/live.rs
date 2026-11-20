@@ -732,6 +732,9 @@ pub fn shelf_add(paths: Vec<String>) {
     if n > 0 { show(Hud::Shelf, 1800); }
 }
 
+/// Quita un archivo de la bandeja.
+pub fn shelf_remove(path: &str) { SHELF.lock().unwrap().retain(|x| x.0 != path); SHELF_VER.fetch_add(1, Ordering::Relaxed); unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); } }
+
 pub fn shelf_clear() { SHELF.lock().unwrap().clear(); SHELF_VER.fetch_add(1, Ordering::Relaxed); unsafe { let _ = InvalidateRect(Some(bar_hwnd()), None, false); } }
 
 // ---------------------------------------------------------------- portapapeles

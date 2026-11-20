@@ -379,4 +379,11 @@ pub static EN: &[(&str, &str)] = &[
     ("+1 min", "+1 min"),
     ("Saltar", "Skip"),
     ("Pomodoro", "Pomodoro"),
+    ("Bandeja", "Shelf"),
+    ("Vaciar", "Clear"),
+    ("Compartir", "Share"),
+    ("Suelta para guardar aquí", "Drop to keep it here"),
+    ("Arrastra archivos aquí", "Drag files here"),
+    ("Mostrar en la carpeta", "Show in folder"),
+    ("Quitar de la bandeja", "Remove from shelf"),
 ];
