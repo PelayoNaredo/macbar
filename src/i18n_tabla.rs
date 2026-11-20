@@ -370,4 +370,13 @@ pub static EN: &[(&str, &str)] = &[
     ("Timestamp de ahora", "Current timestamp"),
     ("IP local", "Local IP"),
     ("Texto de relleno", "Placeholder text"),
+    ("En pausa", "Paused"),
+    ("1 bloque hoy", "1 block today"),
+    ("{} bloques hoy", "{} blocks today"),
+    ("Elige cuánto tiempo", "Pick a duration"),
+    ("de {}", "of {}"),
+    ("Repetir", "Repeat"),
+    ("+1 min", "+1 min"),
+    ("Saltar", "Skip"),
+    ("Pomodoro", "Pomodoro"),
 ];

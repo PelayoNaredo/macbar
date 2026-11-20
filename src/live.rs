@@ -65,8 +65,63 @@ pub fn dismiss() { *HUD.lock().unwrap() = None; }
 // ---------------------------------------------------------------- temporizador
 /// (fin, duración total en segundos)
 static TIMER: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+/// En pausa: (segundos que quedaban, duración total).
+static PAUSED: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+/// Duración del último temporizador normal que terminó y cuándo (para «Repetir»).
+pub static LAST_DONE: Mutex<Option<(u32, Instant)>> = Mutex::new(None);
+/// Bloques de concentración terminados hoy: (día del mes, cuántos).
+static POMO_TODAY: Mutex<(u16, u32)> = Mutex::new((0, 0));
+
+fn poke_bar() { unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); } }
+
+pub fn timer_paused() -> bool { PAUSED.lock().unwrap().is_some() }
+
+/// Pausa o reanuda el temporizador (también el pomodoro).
+pub fn timer_pause_toggle() {
+    let mut p = PAUSED.lock().unwrap();
+    let mut t = TIMER.lock().unwrap();
+    if let Some((left, total)) = p.take() {
+        *t = Some((Instant::now() + Duration::from_secs(left as u64), total));
+    } else if let Some((end, total)) = *t {
+        let left = end.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u32;
+        if left > 0 { *p = Some((left, total)); *t = None; }
+    }
+    drop((p, t));
+    poke_bar();
+}
+
+/// Suma segundos al temporizador (en marcha o en pausa); la duración total crece igual.
+pub fn timer_add(secs: u32) {
+    if let Some((left, total)) = PAUSED.lock().unwrap().as_mut() { *left += secs; *total += secs; }
+    if let Some((end, total)) = TIMER.lock().unwrap().as_mut() { *end += Duration::from_secs(secs as u64); *total += secs; }
+    poke_bar();
+}
+
+/// Pomodoro: termina la fase actual ya (pasa al descanso o a la concentración siguiente).
+pub fn pomo_skip() {
+    if POMO.load(Ordering::Relaxed) == 0 { return; }
+    if let Some((_, total)) = PAUSED.lock().unwrap().take() { *TIMER.lock().unwrap() = Some((Instant::now(), total)); }
+    if let Some((end, _)) = TIMER.lock().unwrap().as_mut() { *end = Instant::now(); }
+    poke_bar();
+}
+
+/// Bloques de concentración terminados hoy.
+pub fn pomo_today() -> u32 {
+    let d = unsafe { GetLocalTime() }.wDay;
+    let t = POMO_TODAY.lock().unwrap();
+    if t.0 == d { t.1 } else { 0 }
+}
+
+fn pomo_count_one() {
+    let d = unsafe { GetLocalTime() }.wDay;
+    let mut t = POMO_TODAY.lock().unwrap();
+    if t.0 != d { *t = (d, 0); }
+    t.1 += 1;
+}
 
 fn timer_set(secs: u32) {
+    *PAUSED.lock().unwrap() = None;
+    *LAST_DONE.lock().unwrap() = None;
     *TIMER.lock().unwrap() = Some((Instant::now() + Duration::from_secs(secs as u64), secs));
     unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
 }
@@ -78,6 +133,7 @@ pub fn timer_start(secs: u32) {
 
 pub fn timer_stop() {
     POMO.store(0, Ordering::Relaxed);
+    *PAUSED.lock().unwrap() = None;
     *TIMER.lock().unwrap() = None;
     unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
 }
@@ -104,6 +160,7 @@ pub fn pomodoro_start() {
 /// Segundos que quedan y duración total. Si acaba de terminar, lo avisa y lo quita
 /// (o, en un pomodoro, pasa al bloque siguiente).
 pub fn timer_left() -> Option<(u32, u32)> {
+    if let Some(p) = *PAUSED.lock().unwrap() { return Some(p); }
     let mut t = TIMER.lock().unwrap();
     let (end, total) = (*t)?;
     let now = Instant::now();
@@ -112,6 +169,7 @@ pub fn timer_left() -> Option<(u32, u32)> {
         match POMO.load(Ordering::Relaxed) {
             1 => {
                 let done = POMO_DONE.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+                pomo_count_one();
                 let m = pomo_break(done);
                 POMO.store(2, Ordering::Relaxed);
                 *t = Some((now + Duration::from_secs(m as u64 * 60), m * 60));
@@ -132,6 +190,7 @@ pub fn timer_left() -> Option<(u32, u32)> {
         }
         *t = None;
         drop(t);
+        *LAST_DONE.lock().unwrap() = Some((total, now));
         show(Hud::TimerDone, 8000);
         beep();
         return None;

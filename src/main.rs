@@ -478,7 +478,8 @@ impl Roll {
         unsafe {
             if !head.is_empty() { p.text(f, head, x, b, sh); }
             rt.PushAxisAlignedClip(&rect(hx - 1.0, top - 2.0, hx + p.width(f, new_tail).max(p.width(f, old_tail)) + 2.0, bottom + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            let lift = 14.0;
+            // El salto va con el tamaño de la letra (14 DIP en la barra): con cifras grandes no se pisan
+            let lift = f.GetFontSize() * 1.15;
             rt.SetTransform(&Matrix3x2 { M32: base.M32 - lift * roll, ..*base });
             popup::push_alpha(rt, 1.0 - roll);
             p.text(f, old_tail, hx, b, None);
@@ -1226,6 +1227,8 @@ fn click(hwnd: HWND, a: Act) {
         Act::Tray => { close_others(a); trayhost::mark_seen(); tray::toggle(anchor_right(hwnd, a, 40.0)); }
         Act::Wifi => { close_others(a); popup::toggle(popup::Kind::Wifi, anchor_right(hwnd, a, 60.0)); }
         Act::Weather => { close_others(a); popup::toggle(popup::Kind::Weather, anchor_right(hwnd, a, 24.0)); }
+        // Clic en la isla del temporizador: su pestaña en la tarjeta
+        Act::TimerOpen if card::click_opens() => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)),
         Act::Clock | Act::TimerOpen => {
             close_others(Act::Clock);
             let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
@@ -1836,7 +1839,8 @@ fn paint(hwnd: HWND) {
             // 0 = compacta, 1 = desplegada del todo (según el ancho real de ahora)
             let open_t = |m: Mode| { let (c, f) = mode_size(m); if f > c + 1.0 { ((iw - c) / (f - c)).clamp(0.0, 1.0) } else { 0.0 } };
             // La tarjeta copia la isla tal cual está: le apunta cuánto está desplegada
-            card::ISL_OPEN.store(if mode == Mode::Media { open_t(Mode::Media) } else { 0.0 }.to_bits(), Ordering::Relaxed);
+            card::ISL_OPEN.store(match mode { Mode::Media | Mode::Timer => open_t(mode), _ => 0.0 }.to_bits(), Ordering::Relaxed);
+            card::ISL_MODE.store(match mode { Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 3, Mode::Hud(_) => 4 }, Ordering::Relaxed);
             // Con la tarjeta abierta, la isla la pinta ella (aquí solo se sigue midiendo)
             let card_owns = card::owns_island();
             // Mientras cambia de ancho se estira un poco a lo alto (como la Dynamic Island al transformarse)
@@ -2664,7 +2668,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), _ => card::close(card::Why::Toggle) } LRESULT(0) }
+            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
@@ -3117,7 +3121,24 @@ fn main() {
         hang_watch();
         search_extra::clip_start();
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
-        if std::env::var_os("MACBAR_CARDTEST").is_some() {
+        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "2") {
+            // Variante del temporizador: uno de 13 s, su pestaña, cambio de pestañas y fin
+            std::thread::spawn(|| {
+                let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };
+                std::thread::sleep(Duration::from_millis(1500));
+                live::timer_start(13);
+                std::thread::sleep(Duration::from_millis(1500));
+                post(3, 0);
+                std::thread::sleep(Duration::from_millis(1500));
+                post(2, 20);
+                std::thread::sleep(Duration::from_millis(1000));
+                post(4, 0);
+                std::thread::sleep(Duration::from_millis(1000));
+                post(5, 0);
+                std::thread::sleep(Duration::from_millis(9000));
+                post(0, 0);
+            });
+        } else if std::env::var_os("MACBAR_CARDTEST").is_some() {
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_secs(3));
                 unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(1), LPARAM(0)); }

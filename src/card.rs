@@ -8,9 +8,29 @@
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
-/// Ancho y alto de la tarjeta de música (DIP).
+/// Ancho y alto máximos de la tarjeta (los de la música, DIP): la ventana tiene este tamaño y la
+/// forma se anima al de cada pestaña.
 pub const CARD_W: f32 = 380.0;
 pub const CARD_H: f32 = 168.0;
+
+/// Pestañas de la tarjeta (orden fijo).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Tab { Media, Timer }
+
+/// Tamaño de la tarjeta en cada pestaña (DIP).
+pub fn tab_size(t: Tab) -> (f32, f32) { match t { Tab::Media => (CARD_W, CARD_H), Tab::Timer => (340.0, 150.0) } }
+
+/// Pestaña con la que se abre: la del modo de la isla (1 = música, 2 = temporizador), si tiene contenido;
+/// si no, la primera que lo tenga.
+pub fn initial_tab(isl_mode: u8, has_media: bool, has_timer: bool) -> Option<Tab> {
+    match isl_mode {
+        2 if has_timer => Some(Tab::Timer),
+        1 if has_media => Some(Tab::Media),
+        _ if has_media => Some(Tab::Media),
+        _ if has_timer => Some(Tab::Timer),
+        _ => None,
+    }
+}
 /// Margen alrededor de la tarjeta para la sombra (salvo por el lado de la barra).
 const M: f32 = 16.0;
 const RADIUS: f32 = 24.0;
@@ -78,6 +98,8 @@ pub fn place(isl: (i32, i32, i32, i32), size: (i32, i32), m: i32, edge: i32, mon
 pub static OWNS: AtomicBool = AtomicBool::new(false);
 /// Cuánto está desplegada la isla de música ahora mismo (0..1, bits de f32): lo apunta la barra.
 pub static ISL_OPEN: AtomicU32 = AtomicU32::new(0);
+/// Modo de la isla ahora: 0 = nada, 1 = música, 2 = temporizador, 3 = bandeja, 4 = aviso.
+pub static ISL_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 /// ¿La isla la pinta la tarjeta (la barra no debe pintarla)?
 pub fn owns_island() -> bool { OWNS.load(Ordering::Relaxed) }
 
@@ -112,7 +134,7 @@ impl Drop for Surface {
     fn drop(&mut self) { unsafe { SelectObject(self.dc, self.old); let _ = DeleteObject(self.bmp.into()); let _ = DeleteDC(self.dc); } }
 }
 
-struct CardFonts { title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
+struct CardFonts { icon_s: IDWriteTextFormat, big: IDWriteTextFormat, lbl: IDWriteTextFormat, title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
     // Los de la isla (para el primer y el último fotograma, idénticos a los de la barra)
     i_title: IDWriteTextFormat, i_small: IDWriteTextFormat, i_icon: IDWriteTextFormat }
 
@@ -157,7 +179,7 @@ struct Card {
     // Ratón
     hover: Option<u8>,
     pressed: Option<u8>,
-    glow: [f32; 8],
+    glow: [f32; 24],
     hits: Vec<(D2D_RECT_F, u8)>,
     outside_since: Option<Instant>,
     empty_since: Option<Instant>,
@@ -176,13 +198,21 @@ struct Card {
     drag: Option<f32>,
     /// Barra de progreso «activa» (ratón encima o arrastrando): engorda y sale el círculo.
     bar_k: f32,
-    bar_at: Instant,
     /// Tras un salto, la posición que se enseña mientras el reproductor se pone al día.
     hold: Option<(f32, Instant)>,
     /// Extremos de la barra de progreso (DIP) y duración, para convertir el ratón en tiempo.
     bar_span: (f32, f32, f32),
     /// Ventana que tenía el foco antes de abrir (se le devuelve al cerrar).
     prev_fg: HWND,
+    tab: Tab,
+    /// Pestaña de la que se viene, cuándo se cambió y hacia qué lado (+1 derecha, -1 izquierda).
+    tab_prev: Option<(Tab, Instant, f32)>,
+    /// Píldora de la pestaña activa (x animada, DIP relativos a la tarjeta).
+    tab_x: f32,
+    /// Cuenta atrás grande: los dígitos ruedan al cambiar.
+    roll: Roll,
+    /// Trazo de puntas redondas (anillos).
+    cap: Option<ID2D1StrokeStyle>,
 }
 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
@@ -213,16 +243,20 @@ fn ensure() -> Option<()> {
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         let mk = |fam, size, wt| make_format(&dw, fam, size, wt);
         let f = CardFonts {
+            icon_s: mk(ICONS, 13.0, DWRITE_FONT_WEIGHT_NORMAL), big: mk(FONT, 20.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), lbl: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD),
             title: mk(FONT, 15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), sub: mk(FONT, 12.5, DWRITE_FONT_WEIGHT_NORMAL), small: mk(FONT, 11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), tiny: mk(FONT, 8.5, DWRITE_FONT_WEIGHT_BOLD),
             icon: mk(ICONS, 17.0, DWRITE_FONT_WEIGHT_NORMAL), icon_l: mk(ICONS, 24.0, DWRITE_FONT_WEIGHT_NORMAL),
             i_title: mk(FONT, 12.0, DWRITE_FONT_WEIGHT_SEMI_BOLD), i_small: mk(FONT, 11.5, DWRITE_FONT_WEIGHT_NORMAL), i_icon: mk(ICONS, 12.5, DWRITE_FONT_WEIGHT_NORMAL),
         };
+        let cap = fac.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, ..Default::default() }, None).ok();
         let old = Instant::now() - Duration::from_secs(5);
         let c = Card { hwnd, fac, rt: None, surf: None, dw, cache: RefCell::new(Caches::default()), f, win: (0, 0, 1, 1), off: (0, 0), s: 1.0, bottom: false,
-            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 8], hits: Vec::new(),
+            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 24], hits: Vec::new(),
             outside_since: None, empty_since: None, btn_prev: (false, false, false), art: None, art_at: old, art_k: 1.0, shown_title: Default::default(), prev_title: Default::default(),
             title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
-            drag: None, bar_k: 0.0, bar_at: old, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default() };
+            drag: None, bar_k: 0.0, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default(),
+            tab: Tab::Media, tab_prev: None, tab_x: f32::NAN, roll: Roll::default(),
+            cap };
         CARD.with(|x| *x.borrow_mut() = Some(c));
     }
     Some(())
@@ -231,10 +265,19 @@ fn ensure() -> Option<()> {
 /// Abre la tarjeta desde la isla (o la cierra si ya estaba abierta).
 fn dbg(m: &str) { if std::env::var_os("MACBAR_CARDTEST").is_some() { use std::io::Write; if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("macbar_card.log")) { let _ = writeln!(f, "{m}"); } } }
 
-pub fn open(origin: Origin) {
-    dbg(&format!("open: fullscreen={} media={} abierta={}", crate::fullscreen(), MEDIA.lock().unwrap().is_some(), is_open()));
-    if crate::fullscreen() || MEDIA.lock().unwrap().is_none() { return; }
+pub fn open(origin: Origin) { open_tab(origin, None) }
+
+/// Abre la tarjeta en una pestaña (None = la del modo de la isla).
+pub fn open_tab(origin: Origin, want: Option<Tab>) {
+    let (has_media, has_timer) = (MEDIA.lock().unwrap().is_some(), live::timer_left().is_some());
+    dbg(&format!("open: fullscreen={} media={has_media} timer={has_timer} abierta={}", crate::fullscreen(), is_open()));
+    if crate::fullscreen() { return; }
     if is_open() { close(Why::Toggle); return; }
+    let tab = match want {
+        Some(Tab::Timer) if has_timer => Tab::Timer,
+        Some(Tab::Media) if has_media => Tab::Media,
+        _ => match initial_tab(ISL_MODE.load(Ordering::Relaxed), has_media, has_timer) { Some(t) => t, None => return },
+    };
     if ensure().is_none() { dbg("ensure falló"); return; }
     let Some((isl, _, s)) = island_px() else { dbg("sin isla"); return };
     dbg(&format!("isla {isl:?} escala {s}"));
@@ -280,6 +323,9 @@ pub fn open(origin: Origin) {
         c.last = Instant::now();
         c.drag = None;
         c.hold = None;
+        c.tab = tab;
+        c.tab_prev = None;
+        c.tab_x = f32::NAN;
         Some(c.hwnd)
     });
     let Some(hwnd) = hwnd else { return };
@@ -331,7 +377,8 @@ fn shape(c: &Card, isl_w: f32) -> D2D_RECT_F {
     let (ox, oy) = (c.off.0 as f32 / s, c.off.1 as f32 / s);
     // Centro: del de la isla al de la tarjeta según lo que ha crecido
     let isl_cx = island_px().map(|(r, _, _)| ((r.0 + r.2) as f32 / 2.0 - c.win.0 as f32) / s).unwrap_or(ox + CARD_W / 2.0);
-    let kw = if CARD_W > isl_w + 1.0 { ((c.w - isl_w) / (CARD_W - isl_w)).clamp(0.0, 1.0) } else { 1.0 };
+    let tw = tab_size(c.tab).0;
+    let kw = if tw > isl_w + 1.0 { ((c.w - isl_w) / (tw - isl_w)).clamp(0.0, 1.0) } else { 1.0 };
     let cx = lerp(isl_cx, ox + CARD_W / 2.0, kw);
     let w = c.w.max(0.0);
     if c.bottom {
@@ -432,9 +479,40 @@ fn skip_icon(rt: &ID2D1RenderTarget, fac: &ID2D1Factory, p: &Painter, f: &IDWrit
     txt(p, f, "15", cx - w / 2.0, cy - 6.0, 12.5, b);
 }
 
+/// Anillo de progreso: fondo tenue y un arco que se llena en el sentido del reloj desde arriba.
+#[allow(clippy::too_many_arguments)]
+fn ring(rt: &ID2D1RenderTarget, fac: &ID2D1Factory, cap: Option<&ID2D1StrokeStyle>, cx: f32, cy: f32, r: f32, sw: f32, fr: f32, fg: &ID2D1Brush, bg: &ID2D1Brush) {
+    unsafe {
+        let e = D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: r, radiusY: r };
+        rt.DrawEllipse(&e, bg, sw, None);
+        if fr >= 0.999 { rt.DrawEllipse(&e, fg, sw, None); return; }
+        if fr <= 0.002 { return; }
+        let Ok(geo) = fac.CreatePathGeometry() else { return };
+        let Ok(sk) = geo.Open() else { return };
+        let a = fr * std::f32::consts::TAU;
+        sk.BeginFigure(Vector2 { X: cx, Y: cy - r }, D2D1_FIGURE_BEGIN_HOLLOW);
+        sk.AddArc(&D2D1_ARC_SEGMENT { point: Vector2 { X: cx + r * a.sin(), Y: cy - r * a.cos() }, size: D2D_SIZE_F { width: r, height: r }, rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE, arcSize: if fr > 0.5 { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL } });
+        sk.EndFigure(D2D1_FIGURE_END_OPEN);
+        let _ = sk.Close();
+        rt.DrawGeometry(&geo, fg, sw, cap);
+    }
+}
+
+/// Dibuja `f` escalado `sc` alrededor de (cx, cy) (botones que se hunden al pulsarlos).
+fn scaled(rt: &ID2D1RenderTarget, cx: f32, cy: f32, sc: f32, f: impl FnOnce()) {
+    unsafe {
+        let mut base = Matrix3x2::default();
+        rt.GetTransform(&mut base);
+        if sc < 0.999 { rt.SetTransform(&(Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: cx * (1.0 - sc), M32: cy * (1.0 - sc) } * base)); }
+        f();
+        rt.SetTransform(&base);
+    }
+}
+
 /// Pinta un fotograma y lo sube a la ventana. Devuelve true mientras algo se mueve.
 fn render() -> bool {
-    let mut done: Option<HWND> = None;
+    let mut finished: Option<HWND> = None;
     let moving = CARD.with(|cc| {
         let mut cc = cc.borrow_mut();
         let Some(c) = cc.as_mut() else { return false };
@@ -459,17 +537,34 @@ fn render() -> bool {
         let isl = rect((isl_px.0 - c.win.0) as f32 / s, (isl_px.1 - c.win.1) as f32 / s, (isl_px.2 - c.win.0) as f32 / s, (isl_px.3 - c.win.1) as f32 / s);
         let isl_cy = (isl.top + isl.bottom) / 2.0;
 
+        let media = MEDIA.lock().unwrap().clone();
+        let timer = live::timer_left();
+        // Temporizador recién terminado (para «Repetir»)
+        let done = if timer.is_none() { (*live::LAST_DONE.lock().unwrap()).filter(|d| d.1.elapsed().as_secs() < 60) } else { None };
+        // La pestaña se quedó sin contenido: se pasa a la otra si tiene
+        if c.open {
+            let to = match c.tab {
+                Tab::Media if media.is_none() && (timer.is_some() || done.is_some()) => Some(Tab::Timer),
+                Tab::Timer if timer.is_none() && done.is_none() && media.is_some() => Some(Tab::Media),
+                _ => None,
+            };
+            if let Some(t) = to { c.tab_prev = Some((c.tab, now, if t == Tab::Timer { 1.0 } else { -1.0 })); c.tab = t; }
+        }
+        // Cambio de pestaña: fundido cruzado con un desplazamiento hacia su lado
+        let tk = c.tab_prev.map(|(_, t, _)| ease_out(t.elapsed().as_secs_f32() / 0.22)).unwrap_or(1.0);
+        if tk >= 1.0 { c.tab_prev = None; } else { moving = true; }
+        let (tab_w, tab_h) = tab_size(c.tab);
+
         // ---- Forma: al abrir, primero se ensancha y 30 ms después cae; al cerrar, al revés
         let (tw, th) = if c.open {
-            (CARD_W, if c.opened.elapsed().as_secs_f32() > 0.03 { CARD_H } else { PILL_H })
+            (tab_w, if c.opened.elapsed().as_secs_f32() > 0.03 { tab_h } else { PILL_H })
         } else {
             (if c.closed_at.elapsed().as_secs_f32() > 0.03 { isl_w } else { c.w.max(isl_w) }, PILL_H)
         };
         moving |= spring(&mut c.w, &mut c.vw, tw, dt);
         moving |= spring(&mut c.h, &mut c.vh, th, dt);
-        if !c.open && !moving { done = Some(c.hwnd); }
+        if !c.open && !moving { finished = Some(c.hwnd); }
 
-        let media = MEDIA.lock().unwrap().clone();
         // Carátula grande (256 px) en la GPU, solo cuando cambia
         if let Some(m) = &media {
             if c.art.as_ref().map(|a| a.0) != Some(m.art_ver) {
@@ -496,7 +591,7 @@ fn render() -> bool {
         // En pausa la carátula se encoge un poco (como en el iPhone)
         moving |= ease_to(&mut c.art_k, if playing || media.is_none() { 1.0 } else { 0.92 }, 0.12, dt);
         // Brillo de «ratón encima» de cada botón
-        for i in 0..8 {
+        for i in 0..24 {
             let t = if c.hover == Some(i as u8) { 1.0 } else { 0.0 };
             let tau = if t > c.glow[i] { 0.05 } else { 0.12 };
             moving |= ease_to(&mut c.glow[i], t, tau, dt);
@@ -508,14 +603,12 @@ fn render() -> bool {
         let (tint, eq) = GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().map(|g| (g.tint_now, g.eq)))).unwrap_or(([1.0; 3], [0.0; 5]));
 
         let sh = shape(c, isl_w);
-        let kh = ((c.h - PILL_H) / (CARD_H - PILL_H)).clamp(0.0, 1.0);
-        let kw = if CARD_W > isl_w + 1.0 { ((c.w - isl_w) / (CARD_W - isl_w)).clamp(0.0, 1.0) } else { 1.0 };
+        let kh = ((c.h - PILL_H) / (tab_h - PILL_H)).clamp(0.0, 1.0);
+        let kw = if tab_w > isl_w + 1.0 { ((c.w - isl_w) / (tab_w - isl_w)).clamp(0.0, 1.0) } else { 1.0 };
         // Contenido de la isla: se va en cuanto empieza a crecer; el de la tarjeta entra pasado el 55 %
         let a_isl = (1.0 - kw.max(kh) * 3.2).clamp(0.0, 1.0);
         let row = |i: f32| ease_out(((kh - 0.55 - 0.06 * i) / 0.4).clamp(0.0, 1.0));
         let (ox, oy) = (c.off.0 as f32 / s, c.off.1 as f32 / s);
-        // Esquina de arriba a la izquierda de la tarjeta ya abierta
-        let (cl, ct) = (ox, oy);
         // Con la isla casi a cero (sin nada que enseñar), la forma se desvanece como la de la barra
         let pill_a = (sh.right - sh.left).clamp(0.0, 26.0) / 26.0;
 
@@ -541,8 +634,10 @@ fn render() -> bool {
             rt.FillRoundedRectangle(&rrect(sh, rad), &p.brush(rgba(0.0, 0.0, 0.0, 1.0)));
             // Fondo teñido del color de la carátula, de arriba hacia abajo
             let kc = row(0.0);
-            if kc > 0.01 && media.is_some() {
-                let g = p.vgrad(sh.top, sh.top + (sh.bottom - sh.top) * 0.8, rgba(tint[0] * 0.55, tint[1] * 0.55, tint[2] * 0.55, 0.42 * kc), rgba(0.0, 0.0, 0.0, 0.0));
+            // (solo en la pestaña de música; en la del temporizador, un velo naranja muy tenue)
+            let media_a = (if c.tab == Tab::Media { tk } else { 0.0 }) + c.tab_prev.filter(|x| x.0 == Tab::Media).map(|_| 1.0 - tk).unwrap_or(0.0);
+            if kc > 0.01 && media.is_some() && media_a > 0.01 {
+                let g = p.vgrad(sh.top, sh.top + (sh.bottom - sh.top) * 0.8, rgba(tint[0] * 0.55, tint[1] * 0.55, tint[2] * 0.55, 0.42 * kc * media_a), rgba(0.0, 0.0, 0.0, 0.0));
                 rt.FillRoundedRectangle(&rrect(sh, rad), &g);
             }
             // Borde fino con luz arriba (el de la isla)
@@ -553,168 +648,329 @@ fn render() -> bool {
             rt.PushAxisAlignedClip(&rect(sh.left + 1.0, sh.top, sh.right - 1.0, sh.bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
             let wa = |a: f32| p.brush(rgba(1.0, 1.0, 1.0, a));
+            let isl_mode = ISL_MODE.load(Ordering::Relaxed);
+            let bottom = c.bottom;
+            // Esquina y tamaño de la tarjeta en cada pestaña
+            let place_of = |t: Tab| { let (w, h) = tab_size(t); (ox + (CARD_W - w) / 2.0, if bottom { oy + CARD_H - h } else { oy }, w, h) };
+            // Color del temporizador: verde en los descansos, rojo en los últimos 10 s de uno normal
+            let pomo = live::POMO.load(Ordering::Relaxed);
+            let paused = live::timer_paused();
+            let tcol = |left: u32| if pomo == 2 { (0.30, 0.85, 0.45) } else if pomo == 0 && left <= 10 { (1.0, 0.36, 0.33) } else { (1.0, 0.62, 0.22) };
+            let col_b = |c3: (f32, f32, f32), a: f32| p.brush(rgba(c3.0, c3.1, c3.2, a));
+            let cap = c.cap.clone();
+            let art_from = (isl.left + 4.0, isl_cy - 11.0, 22.0, 11.0);
+
             // ---- Lo que enseñaba la isla (primer y último fotograma idénticos a los de la barra)
             if a_isl > 0.01 {
-                if let Some(m) = &media {
-                    let (il, iw) = (isl.left, isl.right - isl.left);
-                    if isl_open < 0.5 {
-                        let fade = (1.0 - isl_open * 2.0) * a_isl;
-                        let bx0 = il + iw - 13.0 - 22.0;
-                        // El ecualizador se dibuja como en la barra (centrado en la isla)
-                        let wb = p.brush(rgba(tint[0], tint[1], tint[2], 0.96 * fade));
-                        draw_eq(&rt, &eq, bx0, isl_cy, &wb);
-                    }
-                    if isl_open > 0.35 {
-                        let k = ((isl_open - 0.35) / 0.65).clamp(0.0, 1.0) * a_isl;
-                        let title = trunc(&m.title, 34);
-                        let artist = trunc(&m.artist, 22);
-                        let tx = il + 4.0 + 22.0 + 10.0 - (1.0 - k.min(1.0)) * 10.0;
-                        txt(&p, &c.f.i_title, &title, tx, isl.top, PILL_H, &wa(0.96 * k));
-                        let tw = p.width(&c.f.i_title, &title);
-                        if !artist.is_empty() { txt(&p, &c.f.i_small, &artist, tx + tw + 8.0, isl.top, PILL_H, &wa(0.52 * k)); }
-                        let mut bx = il + iw - 4.0 - 78.0;
-                        let play = if m.playing { "\u{E769}" } else { "\u{E768}" };
-                        for (gl, en) in [("\u{E892}", m.can_prev), (play, true), ("\u{E893}", m.can_next)] {
-                            glyph_c(&p, &c.f.i_icon, gl, bx + 13.0, isl_cy, &wa(if en { 0.96 } else { 0.25 } * k));
-                            bx += 26.0;
-                        }
-                    }
-                }
-            }
-
-            // ---- La carátula viaja de la isla a la tarjeta como una sola pieza
-            let art_from = (isl.left + 4.0, isl_cy - 11.0, 22.0, 11.0);
-            let pop = { let e = c.art_at.elapsed().as_secs_f32(); if e < 0.45 { moving = true; 0.88 + 0.12 * ease_back(e / 0.45) } else { 1.0 } };
-            let asz = 76.0 * c.art_k * pop;
-            let art_to = (cl + 16.0 + (76.0 - asz) / 2.0, ct + 16.0 + (76.0 - asz) / 2.0, asz, 14.0);
-            let ka = kh;
-            let (ax, ay, asz2, arad) = (lerp(art_from.0, art_to.0, ka), lerp(art_from.1, art_to.1, ka), lerp(art_from.2, art_to.2, ka), lerp(art_from.3, art_to.3, ka));
-            match (&c.art, &media) {
-                (Some((_, bmp)), Some(_)) => {
-                    // Sombra de la carátula grande
-                    if ka > 0.3 { rt.FillRoundedRectangle(&rrect(rect(ax, ay + 3.0, ax + asz2, ay + asz2 + 3.0), arad), &p.brush(rgba(0.0, 0.0, 0.0, 0.35 * ka))); }
-                    draw_art(&rt, bmp, ax, ay, asz2, arad, 1.0);
-                }
-                (None, Some(_)) => {
-                    rt.FillRoundedRectangle(&rrect(rect(ax, ay, ax + asz2, ay + asz2), arad), &p.brush(rgba(1.0, 1.0, 1.0, 0.10)));
-                    if ka > 0.5 { glyph_c(&p, &c.f.icon_l, "\u{E8D6}", ax + asz2 / 2.0, ay + asz2 / 2.0, &wa(0.6 * row(0.0))); }
-                }
-                _ => {}
-            }
-            if ka > 0.9 && c.open { hits.push((rect(art_to.0, art_to.1, art_to.0 + 76.0, art_to.1 + 76.0), 4)); }
-
-            // ---- Contenido de la tarjeta
-            let lift = |k: f32| 6.0 * (1.0 - k);
-            if let Some(m) = &media {
-                let tx = cl + 16.0 + 76.0 + 14.0;
-                let maxw = cl + CARD_W - 16.0 - tx;
-                // Título y artista: fundido cruzado al cambiar de canción
-                let k1 = row(1.0);
-                if k1 > 0.01 {
-                    let ch = ease_out(c.title_at.elapsed().as_secs_f32() / 0.28);
-                    if ch < 1.0 { moving = true; }
-                    let mut block = |t: &(String, String), a: f32, dy: f32, cache: bool| {
-                        if a <= 0.01 { return; }
-                        let lines = if cache {
-                            if c.lines.0 != t.0 || c.lines.1 != maxw { c.lines = (t.0.clone(), maxw, wrap2(&p, &c.f.title, &t.0, maxw)); }
-                            c.lines.2.clone()
-                        } else { wrap2(&p, &c.f.title, &t.0, maxw) };
-                        let y0 = ct + 20.0 + lift(k1) + dy;
-                        for (i, l) in lines.iter().enumerate() { txt(&p, &c.f.title, l, tx, y0 + i as f32 * 20.0, 18.0, &wa(0.96 * a)); }
-                        let sub = if m.album.is_empty() || m.album == t.1 || t.1.is_empty() { t.1.clone() } else { format!("{} · {}", t.1, m.album) };
-                        let sub = if p.width(&c.f.sub, &sub) > maxw { t.1.clone() } else { sub };
-                        let yl = y0 + lines.len() as f32 * 20.0 + 3.0;
-                        txt(&p, &c.f.sub, &trunc(&sub, 48), tx, yl, 16.0, &wa(0.56 * a));
-                    };
-                    if ch < 1.0 { let old = c.prev_title.clone(); block(&old, k1 * (1.0 - ch), -6.0 * ch, false); }
-                    let cur = c.shown_title.clone();
-                    block(&cur, k1 * ch, 6.0 * (1.0 - ch), true);
-                }
-                // Progreso: tiempo, barra y lo que queda (o el ecualizador si no hay línea de tiempo)
-                let k2 = row(2.0);
-                if k2 > 0.01 {
-                    let y = ct + 112.0 + lift(k2);
-                    match media_secs(m.playing) {
-                        Some((pos, dur)) => {
-                            // Arrastrando: el tiempo de destino; tras un salto: el destino mientras el reproductor se pone al día
-                            let pos = match (c.drag, c.hold) {
-                                (Some(fr), _) => fr * dur,
-                                (None, Some((t, at))) => (t + if m.playing { at.elapsed().as_secs_f32() } else { 0.0 }).min(dur),
-                                _ => pos,
-                            };
-                            let el = fmt_time(pos);
-                            let rem = format!("-{}", fmt_time(dur - pos));
-                            let tb = wa((0.55 + 0.35 * c.bar_k) * k2);
-                            txt(&p, &c.f.small, &el, cl + 16.0, y - 8.0, 16.0, &tb);
-                            let rw = p.width(&c.f.small, &rem);
-                            txt(&p, &c.f.small, &rem, cl + CARD_W - 16.0 - rw, y - 8.0, 16.0, &tb);
-                            let (l, r) = (cl + 16.0 + 40.0, cl + CARD_W - 16.0 - 44.0);
-                            c.bar_span = (l, r, dur);
-                            let fr = (pos / dur.max(0.1)).clamp(0.0, 1.0);
-                            // Engorda de 4 a 8 DIP al pasar el ratón (solo si se puede saltar)
-                            let bh = 2.0 + if can_seek { 2.0 * c.bar_k } else { 0.0 };
-                            rt.FillRoundedRectangle(&rrect(rect(l, y - bh, r, y + bh), bh), &wa(0.18 * k2));
-                            let fx = (l + (r - l) * fr).max(l + bh * 2.0);
-                            if fr > 0.0 { rt.FillRoundedRectangle(&rrect(rect(l, y - bh, fx, y + bh), bh), &wa(0.9 * k2)); }
-                            if can_seek {
-                                // El círculo de arrastre aparece con un pop
-                                let kr = 6.5 * ease_back(c.bar_k);
-                                if kr > 0.3 {
-                                    let e = D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y }, radiusX: kr, radiusY: kr };
-                                    rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y + 1.0 }, radiusX: kr + 0.5, radiusY: kr + 0.5 }, &p.brush(rgba(0.0, 0.0, 0.0, 0.35 * k2)));
-                                    rt.FillEllipse(&e, &wa(k2));
-                                }
-                                if k2 > 0.9 && c.open { hits.push((rect(l - 8.0, y - 11.0, r + 8.0, y + 11.0), 5)); }
+                let (il, iw) = (isl.left, isl.right - isl.left);
+                match isl_mode {
+                    1 => if let Some(m) = &media {
+                        if isl_open < 0.5 {
+                            let fade = (1.0 - isl_open * 2.0) * a_isl;
+                            if let Some((left, _)) = timer {
+                                // Música con temporizador: la cuenta en lugar del ecualizador
+                                let cnt = live::mmss(left);
+                                txt(&p, &c.f.i_title, &cnt, il + iw - 13.0 - p.width(&c.f.i_title, &cnt), isl.top, PILL_H, &col_b((1.0, 0.62, 0.22), fade));
+                            } else {
+                                let wb = p.brush(rgba(tint[0], tint[1], tint[2], 0.96 * fade));
+                                draw_eq(&rt, &eq, il + iw - 13.0 - 22.0, isl_cy, &wb);
                             }
                         }
-                        None => {
-                            let wb = p.brush(rgba(tint[0], tint[1], tint[2], 0.96 * k2));
-                            draw_eq(&rt, &eq, cl + CARD_W / 2.0 - 11.0, y, &wb);
+                        if isl_open > 0.35 {
+                            let k = ((isl_open - 0.35) / 0.65).clamp(0.0, 1.0) * a_isl;
+                            let title = trunc(&m.title, 34);
+                            let artist = trunc(&m.artist, 22);
+                            let tx = il + 4.0 + 22.0 + 10.0 - (1.0 - k.min(1.0)) * 10.0;
+                            txt(&p, &c.f.i_title, &title, tx, isl.top, PILL_H, &wa(0.96 * k));
+                            let tw = p.width(&c.f.i_title, &title);
+                            if !artist.is_empty() { txt(&p, &c.f.i_small, &artist, tx + tw + 8.0, isl.top, PILL_H, &wa(0.52 * k)); }
+                            let mut bx = il + iw - 4.0 - 78.0;
+                            let play = if m.playing { "\u{E769}" } else { "\u{E768}" };
+                            for (gl, en) in [("\u{E892}", m.can_prev), (play, true), ("\u{E893}", m.can_next)] {
+                                glyph_c(&p, &c.f.i_icon, gl, bx + 13.0, isl_cy, &wa(if en { 0.96 } else { 0.25 } * k));
+                                bx += 26.0;
+                            }
+                        }
+                        // Cerrando desde otra pestaña: la carátula de la isla vuelve con un fundido
+                        if c.tab != Tab::Media {
+                            if let Some((_, bmp)) = &c.art { draw_art(&rt, bmp, art_from.0, art_from.1, 22.0, 11.0, a_isl); }
+                        }
+                    },
+                    2 => if let Some((left, total)) = timer {
+                        let col = tcol(left);
+                        let cnt = live::mmss(left);
+                        let cw = p.width(&c.f.i_title, &cnt);
+                        txt(&p, &c.f.i_title, &cnt, il + iw - 14.0 - cw, isl.top, PILL_H, &col_b(col, a_isl));
+                        if c.tab != Tab::Timer {
+                            ring(&rt, &c.fac, cap.as_ref(), il + 20.0, isl_cy, 7.5, 2.2, left as f32 / total.max(1) as f32, &col_b(col, a_isl), &col_b(col, 0.25 * a_isl));
+                        }
+                        if isl_open > 0.3 {
+                            let k = ((isl_open - 0.3) / 0.7).clamp(0.0, 1.0) * a_isl;
+                            let lbl = match pomo { 1 => i18n::t("Concentración"), 2 => i18n::t("Descanso"), _ => i18n::t("Temporizador") };
+                            txt(&p, &c.f.i_small, lbl, il + 38.0, isl.top, PILL_H, &wa(0.6 * k));
+                            glyph_c(&p, &c.f.i_icon, "\u{E711}", il + iw - 14.0 - cw - 8.0 - 13.0, isl_cy, &wa(0.96 * k));
+                        }
+                    },
+                    _ => {}
+                }
+            }
+
+            // ---- Pestañas: la que se va y la que entra
+            let tabs_on = media.is_some() && (timer.is_some() || done.is_some());
+            let mut layers: Vec<(Tab, f32, f32, bool)> = Vec::new();
+            if let Some((pt, _, dir)) = c.tab_prev { layers.push((pt, 1.0 - tk, -12.0 * tk * dir, false)); }
+            layers.push((c.tab, tk, 12.0 * (1.0 - tk) * c.tab_prev.map(|x| x.2).unwrap_or(0.0), c.open && tk > 0.9));
+            let lift = |k: f32| 6.0 * (1.0 - k);
+            for (tab, la, dx, live_t) in layers {
+                if la <= 0.01 { continue; }
+                popup::push_alpha(&rt, la);
+                let tm = Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: dx, M32: 0.0 };
+                rt.SetTransform(&tm);
+                let (cl, ct, cw, chh) = place_of(tab);
+                match tab {
+                    Tab::Media => {
+                        // La carátula viaja de la isla a la tarjeta como una sola pieza
+                        let pop = { let e = c.art_at.elapsed().as_secs_f32(); if e < 0.45 { moving = true; 0.88 + 0.12 * ease_back(e / 0.45) } else { 1.0 } };
+                        let asz = 76.0 * c.art_k * pop;
+                        let art_to = (cl + 16.0 + (76.0 - asz) / 2.0, ct + 16.0 + (76.0 - asz) / 2.0, asz, 14.0);
+                        let ka = if c.tab == Tab::Media { kh } else { 1.0 };
+                        let (ax, ay, asz2, arad) = (lerp(art_from.0, art_to.0, ka), lerp(art_from.1, art_to.1, ka), lerp(art_from.2, art_to.2, ka), lerp(art_from.3, art_to.3, ka));
+                        match (&c.art, &media) {
+                            (Some((_, bmp)), Some(_)) => {
+                                if ka > 0.3 { rt.FillRoundedRectangle(&rrect(rect(ax, ay + 3.0, ax + asz2, ay + asz2 + 3.0), arad), &p.brush(rgba(0.0, 0.0, 0.0, 0.35 * ka))); }
+                                draw_art(&rt, bmp, ax, ay, asz2, arad, 1.0);
+                            }
+                            (None, Some(_)) => {
+                                rt.FillRoundedRectangle(&rrect(rect(ax, ay, ax + asz2, ay + asz2), arad), &p.brush(rgba(1.0, 1.0, 1.0, 0.10)));
+                                if ka > 0.5 { glyph_c(&p, &c.f.icon_l, "\u{E8D6}", ax + asz2 / 2.0, ay + asz2 / 2.0, &wa(0.6 * row(0.0))); }
+                            }
+                            _ => {}
+                        }
+                        if ka > 0.9 && live_t && media.is_some() { hits.push((rect(art_to.0, art_to.1, art_to.0 + 76.0, art_to.1 + 76.0), 4)); }
+                        if let Some(m) = &media {
+                            let tx = cl + 16.0 + 76.0 + 14.0;
+                            // Con pestañas arriba a la derecha, el título deja su hueco
+                            let maxw = cl + cw - 16.0 - tx - if tabs_on { 64.0 } else { 0.0 };
+                            let k1 = row(1.0);
+                            if k1 > 0.01 {
+                                let ch = ease_out(c.title_at.elapsed().as_secs_f32() / 0.28);
+                                if ch < 1.0 { moving = true; }
+                                let mut block = |t: &(String, String), a: f32, dy: f32, cache: bool| {
+                                    if a <= 0.01 { return; }
+                                    let lines = if cache {
+                                        if c.lines.0 != t.0 || c.lines.1 != maxw { c.lines = (t.0.clone(), maxw, wrap2(&p, &c.f.title, &t.0, maxw)); }
+                                        c.lines.2.clone()
+                                    } else { wrap2(&p, &c.f.title, &t.0, maxw) };
+                                    let y0 = ct + 20.0 + lift(k1) + dy;
+                                    for (i, l) in lines.iter().enumerate() { txt(&p, &c.f.title, l, tx, y0 + i as f32 * 20.0, 18.0, &wa(0.96 * a)); }
+                                    let sub = if m.album.is_empty() || m.album == t.1 || t.1.is_empty() { t.1.clone() } else { format!("{} · {}", t.1, m.album) };
+                                    let sub = if p.width(&c.f.sub, &sub) > maxw { t.1.clone() } else { sub };
+                                    let yl = y0 + lines.len() as f32 * 20.0 + 3.0;
+                                    txt(&p, &c.f.sub, &trunc(&sub, 48), tx, yl, 16.0, &wa(0.56 * a));
+                                };
+                                if ch < 1.0 { let old = c.prev_title.clone(); block(&old, k1 * (1.0 - ch), -6.0 * ch, false); }
+                                let cur = c.shown_title.clone();
+                                block(&cur, k1 * ch, 6.0 * (1.0 - ch), true);
+                            }
+                            // Progreso: tiempo, barra y lo que queda (o el ecualizador si no hay línea de tiempo)
+                            let k2 = row(2.0);
+                            if k2 > 0.01 {
+                                let y = ct + 112.0 + lift(k2);
+                                match media_secs(m.playing) {
+                                    Some((pos, dur)) => {
+                                        // Arrastrando: el destino; tras un salto: el destino mientras el reproductor se pone al día
+                                        let pos = match (c.drag, c.hold) {
+                                            (Some(fr), _) => fr * dur,
+                                            (None, Some((t, at))) => (t + if m.playing { at.elapsed().as_secs_f32() } else { 0.0 }).min(dur),
+                                            _ => pos,
+                                        };
+                                        let el = fmt_time(pos);
+                                        let rem = format!("-{}", fmt_time(dur - pos));
+                                        let tb = wa((0.55 + 0.35 * c.bar_k) * k2);
+                                        txt(&p, &c.f.small, &el, cl + 16.0, y - 8.0, 16.0, &tb);
+                                        let rw = p.width(&c.f.small, &rem);
+                                        txt(&p, &c.f.small, &rem, cl + cw - 16.0 - rw, y - 8.0, 16.0, &tb);
+                                        let (l, r) = (cl + 16.0 + 40.0, cl + cw - 16.0 - 44.0);
+                                        if live_t { c.bar_span = (l, r, dur); }
+                                        let fr = (pos / dur.max(0.1)).clamp(0.0, 1.0);
+                                        // Engorda de 4 a 8 DIP al pasar el ratón (solo si se puede saltar)
+                                        let bh = 2.0 + if can_seek { 2.0 * c.bar_k } else { 0.0 };
+                                        rt.FillRoundedRectangle(&rrect(rect(l, y - bh, r, y + bh), bh), &wa(0.18 * k2));
+                                        let fx = (l + (r - l) * fr).max(l + bh * 2.0);
+                                        if fr > 0.0 { rt.FillRoundedRectangle(&rrect(rect(l, y - bh, fx, y + bh), bh), &wa(0.9 * k2)); }
+                                        if can_seek {
+                                            // El círculo de arrastre aparece con un pop
+                                            let kr = 6.5 * ease_back(c.bar_k);
+                                            if kr > 0.3 {
+                                                rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y + 1.0 }, radiusX: kr + 0.5, radiusY: kr + 0.5 }, &p.brush(rgba(0.0, 0.0, 0.0, 0.35 * k2)));
+                                                rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: fx, Y: y }, radiusX: kr, radiusY: kr }, &wa(k2));
+                                            }
+                                            if k2 > 0.9 && live_t { hits.push((rect(l - 8.0, y - 11.0, r + 8.0, y + 11.0), 5)); }
+                                        }
+                                    }
+                                    None => {
+                                        let wb = p.brush(rgba(tint[0], tint[1], tint[2], 0.96 * k2));
+                                        draw_eq(&rt, &eq, cl + cw / 2.0 - 11.0, y, &wb);
+                                    }
+                                }
+                            }
+                            // Controles: anterior, reproducir o pausa y siguiente (y ±15 s si se puede saltar)
+                            let k3 = row(3.0);
+                            if k3 > 0.01 {
+                                let y = ct + 143.0 + lift(k3);
+                                let ccx = cl + cw / 2.0;
+                                let pp = { let e = c.play.1.elapsed().as_secs_f32(); if e < 0.32 { moving = true; 0.7 + 0.3 * ease_back(e / 0.32) } else { 1.0 } };
+                                for (id, dx, gl, en, big) in [(1u8, -60.0, "\u{E892}", m.can_prev, false), (2, 0.0, if m.playing { "\u{E769}" } else { "\u{E768}" }, true, true), (3, 60.0, "\u{E893}", m.can_next, false)] {
+                                    let bx = ccx + dx;
+                                    let r = if big { 21.0 } else { 17.0 };
+                                    let gk = c.glow[id as usize];
+                                    if en && gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: bx, Y: y }, radiusX: r, radiusY: r }, &wa(0.10 * gk * k3)); }
+                                    let mut sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.88 } else { 1.0 };
+                                    if id == 2 { sc *= pp; }
+                                    scaled(&rt, bx, y, sc, || glyph_c(&p, if big { &c.f.icon_l } else { &c.f.icon }, gl, bx, y, &wa(if en { 0.96 } else { 0.25 } * k3)));
+                                    if en && k3 > 0.9 && live_t { hits.push((rect(bx - r, y - r, bx + r, y + r), id)); }
+                                }
+                                if can_seek {
+                                    for (id, dx, back) in [(6u8, -118.0, true), (7, 118.0, false)] {
+                                        let bx = ccx + dx;
+                                        let gk = c.glow[id as usize];
+                                        if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: bx, Y: y }, radiusX: 16.0, radiusY: 16.0 }, &wa(0.10 * gk * k3)); }
+                                        let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.88 } else { 1.0 };
+                                        scaled(&rt, bx, y, sc, || skip_icon(&rt, &c.fac, &p, &c.f.tiny, bx, y, back, &wa(0.9 * k3)));
+                                        if k3 > 0.9 && live_t { hits.push((rect(bx - 16.0, y - 16.0, bx + 16.0, y + 16.0), id)); }
+                                    }
+                                }
+                            }
+                        } else {
+                            // La música se cerró: lo dice un momento y luego la tarjeta se recoge
+                            let t = i18n::t("Nada sonando");
+                            let tw = p.width(&c.f.title, t);
+                            txt(&p, &c.f.title, t, cl + cw / 2.0 - tw / 2.0, ct + chh / 2.0 - 9.0, 18.0, &wa(0.6 * row(1.0)));
                         }
                     }
-                }
-                // Controles: anterior, reproducir o pausa y siguiente
-                let k3 = row(3.0);
-                if k3 > 0.01 {
-                    let y = ct + 143.0 + lift(k3);
-                    let ccx = cl + CARD_W / 2.0;
-                    let pp = { let e = c.play.1.elapsed().as_secs_f32(); if e < 0.32 { moving = true; 0.7 + 0.3 * ease_back(e / 0.32) } else { 1.0 } };
-                    for (id, dx, gl, en, big) in [(1u8, -60.0, "\u{E892}", m.can_prev, false), (2, 0.0, if m.playing { "\u{E769}" } else { "\u{E768}" }, true, true), (3, 60.0, "\u{E893}", m.can_next, false)] {
-                        let bx = ccx + dx;
-                        let r = if big { 21.0 } else { 17.0 };
-                        let gk = c.glow[id as usize];
-                        if en && gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: bx, Y: y }, radiusX: r, radiusY: r }, &wa(0.10 * gk * k3)); }
-                        let mut sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.88 } else { 1.0 };
-                        if id == 2 { sc *= pp; }
-                        let mut base = Matrix3x2::default();
-                        rt.GetTransform(&mut base);
-                        if sc < 0.999 { rt.SetTransform(&(Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: bx * (1.0 - sc), M32: y * (1.0 - sc) } * base)); }
-                        glyph_c(&p, if big { &c.f.icon_l } else { &c.f.icon }, gl, bx, y, &wa(if en { 0.96 } else { 0.25 } * k3));
-                        rt.SetTransform(&base);
-                        if en && k3 > 0.9 && c.open { hits.push((rect(bx - r, y - r, bx + r, y + r), id)); }
-                    }
-                    // -15 s / +15 s: solo si el reproductor deja saltar
-                    if can_seek {
-                        for (id, dx, back) in [(6u8, -118.0, true), (7, 118.0, false)] {
-                            let bx = ccx + dx;
-                            let gk = c.glow[id as usize];
-                            if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: bx, Y: y }, radiusX: 16.0, radiusY: 16.0 }, &wa(0.10 * gk * k3)); }
-                            let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.88 } else { 1.0 };
-                            let mut base = Matrix3x2::default();
-                            rt.GetTransform(&mut base);
-                            if sc < 0.999 { rt.SetTransform(&(Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: bx * (1.0 - sc), M32: y * (1.0 - sc) } * base)); }
-                            skip_icon(&rt, &c.fac, &p, &c.f.tiny, bx, y, back, &wa(0.9 * k3));
+                    Tab::Timer => {
+                        let is_done = timer.is_none() && done.is_some();
+                        let none = timer.is_none() && !is_done;
+                        let (left, total) = timer.unwrap_or((0, done.map(|d| d.0).unwrap_or(1)));
+                        let col = if is_done { (1.0, 0.36, 0.33) } else { tcol(left) };
+                        // Terminado: el anillo se sacude como una alarma (cada 1,6 s)
+                        let shake = match done {
+                            Some((_, at)) if is_done => { moving = true; let ph = at.elapsed().as_secs_f32() % 1.6; if ph < 0.55 { (ph * 42.0).sin() * 5.0 * (1.0 - ph / 0.55) } else { 0.0 } }
+                            _ => 0.0,
+                        };
+                        let k1 = row(1.0);
+                        // El anillo viaja desde el de la isla y crece hasta 72 DIP
+                        let kr = if c.tab == Tab::Timer { kh } else { 1.0 };
+                        let from = (isl.left + 20.0, isl_cy, 7.5, 2.2);
+                        let rcy = ct + chh / 2.0 - 2.0;
+                        let to = (cl + 22.0 + 36.0 + shake, rcy, 34.0, 5.0);
+                        let (rx, ry, rr, sw) = (lerp(from.0, to.0, kr), lerp(from.1, to.1, kr), lerp(from.2, to.2, kr), lerp(from.3, to.3, kr));
+                        let fr = if is_done { 1.0 } else if none { 0.0 } else { left as f32 / total.max(1) as f32 };
+                        let ring_a = if none { k1 } else { 1.0 };
+                        ring(&rt, &c.fac, cap.as_ref(), rx, ry, rr, sw, fr, &col_b(col, if paused { 0.55 } else { 1.0 } * ring_a), &col_b(col, 0.22 * ring_a));
+                        // La cuenta, grande dentro del anillo; los dígitos ruedan al cambiar
+                        if kr > 0.6 && !none {
+                            let ka = ((kr - 0.6) / 0.4).clamp(0.0, 1.0);
+                            let txt_s = live::mmss(left);
+                            let f = if left >= 3600 { &c.f.title } else { &c.f.big };
+                            let tw = p.width(f, &txt_s);
+                            let base = Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: dx, M32: ry - 50.0 };
                             rt.SetTransform(&base);
-                            if k3 > 0.9 && c.open { hits.push((rect(bx - 16.0, y - 16.0, bx + 16.0, y + 16.0), id)); }
+                            if c.roll.draw(&p, &rt, &base, f, &txt_s, rx - tw / 2.0, 50.0 - 12.0, 50.0 + 12.0, &wa(if paused { 0.5 } else { 0.96 } * ka), None) { moving = true; }
+                            rt.SetTransform(&tm);
+                        }
+                        // A la derecha: qué es, cuánto y los botones
+                        let x0 = cl + 22.0 + 72.0 + 22.0;
+                        let lbl = if is_done { i18n::t("Se acabó el tiempo") } else if none { i18n::t("Temporizador") } else if paused { i18n::t("En pausa") } else {
+                            match pomo { 1 => i18n::t("Concentración"), 2 => i18n::t("Descanso"), _ => i18n::t("Temporizador") }
+                        };
+                        txt(&p, &c.f.title, lbl, x0, ct + 22.0 + lift(k1), 18.0, &wa(0.96 * k1));
+                        let k2 = row(2.0);
+                        let sy = ct + 46.0 + lift(k2);
+                        if pomo != 0 && !none && !is_done {
+                            // Cuatro puntos, uno por bloque de la tanda, y los bloques de hoy
+                            let d = live::POMO_DONE.load(Ordering::Relaxed) % 4;
+                            for j in 0..4u8 {
+                                let on = j < d || (j == d && pomo == 1);
+                                let e = D2D1_ELLIPSE { point: Vector2 { X: x0 + 3.0 + j as f32 * 10.0, Y: sy + 8.0 }, radiusX: 3.0, radiusY: 3.0 };
+                                rt.FillEllipse(&e, &col_b(col, if on { 1.0 } else { 0.25 } * k2));
+                            }
+                            let n = live::pomo_today();
+                            let t = if n == 1 { i18n::t("1 bloque hoy").to_string() } else { i18n::tf("{} bloques hoy", &[&n]) };
+                            txt(&p, &c.f.sub, &t, x0 + 46.0, sy, 16.0, &wa(0.5 * k2));
+                        } else if none {
+                            txt(&p, &c.f.sub, i18n::t("Elige cuánto tiempo"), x0, sy, 16.0, &wa(0.5 * k2));
+                        } else {
+                            txt(&p, &c.f.sub, &i18n::tf("de {}", &[&live::mmss(total)]), x0, sy, 16.0, &wa(0.5 * k2));
+                        }
+                        // Botones
+                        let k3 = row(3.0);
+                        if k3 > 0.01 {
+                            let by = ct + chh - 22.0 - 15.0 + lift(k3);
+                            let mut bx = x0;
+                            let mut btn = |hits: &mut Vec<(D2D_RECT_F, u8)>, w: f32, label: Option<&str>, glyph: Option<&str>, id: u8, accent: Option<(f32, f32, f32)>| {
+                                let r = rect(bx, by, bx + w, by + 30.0);
+                                let gk = c.glow[id as usize];
+                                let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.92 } else { 1.0 };
+                                let (cx2, cy2) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+                                scaled(&rt, cx2, cy2, sc, || {
+                                    let bg = match accent { Some(a3) => col_b(a3, (0.85 + 0.15 * gk) * k3), None => wa((0.10 + 0.08 * gk) * k3) };
+                                    rt.FillRoundedRectangle(&rrect(r, 15.0), &bg);
+                                    let ink = if accent.is_some() { p.brush(rgba(0.0, 0.0, 0.0, 0.9 * k3)) } else { wa(0.96 * k3) };
+                                    match (label, glyph) {
+                                        (Some(l), _) => { let lw = p.width(&c.f.lbl, l); txt(&p, &c.f.lbl, l, cx2 - lw / 2.0, r.top, 30.0, &ink); }
+                                        (None, Some(g)) => glyph_c(&p, &c.f.icon, g, cx2, cy2, &ink),
+                                        _ => {}
+                                    }
+                                });
+                                if k3 > 0.9 && live_t { hits.push((r, id)); }
+                                bx += w + 6.0;
+                            };
+                            if none {
+                                for (i, m) in [1u32, 5, 10, 25].into_iter().enumerate() { btn(&mut hits, if m >= 10 { 52.0 } else { 46.0 }, Some(&format!("{m} min")), None, 16 + i as u8, None); }
+                            } else if is_done {
+                                btn(&mut hits, 92.0, Some(i18n::t("Repetir")), None, 23, Some((1.0, 0.62, 0.22)));
+                                btn(&mut hits, 32.0, None, Some("\u{E711}"), 22, None);
+                            } else {
+                                btn(&mut hits, 58.0, Some(i18n::t("+1 min")), None, 20, None);
+                                btn(&mut hits, 32.0, None, Some(if paused { "\u{E768}" } else { "\u{E769}" }), 21, None);
+                                btn(&mut hits, 32.0, None, Some("\u{E711}"), 22, None);
+                                if pomo != 0 { btn(&mut hits, 62.0, Some(i18n::t("Saltar")), None, 23, None); }
+                            }
+                        }
+                        // Sin temporizador: también se puede empezar un pomodoro
+                        if none && k2 > 0.01 {
+                            let t = i18n::t("Pomodoro");
+                            let w = p.width(&c.f.small, t) + 20.0;
+                            let r = rect(cl + cw - 16.0 - w, sy - 2.0, cl + cw - 16.0, sy + 20.0);
+                            rt.FillRoundedRectangle(&rrect(r, 11.0), &col_b((1.0, 0.62, 0.22), (0.18 + 0.12 * c.glow[15]) * k2));
+                            txt(&p, &c.f.small, t, r.left + 10.0, r.top, 22.0, &col_b((1.0, 0.62, 0.22), k2));
+                            if k2 > 0.9 && live_t { hits.push((r, 15)); }
                         }
                     }
                 }
-            } else {
-                // La música se cerró: lo dice un momento y luego la tarjeta se recoge
-                let k1 = row(1.0);
-                let t = i18n::t("Nada sonando");
-                let tw = p.width(&c.f.title, t);
-                txt(&p, &c.f.title, t, cl + CARD_W / 2.0 - tw / 2.0, ct + CARD_H / 2.0 - 9.0, 18.0, &wa(0.6 * k1));
+                rt.SetTransform(&Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 });
+                rt.PopLayer();
+            }
+
+            // ---- Selector de pestañas (solo si hay más de una con contenido): arriba a la derecha
+            if tabs_on {
+                let ka = row(1.0);
+                if ka > 0.01 {
+                    let (r0, t0) = (sh.right - 16.0, sh.top + 12.0);
+                    let target = if c.tab == Tab::Timer { 0.0 } else { -30.0 };
+                    if c.tab_x.is_nan() { c.tab_x = target; }
+                    let d = target - c.tab_x;
+                    if d.abs() > 0.2 { c.tab_x += d * (1.0 - (-dt / 0.06).exp()); moving = true; } else { c.tab_x = target; }
+                    let ax = r0 - 13.0 + c.tab_x;
+                    rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: ax, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.16 * ka));
+                    for (id, x, gl, me) in [(10u8, r0 - 43.0, "\u{E8D6}", Tab::Media), (11, r0 - 13.0, "\u{E916}", Tab::Timer)] {
+                        let gk = c.glow[id as usize];
+                        if gk > 0.01 && c.tab != me { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.08 * gk * ka)); }
+                        glyph_c(&p, &c.f.icon_s, gl, x, t0 + 13.0, &wa(if c.tab == me { 0.96 } else { 0.5 } * ka));
+                        if ka > 0.9 && c.open { hits.push((rect(x - 13.0, t0, x + 13.0, t0 + 26.0), id)); }
+                    }
+                }
             }
             rt.PopAxisAlignedClip();
             rt.PopLayer();
@@ -736,7 +992,7 @@ fn render() -> bool {
         if media.as_ref().is_some_and(|m| m.playing) && media_secs(true).is_none() && kh > 0.5 { moving = true; }
         moving
     });
-    if let Some(h) = done { finish(h); return false; }
+    if let Some(h) = finished { finish(h); return false; }
     moving
 }
 
@@ -747,7 +1003,9 @@ fn poll() {
     let down = |vk: VIRTUAL_KEY| unsafe { GetAsyncKeyState(vk.0 as i32) < 0 };
     let (l, r, esc) = (down(VK_LBUTTON), down(VK_RBUTTON), down(VK_ESCAPE));
     let other = ccenter::is_open() || tray::is_open() || popup::open_kind().is_some();
-    let has = MEDIA.lock().unwrap().is_some();
+    let timer_on = live::timer_left().is_some();
+    let done_recent = (*live::LAST_DONE.lock().unwrap()).is_some_and(|d| d.1.elapsed().as_secs_f32() < 6.0);
+    let media_on = MEDIA.lock().unwrap().is_some();
     let why = CARD.with(|cc| {
         let mut cc = cc.borrow_mut();
         let c = cc.as_mut()?;
@@ -759,6 +1017,8 @@ fn poll() {
         let now = Instant::now();
         let inside = inside || std::env::var_os("MACBAR_CARDTEST").is_some();
         if inside { c.outside_since = None; } else if c.outside_since.is_none() { c.outside_since = Some(now); }
+        // Con contenido: música, temporizador, uno recién terminado (6 s) o los atajos del temporizador con el ratón encima
+        let has = media_on || timer_on || done_recent || (c.tab == Tab::Timer && inside);
         if has { c.empty_since = None; } else if c.empty_since.is_none() { c.empty_since = Some(now); }
         let pressed_now = (l && !c.btn_prev.0) || (r && !c.btn_prev.1);
         let escape = esc && !c.btn_prev.2;
@@ -800,6 +1060,17 @@ fn jump(d: f32) {
     CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() { c.hold = Some((t, Instant::now())); });
 }
 
+/// Cambia de pestaña con su fundido hacia el lado que toca.
+fn switch_tab(t: Tab) {
+    CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() {
+        if c.tab == t { return; }
+        let dir = if t == Tab::Timer { 1.0 } else { -1.0 };
+        c.tab_prev = Some((c.tab, Instant::now(), dir));
+        c.tab = t;
+        c.hover = None;
+    });
+}
+
 fn can_seek_now() -> bool {
     MEDIA.lock().unwrap().as_ref().is_some_and(|m| CAN_SEEK.load(Ordering::Relaxed) && *SEEK_BAD_FOR.lock().unwrap() != m.title) && media_secs(false).is_some()
 }
@@ -832,7 +1103,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let _ = KillTimer(Some(hwnd), TIMER_ANIM);
                     if render() { SetTimer(Some(hwnd), TIMER_ANIM, 15, None); }
                     // Quieta y sonando: un repintado por segundo para el progreso
-                    else if is_open() && MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) { SetTimer(Some(hwnd), TIMER_ANIM, 1000, None); }
+                    else if is_open() && (MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) || (live::timer_left().is_some() && !live::timer_paused())) { SetTimer(Some(hwnd), TIMER_ANIM, 250, None); }
                 }
                 LRESULT(0)
             }
@@ -888,6 +1159,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     Some(3) => media(Cmd::Next),
                     Some(6) => jump(-15.0),
                     Some(7) => jump(15.0),
+                    Some(10) => switch_tab(Tab::Media),
+                    Some(11) => switch_tab(Tab::Timer),
+                    Some(15) => live::pomodoro_start(),
+                    Some(i @ 16..=19) => live::timer_start([1, 5, 10, 25][(i - 16) as usize] * 60),
+                    Some(20) => live::timer_add(60),
+                    Some(21) => live::timer_pause_toggle(),
+                    Some(22) => if live::timer_left().is_some() { live::timer_stop(); } else { *live::LAST_DONE.lock().unwrap() = None; live::dismiss(); close(Why::Toggle); },
+                    Some(23) => if live::POMO.load(Ordering::Relaxed) != 0 { live::pomo_skip(); } else {
+                        // Repetir el temporizador que acaba de terminar
+                        let d = live::LAST_DONE.lock().unwrap().take();
+                        if let Some((total, _)) = d { live::dismiss(); live::timer_start(total); }
+                    },
                     Some(4) => { if let Some(m) = MEDIA.lock().unwrap().clone() { open_player(&m.app); } close(Why::Toggle); }
                     _ => if h.is_none() && pressed.is_none() && in_island_band(lp) { close(Why::Toggle); },
                 }
@@ -922,6 +1205,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 /// Prueba visual: simula el ratón encima de un botón (sin pulsarlo).
 pub fn test_hover(id: Option<u8>) {
     let h = CARD.with(|c| c.borrow_mut().as_mut().map(|c| { c.hover = id; c.hwnd }));
+    if let Some(h) = h { unsafe { SetTimer(Some(h), TIMER_ANIM, 1, None); } }
+}
+
+/// Prueba visual: cambia de pestaña.
+pub fn test_switch(t: Tab) {
+    switch_tab(t);
+    let h = CARD.with(|c| c.borrow().as_ref().map(|c| c.hwnd));
     if let Some(h) = h { unsafe { SetTimer(Some(h), TIMER_ANIM, 1, None); } }
 }
 
@@ -961,6 +1251,37 @@ mod tests {
         // Sin contenido: «Nada sonando» 1,5 s y se cierra
         assert_eq!(should_close(&Watch { has_content: false, empty_ms: 1000, ..w() }), None);
         assert_eq!(should_close(&Watch { has_content: false, empty_ms: 1500, ..w() }), Some(Why::Empty));
+    }
+
+    #[test]
+    fn pestana_inicial() {
+        // Isla del temporizador con temporizador: su pestaña; si no hay, la de la música
+        assert_eq!(initial_tab(2, true, true), Some(Tab::Timer));
+        assert_eq!(initial_tab(2, true, false), Some(Tab::Media));
+        assert_eq!(initial_tab(1, true, true), Some(Tab::Media));
+        // Desde un aviso o sin nada: la primera con contenido
+        assert_eq!(initial_tab(4, false, true), Some(Tab::Timer));
+        assert_eq!(initial_tab(0, false, false), None);
+        // Cada pestaña cabe en la ventana (que tiene el tamaño de la mayor)
+        for t in [Tab::Media, Tab::Timer] { let (w, h) = tab_size(t); assert!(w <= CARD_W && h <= CARD_H); }
+    }
+
+    #[test]
+    fn pausa_y_minuto_extra() {
+        live::timer_start(120);
+        live::timer_pause_toggle();
+        assert!(live::timer_paused());
+        let (l1, t1) = live::timer_left().unwrap();
+        std::thread::sleep(Duration::from_millis(1100));
+        // En pausa no corre
+        assert_eq!(live::timer_left().unwrap().0, l1);
+        live::timer_add(60);
+        assert_eq!(live::timer_left().unwrap(), (l1 + 60, t1 + 60));
+        live::timer_pause_toggle();
+        assert!(!live::timer_paused());
+        assert!(live::timer_left().unwrap().0 >= l1 + 59);
+        live::timer_stop();
+        assert!(live::timer_left().is_none());
     }
 
     #[test]
