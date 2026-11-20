@@ -41,7 +41,8 @@ fn zip_to(paths: &[String], out: &std::path::Path) -> bool {
     cmd.arg("-a").arg("-c").arg("-f").arg(out);
     for p in paths {
         let pb = std::path::Path::new(p);
-        if let (Some(d), Some(n)) = (pb.parent(), pb.file_name()) { cmd.arg("-C").arg(d).arg(n); }
+        // «.\nombre»: un archivo que empiece por «-» o «@» nunca se lee como opción ni como lista de tar
+        if let (Some(d), Some(n)) = (pb.parent(), pb.file_name()) { cmd.arg("-C").arg(d).arg(std::path::Path::new(".").join(n)); }
     }
     use std::os::windows::process::CommandExt;
     cmd.creation_flags(0x0800_0000 /* CREATE_NO_WINDOW */).status().is_ok_and(|s| s.success()) && out.exists()
@@ -158,6 +159,12 @@ mod tests {
         let z = dir.join("todo.zip");
         assert!(zip_to(&[png.to_string_lossy().to_string(), jpg.to_string_lossy().to_string()], &z));
         assert!(std::fs::metadata(&z).unwrap().len() > 1000);
+        // Un nombre que parece una opción de tar se comprime como archivo normal
+        let raro = dir.join("-raro.png");
+        std::fs::copy(&src, &raro).unwrap();
+        let z2 = dir.join("raro.zip");
+        assert!(zip_to(&[raro.to_string_lossy().to_string()], &z2));
+        assert!(std::fs::metadata(&z2).unwrap().len() > 1000);
         // La captura del buscador tiene texto: el OCR tiene que encontrar algo
         let t = ocr_text(&png.to_string_lossy());
         assert!(t.as_ref().is_some_and(|t| t.len() > 5), "OCR: {t:?}");
