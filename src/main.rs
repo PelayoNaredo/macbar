@@ -3148,7 +3148,15 @@ fn main() {
         hang_watch();
         search_extra::clip_start();
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
-        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "4") {
+        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "5") {
+            // Variante para medir el consumo: abierta y quieta 20 s
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(3000));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(1), LPARAM(0)); }
+                std::thread::sleep(Duration::from_millis(20000));
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(0), LPARAM(0)); }
+            });
+        } else         if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "4") {
             // Variante del Vistazo y de un aviso dentro de la tarjeta
             std::thread::spawn(|| {
                 let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };

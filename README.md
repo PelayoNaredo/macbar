@@ -25,6 +25,7 @@
 - **macOS-like top bar** that reserves its own space on screen (AppBar), so maximized windows never cover it — it even recovers after sleep, lock/unlock, display or DPI changes and Explorer restarts.
 - **Global app menu** (File, Edit, View, Go, Window, Help) acting on the active window, with macOS-style menu hopping.
 - **Dynamic Island for Windows**: a central pill that shows now-playing music (album-art colors, live equalizer, progress), timers, volume/brightness HUDs and low-memory alerts.
+- **Island card**: click the island and it grows into a large card (like the expanded Dynamic Island), then shrinks back into it — see below.
 - **Media controls** for Spotify, YouTube Music and any app using Windows media sessions.
 - **Control Center**: Wi‑Fi, Bluetooth, volume, brightness and quick toggles.
 - **Wi‑Fi panel**: nearby networks with signal strength and one-click connect to saved networks.
@@ -35,6 +36,29 @@
 - **Cascading entrance animations** in the panels.
 - **Auto-hides with fullscreen apps** (games, video, F11) and comes back afterwards.
 - **Native & tiny**: a single small `.exe`, Direct2D/DirectWrite rendering, per-monitor DPI aware, near-zero idle CPU.
+
+### Island card
+
+<p align="center">
+  <img src="docs/macbar-island-card-music.png" alt="macbar island card: big album art, seekable progress, ±15 s and media controls" width="380">
+  &nbsp;
+  <img src="docs/macbar-island-card-timer.png" alt="macbar island card: big timer ring with +1 min, pause and stop" width="340">
+</p>
+<p align="center">
+  <img src="docs/macbar-island-card-shelf.png" alt="macbar island card: file shelf with drag and drop" width="380">
+  &nbsp;
+  <img src="docs/macbar-island-card-glance.png" alt="macbar island card: glance with clock, weather, battery and shortcuts" width="360">
+</p>
+
+Click the island and it widens, drops down and turns into a card; the album art (or the timer ring) travels from the pill to its place in one piece. It closes when the mouse leaves it, with a click outside or with Esc, and shrinks back into the island.
+
+- **Music**: big album art, title on two lines, a progress bar you can drag, ±15 s jumps (only when the player allows seeking), and the album-art color as background.
+- **Timer & Pomodoro**: big ring with rolling digits, +1 min, pause/resume, stop, skip phase, today's focus blocks and *Repeat* when it ends.
+- **Shelf**: drag files onto the island and the card opens with a drop zone; files can be opened, shared, removed or dragged out to another app.
+- **Glance** (optional): clock, date, weather, battery, weekly Claude usage and shortcuts (caffeine, Pomodoro, color picker, screenshot).
+- Tabs appear when there is more than one thing to show. Notices (volume, brightness…) slide in at the top of the card while it is open.
+- Keyboard: Space plays/pauses, ←/→ jump 5 s, ↑/↓ change the volume, Esc closes. Middle-click on the island plays/pauses.
+- Respects Windows' *Animation effects* setting (fades instead of springs). Options in the bar's right-click menu: open with a click, open on hover, glance on an empty island.
 
 ### Desktop widgets
 
@@ -76,6 +100,12 @@ ciudad = Madrid
 ; lon = -3.70
 ; image shown inside the phone widget (set it by clicking the phone drawing)
 ; fondo_movil = C:\Users\you\Pictures\wallpaper.jpg
+; island card: "pausar" makes a click on the island play/pause instead of opening the card
+; tarjeta_clic = pausar
+; open the card after hovering the island for a moment
+; tarjeta_hover = si
+; click the empty island spot to open the glance card
+; tarjeta_vistazo = si
 ```
 
 Widget positions and which widgets are on live in `%APPDATA%\macbar\widgets.ini`.

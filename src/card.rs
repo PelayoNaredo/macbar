@@ -175,7 +175,7 @@ fn hud_skip(h: live::Hud, tab: Tab) -> bool {
 }
 
 // ---------------------------------------------------------------- superficie con alfa por píxel
-struct Surface { dc: HDC, bmp: HBITMAP, old: HGDIOBJ, w: i32, h: i32 }
+struct Surface { dc: HDC, bmp: HBITMAP, old: HGDIOBJ, w: i32, h: i32, bits: *const u8 }
 
 impl Surface {
     fn new(w: i32, h: i32) -> Option<Surface> {
@@ -193,7 +193,7 @@ impl Surface {
                 Err(_) => { let _ = DeleteDC(dc); return None; }
             };
             let old = SelectObject(dc, bmp.into());
-            Some(Surface { dc, bmp, old, w, h })
+            Some(Surface { dc, bmp, old, w, h, bits: bits as *const u8 })
         }
     }
 }
@@ -205,6 +205,14 @@ impl Drop for Surface {
 struct CardFonts { clock: IDWriteTextFormat, icon_s: IDWriteTextFormat, big: IDWriteTextFormat, lbl: IDWriteTextFormat, title: IDWriteTextFormat, sub: IDWriteTextFormat, small: IDWriteTextFormat, tiny: IDWriteTextFormat, icon: IDWriteTextFormat, icon_l: IDWriteTextFormat,
     // Los de la isla (para el primer y el último fotograma, idénticos a los de la barra)
     i_title: IDWriteTextFormat, i_small: IDWriteTextFormat, i_icon: IDWriteTextFormat }
+
+/// ¿Windows tiene desactivadas las animaciones? (Accesibilidad > Efectos visuales; MACBAR_REDUCED=1 lo simula)
+fn reduced_motion() -> bool {
+    if std::env::var_os("MACBAR_REDUCED").is_some() { return true; }
+    let mut on = windows::core::BOOL(1);
+    unsafe { let _ = SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    !on.as_bool()
+}
 
 /// Muelle con un pelín de rebote (el mismo que la isla). Devuelve true mientras se mueve.
 fn spring(x: &mut f32, v: &mut f32, target: f32, dt: f32) -> bool {
@@ -297,6 +305,8 @@ struct Card {
     hud_last: Option<live::Hud>,
     hud_k: f32,
     hud_val: f32,
+    /// Windows tiene las animaciones desactivadas (se mira al abrir).
+    reduced: bool,
 }
 
 thread_local! { static CARD: RefCell<Option<Card>> = const { RefCell::new(None) }; }
@@ -341,7 +351,7 @@ fn ensure() -> Option<()> {
             title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
             drag: None, bar_k: 0.0, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default(),
             tab: Tab::Media, tab_prev: None, tab_x: f32::NAN, roll: Roll::default(),
-            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false, hud_last: None, hud_k: 0.0, hud_val: 0.0 };
+            cap, dash, dropping: false, shelf_bmps: (u64::MAX, Vec::new()), seen: HashMap::new(), press_item: None, menu_open: false, hud_last: None, hud_k: 0.0, hud_val: 0.0, reduced: false };
         CARD.with(|x| *x.borrow_mut() = Some(c));
         // Soltar archivos sobre la tarjeta: a la bandeja
         dnd::register(hwnd, true);
@@ -421,6 +431,7 @@ pub fn open_tab(origin: Origin, want: Option<Tab>) {
         c.menu_open = false;
         c.hud_last = None;
         c.hud_k = 0.0;
+        c.reduced = reduced_motion();
         // Los archivos que ya estaban no hacen su entrada
         let old = Instant::now() - Duration::from_secs(5);
         c.seen = live::SHELF.lock().unwrap().iter().map(|x| (x.0.clone(), old)).collect();
@@ -670,9 +681,19 @@ fn render() -> bool {
         } else {
             (if c.closed_at.elapsed().as_secs_f32() > 0.03 { isl_w } else { c.w.max(isl_w) }, PILL_H)
         };
-        moving |= spring(&mut c.w, &mut c.vw, tw, dt);
-        moving |= spring(&mut c.h, &mut c.vh, th, dt);
-        if !c.open && !moving { finished = Some(c.hwnd); }
+        // Con las animaciones de Windows desactivadas: sin muelles ni viajes, solo un fundido de 120 ms
+        let fade = if c.reduced {
+            if c.open { c.w = tab_w; c.h = tab_h; }
+            let e = if c.open { c.opened } else { c.closed_at }.elapsed().as_secs_f32();
+            let k = ease_out(e / 0.12);
+            if k < 1.0 { moving = true; } else if !c.open { finished = Some(c.hwnd); }
+            if c.open { k } else { 1.0 - k }
+        } else {
+            moving |= spring(&mut c.w, &mut c.vw, tw, dt);
+            moving |= spring(&mut c.h, &mut c.vh, th, dt);
+            if !c.open && !moving { finished = Some(c.hwnd); }
+            1.0
+        };
 
         // Carátula grande (256 px) en la GPU, solo cuando cambia
         if let Some(m) = &media {
@@ -715,7 +736,7 @@ fn render() -> bool {
         let kh = ((c.h - PILL_H) / (tab_h - PILL_H)).clamp(0.0, 1.0);
         let kw = if tab_w > isl_w + 1.0 { ((c.w - isl_w) / (tab_w - isl_w)).clamp(0.0, 1.0) } else { 1.0 };
         // Contenido de la isla: se va en cuanto empieza a crecer; el de la tarjeta entra pasado el 55 %
-        let a_isl = (1.0 - kw.max(kh) * 3.2).clamp(0.0, 1.0);
+        let a_isl = if c.reduced { 0.0 } else { (1.0 - kw.max(kh) * 3.2).clamp(0.0, 1.0) };
         let row = |i: f32| ease_out(((kh - 0.55 - 0.06 * i) / 0.4).clamp(0.0, 1.0));
         let (ox, oy) = (c.off.0 as f32 / s, c.off.1 as f32 / s);
         // Con la isla casi a cero (sin nada que enseñar), la forma se desvanece como la de la barra
@@ -731,7 +752,7 @@ fn render() -> bool {
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
             let rad = (PILL_H / 2.0 + (RADIUS - PILL_H / 2.0) * kh).min((sh.bottom - sh.top) / 2.0);
-            popup::push_alpha(&rt, pill_a);
+            popup::push_alpha(&rt, pill_a * fade);
             // Sombra suave (solo cuando ya es tarjeta): varias capas tenues que se abren
             if kh > 0.01 {
                 for i in 1..=7 {
@@ -985,7 +1006,7 @@ fn render() -> bool {
                             weather::draw_icon(&rt, &p, &c.f.icon_l, rx0 - tw - 34.0, ct + 20.0 + lift(k1), 30.0, 26.0, w.code, w.is_day, &wa(0.9 * k1));
                         }
                         let mut gx = rx0;
-                        let usage = GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().and_then(|g| g.usage.map(|u| u.0))));
+                        let usage = if sys::demo() { Some(36.0) } else { GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().and_then(|g| g.usage.map(|u| u.0)))) };
                         // Uso semanal de Claude (naranja Claude) y batería (verde)
                         for (val, col) in [(usage.map(|u| u / 100.0), (0.85, 0.47, 0.34)), (battery().map(|b| b.0 as f32 / 100.0), (0.30, 0.85, 0.45))] {
                             let Some(v) = val else { continue };
@@ -1262,6 +1283,22 @@ fn render() -> bool {
             }
         }
         c.hits = hits;
+        // Capturas para el README: MACBAR_CARDSHOT=carpeta guarda el lienzo (con su transparencia) de cada
+        // pestaña la primera vez que queda quieta
+        if !moving && c.open && kh >= 1.0 {
+            if let (Ok(dir), Some(sf)) = (std::env::var("MACBAR_CARDSHOT"), c.surf.as_ref()) {
+                let path = format!("{dir}\\card_{:?}.raw", c.tab);
+                if !std::path::Path::new(&path).exists() {
+                    let n = (sf.w * sf.h * 4) as usize;
+                    let px = unsafe { std::slice::from_raw_parts(sf.bits, n) };
+                    let mut out = Vec::with_capacity(n + 8);
+                    out.extend_from_slice(&sf.w.to_le_bytes());
+                    out.extend_from_slice(&sf.h.to_le_bytes());
+                    out.extend_from_slice(px);
+                    let _ = std::fs::write(&path, out);
+                }
+            }
+        }
         // Sin línea de tiempo y sonando, el ecualizador necesita fotogramas
         if media.as_ref().is_some_and(|m| m.playing) && media_secs(true).is_none() && kh > 0.5 { moving = true; }
         moving
@@ -1380,7 +1417,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let _ = KillTimer(Some(hwnd), TIMER_ANIM);
                     if render() { SetTimer(Some(hwnd), TIMER_ANIM, 15, None); }
                     // Quieta y sonando: un repintado por segundo para el progreso
-                    else if is_open() && (MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) || (live::timer_left().is_some() && !live::timer_paused()) || CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.tab == Tab::Glance))) { SetTimer(Some(hwnd), TIMER_ANIM, 250, None); }
+                    else if is_open() && (MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing) || (live::timer_left().is_some() && !live::timer_paused()) || CARD.with(|c| c.borrow().as_ref().is_some_and(|c| c.tab == Tab::Glance))) { SetTimer(Some(hwnd), TIMER_ANIM, 500, None); }
                 }
                 LRESULT(0)
             }
