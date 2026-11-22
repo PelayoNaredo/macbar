@@ -225,14 +225,57 @@ pub fn hide_all() {
     for h in all { unsafe { let _ = ShowWindow(h, SW_HIDE); } }
 }
 
-/// Todos se repintan hasta que termine la transición entre caras.
+/// Transición entre caras: la anima la composición de Windows (desplazamiento, escala y opacidad de cada
+/// widget), sin repintar nada: va al ritmo de la pantalla y sin gastar CPU. Cada widget se aparta hacia su
+/// lado de la pantalla, en cascada; al volver, al revés.
 pub fn animate_all() {
-    let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
-    for h in all { unsafe { let _ = InvalidateRect(Some(h), None, false); } }
+    use windows::Win32::Graphics::DirectComposition::*;
+    let away = faces::AWAY.load(Ordering::Relaxed);
+    let sw = unsafe { GetSystemMetrics(SM_CXSCREEN) };
+    let items: Vec<(IDCompositionVisual, f32, f32, f32, f32)> = DESKS.with(|d| d.borrow().iter().filter_map(|w| {
+        let g = w.target.as_ref()?;
+        let mut r = RECT::default();
+        unsafe { let _ = GetWindowRect(w.hwnd, &mut r); }
+        let side = if (r.left + r.right) / 2 < sw / 2 { -1.0 } else { 1.0 };
+        Some((g._visual.clone(), (r.right - r.left) as f32, (r.bottom - r.top) as f32, side, scale(w.hwnd)))
+    }).collect());
+    SHARED.with(|sh| {
+        let sh = sh.borrow();
+        let Some(sh) = sh.as_ref() else { return };
+        unsafe {
+            // Curva de `a` a `b` que empieza a los `delay` s y dura `dur` s: al irse acelera y frena
+            // (smoothstep), al volver frena al llegar (ease out)
+            let curve = |a: f32, b: f32, delay: f64| -> Option<IDCompositionAnimation> {
+                let an = sh.dcomp.CreateAnimation().ok()?;
+                let (d, t) = (b - a, faces::SLIDE_S);
+                an.AddCubic(0.0, a, 0.0, 0.0, 0.0).ok()?;
+                if away { an.AddCubic(delay, a, 0.0, 3.0 * d / (t * t), -2.0 * d / (t * t * t)).ok()?; }
+                else { an.AddCubic(delay, a, 3.0 * d / t, -3.0 * d / (t * t), d / (t * t * t)).ok()?; }
+                an.End(delay + t as f64, b).ok()?;
+                Some(an)
+            };
+            for (i, (v, w, h, side, s)) in items.into_iter().enumerate() {
+                let delay = i as f64 * faces::STAGGER_S as f64;
+                let (from, to) = if away { (0.0, 1.0) } else { (1.0, 0.0) };
+                // Desplazamiento corto hacia su lado (la ventana recorta lo que se sale: poco y desvaneciéndose)
+                let dx = side * 22.0 * s;
+                if let Some(an) = curve(dx * from, dx * to, delay) { let _ = v.SetOffsetX(&an); }
+                // Algo más pequeño (desde su centro) y desvanecido
+                if let Ok(st) = sh.dcomp.CreateScaleTransform() {
+                    let _ = st.SetCenterX2(w / 2.0);
+                    let _ = st.SetCenterY2(h / 2.0);
+                    if let Some(an) = curve(1.0 - 0.08 * from, 1.0 - 0.08 * to, delay) { let _ = st.SetScaleX(&an); let _ = st.SetScaleY(&an); }
+                    let _ = v.SetTransform(&st);
+                }
+                if let Ok(eg) = sh.dcomp.CreateEffectGroup() {
+                    if let Some(an) = curve(1.0 - from, 1.0 - to, delay) { let _ = eg.SetOpacity(&an); }
+                    let _ = v.SetEffect(&eg);
+                }
+            }
+            let _ = sh.dcomp.Commit();
+        }
+    });
 }
-
-/// Puesto del widget en la cascada de la transición (de derecha a izquierda, como se colocan).
-fn order_of(hwnd: HWND) -> usize { DESKS.with(|d| d.borrow().iter().position(|w| w.hwnd == hwnd).unwrap_or(0)) }
 
 /// Para el menú: nombre de cada widget y si está puesto.
 pub fn menu_items() -> Vec<(&'static str, bool)> { ALL.iter().map(|k| (k.label(), shown(*k))).collect() }
@@ -452,19 +495,9 @@ fn age(born: Instant) -> f32 {
 /// Medición opcional del coste de pintar (con MACBAR_PROF=1): pintados y milisegundos por widget cada 10 s.
 static PROF: Mutex<([u32; 6], [f32; 6], Option<Instant>)> = Mutex::new(([0; 6], [0.0; 6], None));
 thread_local! {
-    static DESKS_N: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    static FACE_POS: std::cell::Cell<(f32, f32)> = const { std::cell::Cell::new((0.0, 1.0)) };
 }
 
 fn paint(hwnd: HWND) {
-    // Fuera del préstamo de la lista (el pintado la tiene prestada): puesto en la cascada y lado
-    DESKS_N.with(|c| c.set(DESKS.with(|d| d.borrow().len())));
-    let side = unsafe {
-        let mut r = RECT::default();
-        let _ = GetWindowRect(hwnd, &mut r);
-        if (r.left + r.right) / 2 < GetSystemMetrics(SM_CXSCREEN) / 2 { -1.0 } else { 1.0 }
-    };
-    FACE_POS.with(|c| c.set((faces::away_k(order_of(hwnd)), side)));
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var("MACBAR_PROF").is_ok()) { return paint_real(hwnd); }
     let t0 = Instant::now();
@@ -742,8 +775,7 @@ fn paint_real(hwnd: HWND) {
             // Fundido de entrada y de salida dentro del propio dibujo (sin ventanas "layered", que
             // obligaban a Windows a copiar cada fotograma por la CPU)
             // Cara de iconos: el widget se aparta hacia su lado de la pantalla y se desvanece
-            let (ak, side) = FACE_POS.with(|c| c.get());
-            popup::push_alpha(&rt, fade_alpha(w) * (1.0 - ak));
+            popup::push_alpha(&rt, fade_alpha(w));
             if !fl {
                 // Tarjeta: algo más tapada que los paneles, encima del fondo de pantalla hace falta contraste
                 // (con la composición por GPU, Windows ya no redondea la ventana: la tarjeta lo hace sola)
@@ -760,8 +792,7 @@ fn paint_real(hwnd: HWND) {
             sc *= 1.0 + 0.025 * w.lift;
             let die = w.dying.map(|d| popup::ease_out((d.elapsed().as_secs_f32() / DIE_S).min(1.0))).unwrap_or(0.0);
             sc *= 1.0 - 0.07 * die;
-            sc *= 1.0 - 0.05 * ak;
-            rt.SetTransform(&windows_numerics::Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: ww / 2.0 * (1.0 - sc) + side * 56.0 * ak, M32: wh / 2.0 * (1.0 - sc) + 12.0 * rise + 6.0 * die });
+            rt.SetTransform(&windows_numerics::Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: ww / 2.0 * (1.0 - sc), M32: wh / 2.0 * (1.0 - sc) + 12.0 * rise + 6.0 * die });
             if layered {
                 if let Some(bmp) = w.layer.as_ref().and_then(|l| l.1.GetBitmap().ok()) {
                     // Sin escalar, píxel a píxel (nítida); escalada (entrada, arrastre) con suavizado
@@ -778,13 +809,11 @@ fn paint_real(hwnd: HWND) {
             rt.SetTransform(&popup::IDENTITY);
             let _ = s;
             rt.PopLayer();
-            let n_desks = DESKS_N.with(|c| c.get());
-            let face_moving = faces::moving(n_desks);
-            let anim = moving || w.w.animating(t) || w.dying.is_some() || face_moving;
+            let anim = moving || w.w.animating(t) || w.dying.is_some();
 
             // Las transiciones cortas van a 60 fotogramas; lo continuo (gráficas, letra) a 30
             // (la transición entre caras también, a 60 fotogramas)
-            let fast = moving || t < 1.4 || w.dying.is_some() || w.w.smooth() || face_moving;
+            let fast = moving || t < 1.4 || w.dying.is_some() || w.w.smooth();
             FAST.with(|f| f.set(if fast { 15 } else { w.w.frame_ms() }));
             w.hits = std::mem::take(&mut ui.hits);
             drop(ui);
