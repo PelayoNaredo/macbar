@@ -22,14 +22,43 @@ pub(crate) fn split_url(url: &str) -> Option<(bool, String, u16, String)> {
     Some((secure, host.to_string(), port, path))
 }
 
+/// Por qué falló una petición.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fail {
+    /// La dirección no se entiende (o no es http/https).
+    Url,
+    /// Sin respuesta: sin red, el servidor no existe o tardó demasiado.
+    Net,
+    /// El servidor contestó con ese código (404, 500…).
+    Status(u32),
+    /// Más grande que el tope.
+    TooBig,
+}
+
+impl Fail {
+    /// El error en una frase, para enseñarlo.
+    pub(crate) fn message(self) -> String {
+        match self {
+            Fail::Url => crate::i18n::t("La dirección no es válida").into(),
+            Fail::Net => crate::i18n::t("No responde (¿sin conexión?)").into(),
+            Fail::Status(404) => crate::i18n::t("No existe (error 404)").into(),
+            Fail::Status(c) => crate::i18n::tf("El servidor contestó con un error ({})", &[&c]),
+            Fail::TooBig => crate::i18n::t("Es demasiado grande").into(),
+        }
+    }
+}
+
 /// GET: el cuerpo si el servidor contesta 2xx.
-pub(crate) fn get(url: &str) -> Option<Vec<u8>> {
+pub(crate) fn get(url: &str) -> Option<Vec<u8>> { fetch(url).ok() }
+
+/// GET con el motivo si falla.
+pub(crate) fn fetch(url: &str) -> Result<Vec<u8>, Fail> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Networking::WinHttp::*;
-    let (secure, host, port, path) = split_url(url)?;
+    let (secure, host, port, path) = split_url(url).ok_or(Fail::Url)?;
     unsafe {
         let s = WinHttpOpen(&HSTRING::from(UA), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
-        if s.is_null() { return None; }
+        if s.is_null() { return Err(Fail::Net); }
         // Resolver, conectar, enviar y recibir: nada de colgarse un minuto sin red
         let _ = WinHttpSetTimeouts(s, 5000, 6000, 6000, 10000);
         let c = WinHttpConnect(s, &HSTRING::from(host.as_str()), port, 0);
@@ -38,28 +67,28 @@ pub(crate) fn get(url: &str) -> Option<Vec<u8>> {
             WinHttpOpenRequest(c, &HSTRING::from("GET"), &HSTRING::from(path.as_str()), PCWSTR::null(), PCWSTR::null(), std::ptr::null(), flags)
         };
         let mut out = Vec::new();
-        let mut ok = !r.is_null()
+        let mut res: Result<(), Fail> = if !r.is_null()
             && WinHttpSendRequest(r, None, None, 0, 0, 0).is_ok()
-            && WinHttpReceiveResponse(r, std::ptr::null_mut()).is_ok();
-        if ok {
+            && WinHttpReceiveResponse(r, std::ptr::null_mut()).is_ok() { Ok(()) } else { Err(Fail::Net) };
+        if res.is_ok() {
             let mut code = 0u32;
             let mut len = 4u32;
             let q = WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, PCWSTR::null(), Some(&mut code as *mut u32 as _), &mut len, std::ptr::null_mut());
-            ok = q.is_ok() && (200..300).contains(&code);
+            if q.is_err() { res = Err(Fail::Net); } else if !(200..300).contains(&code) { res = Err(Fail::Status(code)); }
         }
-        if ok {
+        if res.is_ok() {
             loop {
                 let mut avail = 0u32;
                 if WinHttpQueryDataAvailable(r, &mut avail).is_err() || avail == 0 { break; }
                 let mut buf = vec![0u8; avail as usize];
                 let mut read = 0u32;
-                if WinHttpReadData(r, buf.as_mut_ptr() as _, avail, &mut read).is_err() { ok = false; break; }
+                if WinHttpReadData(r, buf.as_mut_ptr() as _, avail, &mut read).is_err() { res = Err(Fail::Net); break; }
                 out.extend_from_slice(&buf[..read as usize]);
-                if out.len() > MAX { ok = false; break; }
+                if out.len() > MAX { res = Err(Fail::TooBig); break; }
             }
         }
         for h in [r, c, s] { if !h.is_null() { let _ = WinHttpCloseHandle(h); } }
-        ok.then_some(out)
+        res.map(|_| out)
     }
 }
 

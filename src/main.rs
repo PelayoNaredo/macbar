@@ -72,6 +72,7 @@ mod share;
 mod profiles;
 mod stocks;
 mod sys;
+mod textfield;
 mod tray;
 mod trayhost;
 mod weather;

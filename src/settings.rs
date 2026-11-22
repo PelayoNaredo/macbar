@@ -8,6 +8,10 @@
 use super::*;
 use popup::{Content, Re, Ui};
 
+/// Secciones de Bolsa y Noticias (buscador de valores, temas, fuentes propias y filtros).
+#[path = "settings_feeds.rs"]
+mod feeds;
+
 const W: f32 = 640.0;
 const H: f32 = 460.0;
 /// Ancho de la columna de secciones.
@@ -42,19 +46,21 @@ mod caras {
 
 // ---------------------------------------------------------------- secciones y filas
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Sec { General, Island, Desk, Tools, Profiles, Weather, About }
-const SECS: [Sec; 7] = [Sec::General, Sec::Island, Sec::Desk, Sec::Tools, Sec::Profiles, Sec::Weather, Sec::About];
+enum Sec { General, Island, Desk, News, Stocks, Tools, Profiles, Weather, About }
+const SECS: [Sec; 9] = [Sec::General, Sec::Island, Sec::Desk, Sec::News, Sec::Stocks, Sec::Tools, Sec::Profiles, Sec::Weather, Sec::About];
 
 impl Sec {
     fn label(self) -> &'static str {
         i18n::t(match self {
             Sec::General => "General", Sec::Island => "Isla y tarjeta", Sec::Desk => "Escritorio y widgets", Sec::Tools => "Herramientas",
+            Sec::News => "Noticias", Sec::Stocks => "Bolsa",
             Sec::Profiles => "Perfiles y temas", Sec::Weather => "Tiempo", Sec::About => "Acerca de",
         })
     }
     fn glyph(self) -> &'static str {
         match self {
             Sec::General => "\u{E713}", Sec::Island => "\u{E8BD}", Sec::Desk => "\u{E8A9}", Sec::Tools => "\u{E90F}",
+            Sec::News => "\u{E900}", Sec::Stocks => "\u{E9D2}",
             Sec::Profiles => "\u{E771}", Sec::Weather => "\u{E706}", Sec::About => "\u{E946}",
         }
     }
@@ -112,6 +118,8 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
             (Some("Tema"), vec![Theme]),
         ],
         Sec::Weather => vec![(None, vec![City, Refresh])],
+        // Las dibuja `feeds` (no son filas de las de aquí)
+        Sec::News | Sec::Stocks => vec![],
         Sec::About => vec![(None, vec![Version, Repo, Folder]), (None, vec![Quit])],
     }
 }
@@ -211,13 +219,13 @@ enum Act {
     Url,
     Folder,
     EditConfig,
-    EditNews,
-    EditStocks,
     EditCity,
     SaveCity,
     Design(usize, usize),
     // ---- tamaños de los widgets (F0): widget y posición del tamaño en su lista
     Size(usize, usize),
+    /// Ir a otra sección.
+    Go(Sec),
     Nothing,
 }
 
@@ -247,8 +255,8 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
         Style => match pick(2) { Some(i) if (i == 0) != st.floating => Act::Style, _ => Act::Nothing },
         Ink => match pick(3) { Some(i) if INK_ORDER[i as usize] as i8 != st.ink => Act::Bar(crate::BAR_INK0 + INK_ORDER[i as usize]), _ => Act::Nothing },
         FaceDbl if sub == 0 => Act::FaceDbl,
-        NewsSrc if sub == 1 => Act::EditNews,
-        StockSyms if sub == 1 => Act::EditStocks,
+        NewsSrc if sub == 1 => Act::Go(Sec::News),
+        StockSyms if sub == 1 => Act::Go(Sec::Stocks),
         // Un perfil ya guardado se carga y macbar se reinicia; uno vacío guarda en él lo de ahora
         Profile => match pick(3) {
             Some(i) if st.profile != Some(i as usize) => if st.saved[i as usize] { Act::BarClose(crate::BAR_PROFILE0 + i) } else { Act::Bar(crate::BAR_PROFILE0 + i) },
@@ -328,8 +336,8 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
             let sel = INK_ORDER.iter().position(|m| *m as i8 == st.ink);
             (t("Color del texto"), t("Automático: según el fondo de cada widget"), seg(&["Auto", "Claro", "Oscuro"], sel), true)
         }
-        NewsSrc => (t("Fuentes de las noticias"), t("Feeds RSS: noticias_fuentes en widgets.ini"), Ctl::Buttons(vec![("\u{E70F}", t("Editar fuentes…"))]), true),
-        StockSyms => (t("Valores de la bolsa"), t("Símbolos de Yahoo Finance: bolsa_simbolos"), Ctl::Buttons(vec![("\u{E70F}", t("Editar símbolos…"))]), true),
+        NewsSrc => (t("Noticias"), t("Temas, fuentes propias y filtros"), Ctl::Buttons(vec![("\u{E713}", t("Configurar…"))]), true),
+        StockSyms => (t("Bolsa"), t("Valores, gráfica y refresco"), Ctl::Buttons(vec![("\u{E713}", t("Configurar…"))]), true),
         FaceDbl => (t("Doble clic en el escritorio"), t("Cambia entre los widgets y los iconos"), Ctl::Switch(st.face_dbl), true),
         Profile => {
             let sel = st.profile;
@@ -377,6 +385,21 @@ pub struct Settings {
     last: Instant,
     /// Texto de la ciudad mientras se escribe.
     edit: Option<String>,
+    /// Secciones de Bolsa y Noticias.
+    feeds: feeds::Feeds,
+}
+
+/// Sección que hay que enseñar al abrir (o, si ya está abierta, en el próximo tic). usize::MAX = ninguna.
+static PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Abre la Configuración en la sección de las noticias (clic derecho en el widget).
+pub fn open_at_news() { open_at(Sec::News); }
+/// Abre la Configuración en la sección de la bolsa (clic derecho en el widget).
+pub fn open_at_stocks() { open_at(Sec::Stocks); }
+fn open_at(s: Sec) {
+    PENDING.store(s.index(), std::sync::atomic::Ordering::Relaxed);
+    open();
+    if let Some(h) = popup::hwnd_of(popup::Kind::Settings) { unsafe { let _ = PostMessageW(Some(h), WM_TIMER, WPARAM(popup::TIMER_TICK_P), LPARAM(0)); } }
 }
 
 /// Abre la ventana de Configuración centrada bajo la barra (si ya está abierta, se queda).
@@ -421,6 +444,7 @@ impl Settings {
         Settings {
             sec: Sec::General, prev: None, st: State::default(), stale: true, anim: HashMap::new(), moving: false,
             scroll: 0.0, scroll_to: 0.0, max_scroll: 0.0, side_y: -1.0, opened: Instant::now(), last: Instant::now(), edit: None,
+            feeds: feeds::Feeds::new(),
         }
     }
 
@@ -440,15 +464,17 @@ impl Settings {
         self.scroll = 0.0;
         self.scroll_to = 0.0;
         self.edit = None;
+        self.feeds.blur();
     }
 
     /// Ejecuta la acción. Las que tocan Windows van en `Re::Run`: el marco las corre fuera del préstamo
     /// del panel (crear o cerrar ventanas manda mensajes al momento).
     fn perform(&mut self, a: Act) -> Re {
         let bar = |id: u32| move || crate::bar_action(bar_hwnd(), id);
-        if !matches!(a, Act::Nothing | Act::EditCity) { self.stale = true; }
+        if !matches!(a, Act::Nothing | Act::EditCity | Act::Go(_)) { self.stale = true; }
         match a {
             Act::Nothing => Re::Stay,
+            Act::Go(s) => { self.go(s.index()); Re::Stay }
             Act::EditCity => { if self.edit.is_none() { self.edit = Some(self.st.city.clone()); } Re::Stay }
             Act::SaveCity => {
                 let v = self.edit.take().unwrap_or_else(|| self.st.city.clone()).trim().to_string();
@@ -471,8 +497,6 @@ impl Settings {
             Act::Url => Re::CloseRun(Box::new(|| sys::open(REPO))),
             Act::Folder => Re::CloseRun(Box::new(|| { let _ = std::fs::create_dir_all(sys::config_dir()); sys::open(&sys::config_dir()); })),
             Act::EditConfig => Re::CloseRun(Box::new(sys::edit_config)),
-            Act::EditNews => Re::CloseRun(Box::new(crate::news::edit_sources)),
-            Act::EditStocks => Re::CloseRun(Box::new(crate::stocks::edit_symbols)),
         }
     }
 
@@ -502,6 +526,7 @@ impl Settings {
             ui.text_c(&ui.f.sub, i18n::t("Barra de menús estilo macOS para Windows 11"), cx, y + 86.0, 16.0, &ui.dim);
             y += 116.0;
         }
+        if let Some(page) = feeds::Page::of(sec) { y = self.feeds_page(ui, page, y, live, dt); }
         let mut ri = 0usize;
         for (cap, list) in groups(sec, self.st.each.len()) {
             if let Some(c) = cap {
@@ -705,10 +730,16 @@ impl Content for Settings {
         self.edit = None;
         self.opened = Instant::now();
         self.last = Instant::now();
+        self.feeds.reload();
+        let p = PENDING.swap(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+        if p < SECS.len() { self.sec = SECS[p]; }
+        self.feeds_test_hook();
     }
 
     /// Cada segundo: si algo cambió por otro camino (menú, atajo, otro panel), se ve aquí al momento.
     fn tick(&mut self) -> bool {
+        let p = PENDING.swap(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+        if p < SECS.len() { self.go(p); return true; }
         if self.edit.is_some() { return false; }
         let n = read();
         if n != self.st { self.st = n; return true; }
@@ -724,6 +755,7 @@ impl Content for Settings {
         let dt = self.last.elapsed().as_secs_f32().min(1.0 / 30.0);
         self.last = Instant::now();
         if self.stale { self.st = read(); self.stale = false; }
+        self.feeds_pump();
         self.moving = false;
         let since = self.opened.elapsed().as_secs_f32();
         let ka = 1.0 - (-dt / 0.06).exp();
@@ -778,7 +810,9 @@ impl Content for Settings {
     }
 
     fn click(&mut self, id: u32, _right: bool) -> Re {
+        if self.feeds.swallow_click() { return Re::Stay; }
         if (ID_SEC0..ID_SEC0 + SECS.len() as u32).contains(&id) { self.go((id - ID_SEC0) as usize); return Re::Stay; }
+        if (feeds::FID..feeds::END).contains(&id) { return self.feeds_click(id); }
         let Some((si, ri, sub)) = decode(id) else { return Re::Stay };
         if si != self.sec.index() { return Re::Stay; }
         let Some(row) = rows_of(self.sec, self.st.each.len()).get(ri).copied() else { return Re::Stay };
@@ -795,6 +829,7 @@ impl Content for Settings {
     }
 
     fn key(&mut self, vk: u16) -> Option<Re> {
+        if let Some(r) = self.feeds_key(vk) { return Some(r); }
         let i = self.sec.index();
         match vk {
             v if v == VK_RETURN.0 && self.edit.is_some() => Some(self.perform(Act::SaveCity)),
@@ -806,6 +841,7 @@ impl Content for Settings {
     }
 
     fn chr(&mut self, c: char) -> bool {
+        if self.feeds.focused() { return self.feeds_chr(c); }
         let Some(e) = self.edit.as_mut() else { return false };
         match c {
             '\u{8}' => { e.pop(); }
@@ -821,6 +857,11 @@ impl Content for Settings {
         if e.chars().count() > 60 { *e = e.chars().take(60).collect(); }
         true
     }
+
+    fn mouse(&mut self, ev: popup::Mouse, x: f32, y: f32) -> bool { self.feeds_mouse(ev, x, y) }
+    fn wake_ms(&self) -> Option<u32> { self.feeds.wake_ms() }
+    fn caret(&self) -> Option<(f32, f32, f32)> { self.feeds.caret() }
+    fn data(&mut self) { self.feeds_data(); }
 }
 
 #[cfg(test)]
@@ -832,7 +873,8 @@ mod tests {
         let mut all = Vec::new();
         for s in SECS {
             let rows = rows_of(s, 7);
-            assert!(!rows.is_empty(), "{s:?} sin filas");
+            // Bolsa y Noticias las dibuja `feeds`
+            assert_eq!(rows.is_empty(), feeds::Page::of(s).is_some(), "{s:?}");
             // Cabe en los ids (16 partes por fila, 1000 por sección)
             assert!(rows.len() * 16 < 1000);
             all.extend(rows);

@@ -5,7 +5,7 @@ use super::*;
 use std::collections::HashMap;
 
 pub const TIMER_REVEAL: usize = 90;
-const TIMER_TICK_P: usize = 91;
+pub const TIMER_TICK_P: usize = 91;
 const TIMER_ANIM_P: usize = 92;
 const REVEAL_MS: f32 = 320.0;
 pub const WM_PANEL_DATA: u32 = WM_USER + 40;
@@ -310,7 +310,19 @@ pub trait Content {
     fn key(&mut self, _vk: u16) -> Option<Re> { None }
     /// Carácter escrito (WM_CHAR). true = repintar.
     fn chr(&mut self, _c: char) -> bool { false }
+    /// Botón izquierdo y movimiento del ratón con su posición (DIP del panel), para campos de texto y
+    /// arrastres. Llega antes que `click`. true = repintar.
+    fn mouse(&mut self, _ev: Mouse, _x: f32, _y: f32) -> bool { false }
+    /// Milisegundos hasta el próximo fotograma que necesita aunque no se mueva nada (el caret que
+    /// parpadea, la espera antes de buscar). None = ninguno.
+    fn wake_ms(&self) -> Option<u32> { None }
+    /// Caret del campo que se está editando (x, y de arriba, alto), para colocar la ventana del IME.
+    fn caret(&self) -> Option<(f32, f32, f32)> { None }
 }
+
+/// Lo que hace el botón izquierdo (ver `Content::mouse`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mouse { Down, Move, Up }
 
 pub struct Ui<'a> {
     pub p: Painter<'a>,
@@ -575,6 +587,8 @@ fn paint(hwnd: HWND) {
             rt.PopLayer();
             if moving || w.content.as_ref().is_some_and(|c| c.animating()) || REVEALS.with(|r| r.borrow().contains_key(&(hwnd.0 as isize))) {
                 SetTimer(Some(hwnd), TIMER_ANIM_P, 15, None);
+            } else if let Some(ms) = w.content.as_ref().and_then(|c| c.wake_ms()) {
+                SetTimer(Some(hwnd), TIMER_ANIM_P, ms.clamp(10, 5000), None);
             }
             rt.SetTransform(&IDENTITY);
             w.hits = std::mem::take(&mut ui.hits);
@@ -623,6 +637,31 @@ fn resize_if_needed(hwnd: HWND) {
     }
 }
 
+/// Pasa el ratón al contenido en DIP del panel. true = repintar.
+fn mouse_to(hwnd: HWND, ev: Mouse, lp: LPARAM) -> bool {
+    let s = scale_of(hwnd);
+    let x = (lp.0 & 0xFFFF) as i16 as f32 / s;
+    let y = ((lp.0 >> 16) & 0xFFFF) as i16 as f32 / s;
+    with_pw(hwnd, |w| w.content.as_mut().map(|c| c.mouse(ev, x, y)).unwrap_or(false)).unwrap_or(false)
+}
+
+/// Coloca la ventana de composición del IME (y la de candidatos) en el caret del campo que se edita.
+fn ime_at_caret(hwnd: HWND) {
+    use windows::Win32::UI::Input::Ime::*;
+    let Some((x, y, h)) = with_pw(hwnd, |w| w.content.as_ref().and_then(|c| c.caret())).flatten() else { return };
+    let s = scale_of(hwnd);
+    let pt = POINT { x: (x * s) as i32, y: (y * s) as i32 };
+    unsafe {
+        let imc = ImmGetContext(hwnd);
+        if imc.is_invalid() { return; }
+        let cf = COMPOSITIONFORM { dwStyle: CFS_POINT, ptCurrentPos: pt, rcArea: RECT::default() };
+        let _ = ImmSetCompositionWindow(imc, &cf);
+        let cand = CANDIDATEFORM { dwIndex: 0, dwStyle: CFS_CANDIDATEPOS, ptCurrentPos: POINT { x: pt.x, y: pt.y + (h * s) as i32 + 2 }, rcArea: RECT::default() };
+        let _ = ImmSetCandidateWindow(imc, &cand);
+        let _ = ImmReleaseContext(hwnd, imc);
+    }
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         match msg {
@@ -663,7 +702,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
+            WM_LBUTTONDOWN => {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(hwnd);
+                if mouse_to(hwnd, Mouse::Down, lp) { let _ = InvalidateRect(Some(hwnd), None, false); }
+                LRESULT(0)
+            }
+            // El IME (chino, japonés…) escribe junto al caret del campo
+            0x010D /* WM_IME_STARTCOMPOSITION */ | 0x010F /* WM_IME_COMPOSITION */ => {
+                ime_at_caret(hwnd);
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
             WM_MOUSEMOVE => {
+                if mouse_to(hwnd, Mouse::Move, lp) { let _ = InvalidateRect(Some(hwnd), None, false); }
                 let h = hit_at(hwnd, lp);
                 let ch = with_pw(hwnd, |w| { let c = w.hover != h; w.hover = h; c }).unwrap_or(false);
                 if ch { let _ = InvalidateRect(Some(hwnd), None, false); }
@@ -679,6 +729,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_LBUTTONUP | WM_RBUTTONUP => {
+                if msg == WM_LBUTTONUP {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                    if mouse_to(hwnd, Mouse::Up, lp) { let _ = InvalidateRect(Some(hwnd), None, false); }
+                }
                 if let Some(id) = hit_at(hwnd, lp) {
                     // El contenido decide; las llamadas a Windows van después, fuera del préstamo
                     let re = with_pw(hwnd, |w| w.content.as_mut().map(|c| c.click(id, msg == WM_RBUTTONUP))).flatten();
