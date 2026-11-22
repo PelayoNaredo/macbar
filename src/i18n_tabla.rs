@@ -531,4 +531,10 @@ pub static EN: &[(&str, &str)] = &[
     ("Mínimo", "Minimal"),
     ("Anillos", "Rings"),
     ("Carátula", "Cover"),
+    ("Vinilo", "Vinyl"),
+    ("Póster", "Poster"),
+    ("Polaroid", "Polaroid"),
+    ("Radial", "Radial"),
+    ("Paletas", "Flip"),
+    ("horas", "hours"),
 ];

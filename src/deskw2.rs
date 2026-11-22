@@ -8,7 +8,7 @@ use popup::Ui;
 const PAD: f32 = 20.0;
 
 /// Color de la carátula que suena (el mismo que tiñe la isla), o el acento si no hay música.
-fn tint() -> [f32; 3] {
+pub(crate) fn tint() -> [f32; 3] {
     let t = GFX.with(|g| g.try_borrow().ok().and_then(|g| g.as_ref().map(|g| g.tint_now)));
     match t {
         Some(t) if MEDIA.lock().unwrap().is_some() && t != [1.0; 3] => t,
@@ -71,18 +71,18 @@ impl Widget for VisualW {
 }
 
 /// Segundos desde que arrancó macbar (para animaciones lentas y continuas).
-fn ui_time() -> f32 {
+pub(crate) fn ui_time() -> f32 {
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     T0.get_or_init(Instant::now).elapsed().as_secs_f32()
 }
 
 // ---------------------------------------------------------------- marco de fotos
 /// Foto lista para pintar: versión, píxeles BGRA premultiplicados, ancho, alto y ruta.
-type Photo = (u64, Arc<Vec<u8>>, u32, u32, String);
+pub(crate) type Photo = (u64, Arc<Vec<u8>>, u32, u32, String);
 static PHOTO: Mutex<Option<Photo>> = Mutex::new(None);
 static NEXT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static PHOTO_STARTED: std::sync::Once = std::sync::Once::new();
-const SHOW_S: f32 = 14.0;
+pub(crate) const SHOW_S: f32 = 14.0;
 const FADE_S: f32 = 1.4;
 
 /// Carpeta de las fotos: la elegida (widgets.ini «fotos_carpeta») o Imágenes.
@@ -174,6 +174,12 @@ fn photo_thread() {
     }
 }
 
+/// Arranca (una vez) el hilo que prepara las fotos y pide la primera.
+pub(crate) fn photo_start() { PHOTO_STARTED.call_once(|| { std::thread::spawn(photo_thread); NEXT_ASKED.store(true, Ordering::Relaxed); }); }
+/// La última foto preparada por el hilo.
+pub(crate) fn photo_latest() -> Option<Photo> { PHOTO.lock().unwrap().clone() }
+/// Pide al hilo la foto siguiente.
+pub(crate) fn photo_next() { NEXT_ASKED.store(true, Ordering::Relaxed); }
 fn deskdata_rand() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -218,7 +224,7 @@ impl PhotosW {
 
 impl Widget for PhotosW {
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, _t: f32, _dt: f32) {
-        PHOTO_STARTED.call_once(|| { std::thread::spawn(photo_thread); NEXT_ASKED.store(true, Ordering::Relaxed); });
+        photo_start();
         let (w, h) = size(Kind::Photos);
         if self.rt.fresh(ui.rt) { self.cur = None; self.prev = None; }
         // ¿Hay una foto nueva preparada? Entra con un fundido sobre la anterior
@@ -268,7 +274,7 @@ impl Widget for PhotosW {
 }
 
 /// Elegir la carpeta de las fotos (se guarda en widgets.ini como `fotos_carpeta`).
-fn pick_folder() {
+pub(crate) fn pick_folder() {
     std::thread::spawn(|| unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let Ok(dlg) = CoCreateInstance::<_, IFileOpenDialog>(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) else { return };

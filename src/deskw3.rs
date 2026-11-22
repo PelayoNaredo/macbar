@@ -104,7 +104,7 @@ impl Roll {
 
 // ---------------------------------------------------------------- fechas (lógica pura)
 /// Días desde el 1-1-1970 (calendario gregoriano).
-fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
+pub(crate) fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = y as i64 - if m <= 2 { 1 } else { 0 };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -115,7 +115,7 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
 }
 
 /// Al revés: (año, mes, día) de un número de días desde el 1-1-1970.
-fn civil_from_days(z: i64) -> (i32, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = z - era * 146097;
@@ -145,7 +145,7 @@ fn fmt_date_iso(days: i64) -> String { let (y, m, d) = civil_from_days(days); fo
 
 fn local_now() -> SYSTEMTIME { unsafe { GetLocalTime() } }
 
-fn today() -> i64 { let n = local_now(); days_from_civil(n.wYear as i32, n.wMonth as u32, n.wDay as u32) }
+pub(crate) fn today() -> i64 { let n = local_now(); days_from_civil(n.wYear as i32, n.wMonth as u32, n.wDay as u32) }
 
 // ================================================================ relojes del mundo
 /// Ciudades por defecto (en el idioma de la interfaz).
@@ -767,6 +767,19 @@ fn demo_countdowns(today: i64) -> String {
     fmt_countdowns(&l)
 }
 
+/// Para otros diseños de la cuenta atrás: las fechas que faltan (nombre y día), de la más cercana a
+/// la más lejana. Lee lo mismo que el widget de siempre (o las de muestra en el modo demo).
+pub(crate) fn countdown_dates(today: i64) -> Vec<(String, i64)> {
+    let cfg = if sys::demo() { demo_countdowns(today) } else { desk::ini_value("cuenta_atras").unwrap_or_default() };
+    let l = parse_countdowns(&cfg);
+    upcoming(&l, today).into_iter().map(|i| (l[i].name.clone(), l[i].date)).collect()
+}
+
+/// Abre widgets.ini para editar las fechas (con un ejemplo si aún no hay ninguna).
+pub(crate) fn countdown_edit() {
+    let ex = format!("{}|{}", i18n::t("Vacaciones"), fmt_date_iso(today() + 30));
+    edit_ini("cuenta_atras", ex);
+}
 /// «20 dic» (con el año si no es el actual).
 fn fmt_date_short(days: i64, today: i64) -> String {
     let (y, m, d) = civil_from_days(days);

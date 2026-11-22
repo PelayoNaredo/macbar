@@ -103,18 +103,21 @@ fn pbutton(ui: &mut Ui, r: D2D_RECT_F, glyph: Option<&str>, label: &str, id: u32
 
 pub fn new(k: Kind) -> Box<dyn Widget> {
     match k {
-        Kind::Calendar => if desk::variant(k) == 1 { Box::new(crate::deskv::TodayW) } else { Box::new(CalendarW::default()) },
+        Kind::Calendar => match desk::variant(k) { 1 => Box::new(crate::deskv::TodayW), 2 => Box::new(crate::deskv2::PosterW), _ => Box::new(CalendarW::default()) },
         Kind::Weather => match desk::variant(k) { 1 => Box::new(crate::deskv::SkyW), 2 => Box::new(crate::deskv::MinWeatherW::default()), _ => Box::new(WeatherW::default()) },
-        Kind::Music => if desk::variant(k) == 1 { Box::new(crate::deskv::CoverW::default()) } else { Box::new(MusicW::default()) },
+        Kind::Music => match desk::variant(k) { 1 => Box::new(crate::deskv::CoverW::default()), 2 => Box::new(crate::deskv2::VinylW::default()), _ => Box::new(MusicW::default()) },
         Kind::System if desk::variant(k) == 1 => Box::new(crate::deskv::RingsW::default()),
         Kind::System => Box::new(SystemW { bars: [0.0; 3], disp: [0.0; 4], apps: HashMap::new(), moving: false, graph: None, live: None, layer_at: None, probe_a: 0.0, probe_x: 0.0, probe_on: false }),
         Kind::Storage => Box::new(StorageW::default()),
         Kind::Projects => Box::new(ProjectsW { tab: 0, scroll: 0, tab_at: None, pill: 0.0 }),
         Kind::Phone => { crate::phone::start(); Box::new(PhoneW::default()) }
+        Kind::Visual if desk::variant(k) == 1 => Box::new(crate::deskv2::RadialW::default()),
         Kind::Visual => Box::new(crate::deskw2::VisualW::default()),
+        Kind::Photos if desk::variant(k) == 1 => Box::new(crate::deskv2::PolaroidW::default()),
         Kind::Photos => Box::new(crate::deskw2::PhotosW::default()),
         Kind::Clocks => Box::new(crate::deskw3::ClocksW::default()),
         Kind::Todo => Box::new(crate::deskw3::TodoW::default()),
+        Kind::Countdown if desk::variant(k) == 1 => Box::new(crate::deskv2::FlipW::default()),
         Kind::Countdown => Box::new(crate::deskw3::CountdownW::default()),
     }
 }

@@ -469,9 +469,12 @@ fn place(k: Kind, order: usize) {
 pub fn variants(k: Kind) -> &'static [&'static str] {
     match k {
         Kind::Weather => &["Clásico", "Cielo", "Mínimo"],
-        Kind::Calendar => &["Clásico", "Hoy"],
+        Kind::Calendar => &["Clásico", "Hoy", "Póster"],
         Kind::System => &["Clásico", "Anillos"],
-        Kind::Music => &["Clásico", "Carátula"],
+        Kind::Music => &["Clásico", "Carátula", "Vinilo"],
+        Kind::Photos => &["Clásico", "Polaroid"],
+        Kind::Visual => &["Clásico", "Radial"],
+        Kind::Countdown => &["Clásico", "Paletas"],
         _ => &["Clásico"],
     }
 }
@@ -514,6 +517,11 @@ pub fn size(k: Kind) -> (f32, f32) {
         (Kind::Calendar, 1) => return (180.0, 180.0),
         (Kind::System, 1) => return (380.0, 170.0),
         (Kind::Music, 1) => return (300.0, 300.0),
+        (Kind::Music, 2) => return (364.0, 170.0),
+        (Kind::Calendar, 2) => return (260.0, 200.0),
+        (Kind::Photos, 1) => return (230.0, 260.0),
+        (Kind::Visual, 1) => return (230.0, 230.0),
+        (Kind::Countdown, 1) => return (320.0, 150.0),
         _ => {}
     }
     match k {
