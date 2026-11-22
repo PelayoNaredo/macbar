@@ -560,7 +560,6 @@ pub static EN: &[(&str, &str)] = &[
     ("agudos", "high"),
     ("{} libres", "{} free"),
     ("en pausa", "paused"),
-    ("PAUSA", "PAUSE"),
     // ---- news.rs y stocks.rs (noticias y bolsa)
     ("Noticias", "News"),
     ("Bolsa", "Stocks"),
