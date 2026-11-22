@@ -996,12 +996,13 @@ impl Widget for LifeW {
 
         let rt = ui.rt;
         let base = cur_xf(ui);
-        // Línea de estado: generación y población; un punto de acento diminuto que destella con cada golpe
+        // Línea de estado: «al ritmo»/«en pausa» y la canción; un punto de acento diminuto que destella con cada golpe
         let flash = (1.0f32 - (self.now - self.last_beat) / 0.5).clamp(0.0, 1.0);
         dot(rt, 21.0, 19.0, 2.6, &ui.brush(acc(q(0.35 + 0.65 * flash, 10.0))));
-        ui.text(&ui.f.small, &i18n::tf("gen {} · pob {}", &[&self.gens, &self.pop]), 30.0, 10.0, 18.0, &ui.dim);
-        let right = if self.alive > 0.5 { i18n::t("al ritmo") } else { i18n::t("en pausa") };
-        ui.text_r(&ui.f.small, right, w - 18.0, 10.0, 18.0, &ui.faint);
+        let left = if self.alive > 0.5 { i18n::t("al ritmo") } else { i18n::t("en pausa") };
+        ui.text(&ui.f.small, left, 30.0, 10.0, 18.0, &ui.dim);
+        let title = MEDIA.lock().unwrap().as_ref().map(|m| m.title.clone());
+        if let Some(tt) = title { let s = fit(ui, &ui.f.small, &tt, w * 0.55); ui.text_r(&ui.f.small, &s, w - 18.0, 10.0, 18.0, &ui.faint); }
 
         // Burbujas: primero se reúnen (posición, escala, opacidad y brillo) y luego se pintan por capas
         let (x0, y0) = (26.0, 48.0);

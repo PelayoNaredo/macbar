@@ -553,7 +553,6 @@ pub static EN: &[(&str, &str)] = &[
     ("{} % · cargando", "{} % · charging"),
     ("Sonando", "Playing"),
     ("en vivo", "live"),
-    ("gen {} · pob {}", "gen {} · pop {}"),
     ("al ritmo", "on the beat"),
     ("graves", "low"),
     ("medios", "mid"),
