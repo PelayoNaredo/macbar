@@ -1654,8 +1654,8 @@ impl Widget for PhoneW {
         let pr = rect(x0, py, W - PAD, py + 40.0);
         unsafe { ui.rt.FillRoundedRectangle(&rrect(pr, 10.0), &ui.wa(0.08)); }
         let okc = if st.running { rgba(0.33, 0.78, 0.42, 1.0) } else { ui.ic(0.3) };
-        unsafe { ui.rt.FillEllipse(&ellipse(x0 + 22.0, py + 20.0, 10.0), &ui.brush(okc)); }
-        ui.text(&ui.f.name, if st.running { i18n::t("Conectado") } else { i18n::t("Sin conectar") }, x0 + 40.0, py, 40.0, &ui.white);
+        unsafe { ui.rt.FillEllipse(&ellipse(x0 + 17.0, py + 20.0, 3.5), &ui.brush(okc)); }
+        ui.text(&ui.f.name, if st.running { i18n::t("Conectado") } else { i18n::t("Sin conectar") }, x0 + 29.0, py, 40.0, &ui.white);
         unsafe { ui.rt.FillRectangle(&rect(W - PAD - 44.0, py + 8.0, W - PAD - 43.0, py + 32.0), &ui.wa(0.15)); }
         // El botón de actualizar gira un poco mientras se busca de nuevo
         let spin = self.sync_at.map(|s| s.elapsed().as_secs_f32()).filter(|s| *s < 0.8);
