@@ -544,7 +544,7 @@ pub fn size(k: Kind) -> (f32, f32) {
         Kind::Weather => (640.0, 344.0),
         Kind::System => (540.0, 360.0),
         Kind::Projects => (540.0, 460.0),
-        Kind::Phone => (330.0, 780.0),
+        Kind::Phone => (330.0, 380.0),
         Kind::Visual => (380.0, 200.0),
         Kind::Photos => (380.0, 260.0),
         Kind::Clocks => (380.0, 170.0),

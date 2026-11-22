@@ -1607,7 +1607,7 @@ impl Widget for PhoneW {
         let base = cur_transform(ui);
         unsafe { ui.rt.SetTransform(&mul(&scale_at((0.94 + 0.06 * k0) * (1.0 + 0.03 * hk), fx + fw / 2.0, fy + fh / 2.0), &base)); }
         popup::push_alpha(ui.rt, k0);
-        let fr = rrect(rect(fx, fy, fx + fw, fy + fh), 11.0);
+        let fr = rrect(rect(fx, fy, fx + fw, fy + fh), 5.0);
         match st.wall.as_ref().and_then(|px| self.bmp_wh(ui.rt, "wall", px, crate::phone::WALL_W, crate::phone::WALL_H)) {
             Some(b) => unsafe {
                 if let Ok(br) = ui.rt.CreateBitmapBrush(&b, None, None) {
@@ -1622,11 +1622,6 @@ impl Widget for PhoneW {
                 ui.glyph(&ui.f.icon_l, G_PHOTO, fx, fy + fh / 2.0 - 24.0, fw, 28.0, &ui.wa(0.55));
                 ui.text_c(&ui.f.small, i18n::t("Fondo"), fx + fw / 2.0, fy + fh / 2.0 + 6.0, 16.0, &ui.wa(0.55));
             },
-        }
-        unsafe {
-            ui.rt.DrawRoundedRectangle(&fr, &ui.wa(0.55), 2.0, None);
-            // Cámara arriba, como en el dibujo de Enlace Móvil
-            ui.rt.FillEllipse(&ellipse(fx + fw / 2.0, fy + 7.0, 2.2), &ui.brush(rgba(0.0, 0.0, 0.0, 0.7)));
         }
         ui.rt_pop();
         unsafe { ui.rt.SetTransform(&base); }
@@ -1658,9 +1653,8 @@ impl Widget for PhoneW {
         let py = fy + 72.0;
         let pr = rect(x0, py, W - PAD, py + 40.0);
         unsafe { ui.rt.FillRoundedRectangle(&rrect(pr, 10.0), &ui.wa(0.08)); }
-        let (okc, okg) = if st.running { (rgba(0.33, 0.78, 0.42, 1.0), "\u{E73E}") } else { (ui.ic(0.3), "\u{E711}") };
+        let okc = if st.running { rgba(0.33, 0.78, 0.42, 1.0) } else { ui.ic(0.3) };
         unsafe { ui.rt.FillEllipse(&ellipse(x0 + 22.0, py + 20.0, 10.0), &ui.brush(okc)); }
-        ui.glyph(&ui.f.small, okg, x0 + 12.0, py + 10.0, 20.0, 20.0, &ui.brush(rgba(0.0, 0.0, 0.0, 0.85)));
         ui.text(&ui.f.name, if st.running { i18n::t("Conectado") } else { i18n::t("Sin conectar") }, x0 + 40.0, py, 40.0, &ui.white);
         unsafe { ui.rt.FillRectangle(&rect(W - PAD - 44.0, py + 8.0, W - PAD - 43.0, py + 32.0), &ui.wa(0.15)); }
         // El botón de actualizar gira un poco mientras se busca de nuevo
@@ -1674,8 +1668,25 @@ impl Widget for PhoneW {
         }
         round_btn(ui, &ui.f.icon.clone(), "\u{E72C}", scx, scy, 16.0, 15, false);
         unsafe { ui.rt.SetTransform(&base); }
+        // Debajo: cuántas notificaciones tiene el móvil (solo el número; el contenido se ve en Enlace Móvil)
+        let nn = if st.notifs.is_empty() { st.unread as usize } else { st.notifs.len() };
+        let mut sx = x0 + 2.0;
+        if nn > 0 {
+            let s = nn.to_string();
+            let lbl = if nn == 1 { i18n::t("notificación").to_string() } else { i18n::t("notificaciones").to_string() };
+            let hk = ui.heat(16);
+            ui.text(&ui.f.lbl, &s, sx, py + 46.0, 18.0, &ui.white);
+            let nw = ui.p.width(&ui.f.lbl, &s);
+            ui.text(&ui.f.small, &lbl, sx + nw + 5.0, py + 46.0, 18.0, &ui.wa(0.55 + 0.35 * hk));
+            let end = sx + nw + 5.0 + ui.p.width(&ui.f.small, &lbl);
+            ui.hit(rect(sx - 4.0, py + 42.0, end + 4.0, py + 66.0), 16);
+            sx = end + 10.0;
+        }
         let sub = match st.battery { Some((_, when)) if !st.running || deskdata::now_unix().saturating_sub(when) > 120 => i18n::tf("Batería vista {}", &[&ago(when)]), _ => String::new() };
-        if !sub.is_empty() { ui.text(&ui.f.small, &sub, x0 + 2.0, py + 44.0, 18.0, &ui.faint); }
+        if !sub.is_empty() {
+            let s = if nn > 0 { format!("· {sub}") } else { sub };
+            ui.text(&ui.f.small, &trunc(&s, 30), sx, py + 46.0, 18.0, &ui.faint);
+        }
         ui.rt_pop();
 
         // ---- Accesos: botones anchos como los de Enlace Móvil
@@ -1739,75 +1750,7 @@ impl Widget for PhoneW {
             }
             ny = py + side + 22.0;
         }
-
-        // ---- Notificaciones del móvil
-        ui.sep(ny - 8.0);
-        ui.text(&ui.f.small, i18n::t("NOTIFICACIONES"), PAD, ny, 18.0, &ui.faint);
-        if !st.notifs.is_empty() { ui.text_r(&ui.f.small, &st.notifs.len().to_string(), W - PAD, ny, 18.0, &ui.faint); }
-        let ly = ny + 26.0;
-        if st.ready && !st.access {
-            ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 30.0, W, 50.0, &ui.wa(0.4));
-            ui.text_c(&ui.f.sub, i18n::t("Para ver aquí los avisos del móvil,"), W / 2.0, ly + 88.0, 18.0, &ui.dim);
-            ui.text_c(&ui.f.sub, i18n::t("macbar necesita leer las notificaciones"), W / 2.0, ly + 106.0, 18.0, &ui.dim);
-            pbutton(ui, rect(W / 2.0 - 70.0, ly + 136.0, W / 2.0 + 70.0, ly + 168.0), None, i18n::t("Dar permiso"), 20, false);
-            return;
-        }
-        if st.ready && st.notifs.is_empty() {
-            let k = ez(t, 0.3, 0.5);
-            popup::push_alpha(ui.rt, k);
-            if st.unread > 0 {
-                // Enlace Móvil cuenta avisos pero no los pasa a Windows (banners apagados): al menos el número
-                let r = rect(PAD - 8.0, ly + 20.0, W - PAD + 8.0, ly + 150.0);
-                ui.card_k(r, ui.heat(16));
-                ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 30.0, W, 50.0, &ui.wa(0.75));
-                unsafe { ui.rt.FillEllipse(&ellipse(W / 2.0 + 16.0, ly + 38.0, 11.0), &ui.on); }
-                ui.text_c(&ui.f.small, &st.unread.to_string(), W / 2.0 + 16.0, ly + 29.0, 18.0, &ui.brush(rgba(1.0, 1.0, 1.0, 1.0)));
-                let n = st.unread.to_string();
-                ui.text_c(&ui.f.lbl, &if st.unread == 1 { i18n::t("1 notificación en Enlace Móvil").to_string() } else { i18n::tf("{} notificaciones en Enlace Móvil", &[&n]) }, W / 2.0, ly + 88.0, 20.0, &ui.white);
-                ui.text_c(&ui.f.small, i18n::t("Activa sus banners para verlas aquí"), W / 2.0, ly + 110.0, 18.0, &ui.faint);
-                ui.hit(r, 16);
-            } else {
-                ui.glyph(&d.glyph_m, G_BELL, 0.0, ly + 40.0, W, 50.0, &ui.wa(0.3));
-                ui.text_c(&ui.f.sub, i18n::t("Sin notificaciones del móvil"), W / 2.0, ly + 98.0, 18.0, &ui.dim);
-            }
-            ui.rt_pop();
-            return;
-        }
-        // Los avisos que llegan con el widget abierto entran desde la derecha
-        let now = Instant::now();
-        for n in &st.notifs {
-            self.born.entry(n.id).or_insert(if self.seen { now } else { now - Duration::from_secs(5) });
-        }
-        self.born.retain(|id, _| st.notifs.iter().any(|n| n.id == *id));
-        self.seen = st.ready;
-        let mut yy = ly;
-        for (i, n) in st.notifs.iter().enumerate() {
-            if yy + NROW > H - PAD + 6.0 { break; }
-            let fresh = self.born.get(&n.id).map(|b| b.elapsed().as_secs_f32()).unwrap_or(9.0);
-            let kn = if fresh < 1.0 { self.moving = true; popup::ease_out(fresh / 0.45) } else { 1.0 };
-            let k = ez(t, 0.3 + i as f32 * 0.06, 0.4).min(kn);
-            let dx = if fresh < 1.0 { 40.0 * (1.0 - kn) } else { 0.0 };
-            let dy = 8.0 * (1.0 - ez(t, 0.3 + i as f32 * 0.06, 0.4));
-            let id = 100 + i as u32;
-            let hk = ui.heat(id).max(ui.heat(300 + i as u32));
-            popup::push_alpha(ui.rt, k);
-            let r = rect(PAD - 8.0 + dx, yy - 4.0 + dy, W - PAD + 8.0 + dx, yy + NROW - 8.0 + dy);
-            unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 12.0), &ui.wa(0.05 + 0.05 * hk)); }
-            let x = PAD + 4.0 + dx;
-            ui.text(&ui.f.lbl, &trunc(&n.title, 26), x, yy + 2.0 + dy, 20.0, &ui.white);
-            let (l1, l2) = two_lines(&n.body, 38);
-            ui.text(&ui.f.sub, &l1, x, yy + 21.0 + dy, 17.0, &ui.dim);
-            if !l2.is_empty() { ui.text(&ui.f.sub, &l2, x, yy + 37.0 + dy, 17.0, &ui.dim); }
-            ui.hit(r, id);
-            if hk > 0.05 {
-                // Al pasar el ratón: una cruz para quitarlo (también de Windows)
-                round_btn(ui, &ui.f.icon.clone(), G_CLOSE, W - PAD - 6.0 + dx, yy + 12.0 + dy, 12.0, 300 + i as u32, false);
-            } else {
-                ui.text_r(&ui.f.small, &if n.app.is_empty() { ago(n.when) } else { format!("{} · {}", n.app, ago(n.when)) }, W - PAD + dx, yy + 2.0 + dy, 20.0, &ui.faint);
-            }
-            ui.rt_pop();
-            yy += NROW;
-        }
+        let _ = ny;
     }
     fn click(&mut self, id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         match id? {

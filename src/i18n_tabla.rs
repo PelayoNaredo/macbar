@@ -574,4 +574,6 @@ pub static EN: &[(&str, &str)] = &[
     ("Valores de la bolsa", "Stock symbols"),
     ("Símbolos de Yahoo Finance: bolsa_simbolos", "Yahoo Finance symbols: bolsa_simbolos"),
     ("Editar símbolos…", "Edit symbols…"),
+    ("notificación", "notification"),
+    ("notificaciones", "notifications"),
 ];
