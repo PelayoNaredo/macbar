@@ -273,8 +273,8 @@ impl Piece {
         if m > 1.0 { return None; }
         if m < 1e-5 { return Some((0.0, 0.0)); }
         // El orbe es una lente más suave (si no, el núcleo se estira en un aro que deslumbra)
-        let k = if matches!(self.core, Core::Point(..)) { 0.55 } else { 1.0 };
-        let b = bend(m) * self.r * k;
+        // Tubos y anillos: lente suave para que se lea lo que pasa por debajo (sin invertir en el canto)
+        let b = if matches!(self.core, Core::Point(..)) { bend(m) * self.r * 0.55 } else { soft_bend(m) * self.r };
         Some((ux / m * b, uy / m * b))
     }
 }
@@ -283,6 +283,10 @@ impl Piece {
 /// del grosor; negativo = hacia el alma. Casi nada en el centro, mucho en los cantos y pasando al otro
 /// lado del alma al final (lo de detrás se ve invertido junto al canto, como en el vidrio macizo).
 fn bend(m: f32) -> f32 { -(0.2 * m + 1.05 * m * m * m) }
+
+/// Curva suave de tubos y anillos: aumenta un poco en el centro y solo dobla de verdad pegado al canto,
+/// sin llegar a invertir lo de detrás (los números y la onda siguen leyéndose).
+fn soft_bend(m: f32) -> f32 { let m2 = m * m; -(0.08 * m + 0.34 * m2 * m2) }
 
 /// Lo más que se desplaza la mirada en una pieza de grosor `r`.
 fn max_bend(r: f32) -> f32 { -bend(1.0) * r }
