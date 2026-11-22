@@ -116,8 +116,7 @@ pub fn new(k: Kind) -> Box<dyn Widget> {
         Kind::Visual => match desk::variant(k) {
             1 => Box::new(crate::deskv2::RadialW::default()),
             2 => Box::new(crate::deskv3::SpecDotsW::default()),
-            3 => Box::new(crate::deskv3::LifeW::default()),
-            4 => Box::new(crate::deskv3::OrbW::default()),
+            3 => Box::new(crate::deskv3::OrbW::default()),
             _ => Box::new(crate::deskw2::VisualW::default()),
         },
         Kind::Photos if desk::variant(k) == 1 => Box::new(crate::deskv2::PolaroidW::default()),
