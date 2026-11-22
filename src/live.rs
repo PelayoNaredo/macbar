@@ -444,7 +444,19 @@ fn net_thread() {
     let mut last_ssid: Option<String> = None;
     loop {
         // Micrófono y cámara en uso: cada 2 s (leer el registro cuesta microsegundos)
-        let (mic, cam) = (in_use("microphone"), in_use("webcam"));
+        let mic_app = in_use_app("microphone");
+        let (mic, cam) = (mic_app.is_some(), in_use("webcam"));
+        // Llamada: el micrófono lo usa una app de llamadas (se mantiene el inicio mientras siga la misma)
+        if !sys::demo() {
+            let now_call = mic_app.as_deref().and_then(call_app);
+            let mut c = CALL.lock().unwrap();
+            let changed = match (&*c, &now_call) { (Some(a), Some(b)) => a.0 != b.0, (None, None) => false, _ => true };
+            if changed {
+                *c = now_call.map(|(n, e)| (n, e, Instant::now()));
+                drop(c);
+                unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
+            }
+        }
         let pc = MIC.swap(mic, Ordering::Relaxed) != mic;
         let cc = CAM.swap(cam, Ordering::Relaxed) != cam;
         // Al empezar a usarse (no al soltarlos) la isla lo dice un momento, como el aviso de privacidad de iOS
@@ -474,20 +486,74 @@ fn net_thread() {
     }
 }
 
+// ---------------------------------------------------------------- llamadas
+/// Llamada en curso: nombre de la app, ejecutable (para traerla al frente) y desde cuándo.
+pub static CALL: Mutex<Option<(String, String, Instant)>> = Mutex::new(None);
+
+/// ¿Esa app (clave del registro de privacidad) es de llamadas? Devuelve su nombre bonito y su ejecutable.
+pub fn call_app(key: &str) -> Option<(String, String)> {
+    let low = key.to_lowercase();
+    let exe = low.rsplit('#').next().unwrap_or(&low).to_string();
+    const APPS: [(&str, &str); 12] = [("teams", "Microsoft Teams"), ("zoom", "Zoom"), ("discord", "Discord"), ("slack", "Slack"), ("skype", "Skype"), ("webex", "Webex"),
+        ("whatsapp", "WhatsApp"), ("telegram", "Telegram"), ("signal", "Signal"), ("chrome", "Google Meet o llamada web"), ("msedge", "Llamada web"), ("firefox", "Llamada web")];
+    APPS.iter().find(|(k, _)| low.contains(k)).map(|(_, n)| (n.to_string(), exe))
+}
+
+/// Trae al frente la ventana de la app de la llamada (la primera visible de ese ejecutable).
+pub fn focus_call() {
+    let Some(exe) = CALL.lock().unwrap().as_ref().map(|c| c.1.clone()) else { return };
+    unsafe {
+        let mut found: Option<HWND> = None;
+        let mut h = GetTopWindow(None).unwrap_or_default();
+        while !h.0.is_null() {
+            if IsWindowVisible(h).as_bool() && GetWindowTextLengthW(h) > 0 && sys::process_path(sys::window_pid(h)).and_then(|p| p.rsplit('\\').next().map(str::to_lowercase)).is_some_and(|e| e == exe) { found = Some(h); break; }
+            h = GetWindow(h, GW_HWNDNEXT).unwrap_or_default();
+        }
+        if let Some(w) = found {
+            if IsIconic(w).as_bool() { let _ = ShowWindow(w, SW_RESTORE); }
+            let _ = SetForegroundWindow(w);
+        }
+    }
+}
+
+/// Micrófono de entrada silenciado (para el botón de la llamada).
+pub fn mic_muted() -> Option<bool> {
+    unsafe {
+        let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let v: IAudioEndpointVolume = en.GetDefaultAudioEndpoint(windows::Win32::Media::Audio::eCapture, windows::Win32::Media::Audio::eCommunications).ok()?.Activate(CLSCTX_ALL, None).ok()?;
+        v.GetMute().ok().map(|b| b.as_bool())
+    }
+}
+
+/// Silencia o activa el micrófono (el de comunicaciones por defecto) y lo avisa en la isla.
+pub fn toggle_mic() {
+    unsafe {
+        let Ok(en) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) else { return };
+        let Some(v) = en.GetDefaultAudioEndpoint(windows::Win32::Media::Audio::eCapture, windows::Win32::Media::Audio::eCommunications).ok().and_then(|d| d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()) else { return };
+        let m = !v.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+        let _ = v.SetMute(m, std::ptr::null());
+        show(Hud::Mic(m), 1400);
+    }
+}
+
 // ---------------------------------------------------------------- privacidad (punto naranja / verde)
 pub static MIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static CAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// ¿Alguna app usa ahora el micrófono o la cámara? Windows lo apunta en el registro
 /// (LastUsedTimeStop = 0 mientras se usa), tanto para apps de la Tienda como de escritorio.
-fn in_use(cap: &str) -> bool {
+fn in_use(cap: &str) -> bool { in_use_app(cap).is_some() }
+
+/// La app que usa ahora el micrófono o la cámara: su clave del registro (ruta con «#» en las de
+/// escritorio, nombre del paquete en las de la Tienda).
+fn in_use_app(cap: &str) -> Option<String> {
     use windows::Win32::System::Registry::*;
-    fn scan(root: HKEY, path: &str, deep: bool) -> bool {
+    fn scan(root: HKEY, path: &str, deep: bool) -> Option<String> {
         unsafe {
             let mut k = HKEY::default();
-            if RegOpenKeyExW(root, &HSTRING::from(path), Some(0), KEY_READ, &mut k).is_err() { return false; }
+            if RegOpenKeyExW(root, &HSTRING::from(path), Some(0), KEY_READ, &mut k).is_err() { return None; }
             let mut i = 0u32;
-            let mut hit = false;
+            let mut hit = None;
             loop {
                 let mut name = [0u16; 512];
                 let mut len = name.len() as u32;
@@ -495,7 +561,7 @@ fn in_use(cap: &str) -> bool {
                 i += 1;
                 let sub = String::from_utf16_lossy(&name[..len as usize]);
                 if sub == "NonPackaged" {
-                    if deep && scan(root, &format!("{path}\\NonPackaged"), false) { hit = true; break; }
+                    if deep { if let Some(a) = scan(root, &format!("{path}\\NonPackaged"), false) { hit = Some(a); break; } }
                     continue;
                 }
                 let q = |v: PCWSTR| -> Option<u64> {
@@ -503,7 +569,7 @@ fn in_use(cap: &str) -> bool {
                     RegGetValueW(k, &HSTRING::from(sub.as_str()), v, RRF_RT_REG_QWORD, None, Some(&mut x as *mut _ as _), Some(&mut sz)).ok().ok()?;
                     Some(x)
                 };
-                if q(w!("LastUsedTimeStop")) == Some(0) && q(w!("LastUsedTimeStart")).is_some_and(|s| s > 0) { hit = true; break; }
+                if q(w!("LastUsedTimeStop")) == Some(0) && q(w!("LastUsedTimeStart")).is_some_and(|s| s > 0) { hit = Some(sub.clone()); break; }
             }
             let _ = RegCloseKey(k);
             hit

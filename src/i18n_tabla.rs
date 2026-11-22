@@ -423,4 +423,10 @@ pub static EN: &[(&str, &str)] = &[
     ("Pon algo de música", "Play some music"),
     ("Clic derecho para elegir una carpeta de fotos", "Right-click to choose a photo folder"),
     ("Carpeta del marco de fotos", "Photo frame folder"),
+    ("Activar micro", "Unmute"),
+    ("Silenciar", "Mute"),
+    ("Volver a la llamada", "Back to the call"),
+    ("Salida de audio", "Audio output"),
+    ("Google Meet o llamada web", "Google Meet or web call"),
+    ("Llamada web", "Web call"),
 ];

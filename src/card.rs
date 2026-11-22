@@ -15,24 +15,34 @@ pub const CARD_H: f32 = 168.0;
 
 /// Pestañas de la tarjeta (orden fijo).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Tab { Media, Timer, Shelf, Glance }
+pub enum Tab { Call, Media, Timer, Shelf, Audio, Glance }
 
-impl Tab { fn idx(self) -> u8 { match self { Tab::Media => 0, Tab::Timer => 1, Tab::Shelf => 2, Tab::Glance => 3 } } }
+impl Tab { fn idx(self) -> u8 { match self { Tab::Call => 0, Tab::Media => 1, Tab::Timer => 2, Tab::Shelf => 3, Tab::Audio => 4, Tab::Glance => 5 } } }
+
+/// Todas, en el orden del selector.
+const TABS: [Tab; 6] = [Tab::Call, Tab::Media, Tab::Timer, Tab::Shelf, Tab::Audio, Tab::Glance];
+
+/// Alto de la pestaña de salidas de audio con `n` salidas (cabecera, una fila por salida y el volumen).
+pub fn audio_h(n: usize) -> f32 { (52.0 + n.min(5) as f32 * 40.0 + 64.0).max(150.0) }
 
 /// Alto máximo de la ventana (la bandeja con dos filas es lo más alto).
-pub const WIN_H: f32 = 230.0;
+pub const WIN_H: f32 = 320.0;
 
 /// Alto de la bandeja con `n` archivos: cabecera y una fila de 84 DIP por cada cuatro (vacía, la zona de soltar).
 pub fn shelf_h(n: usize) -> f32 { if n == 0 { 168.0 } else { 52.0 + n.div_ceil(4) as f32 * 84.0 + 10.0 } }
 
 /// Tamaño de la tarjeta en cada pestaña (DIP).
 pub fn tab_size(t: Tab) -> (f32, f32) {
-    match t { Tab::Media => (CARD_W, CARD_H), Tab::Timer => (340.0, 150.0), Tab::Shelf => (CARD_W, shelf_h(live::SHELF.lock().unwrap().len())), Tab::Glance => (360.0, 150.0) }
+    match t { Tab::Media => (CARD_W, CARD_H), Tab::Timer => (340.0, 150.0), Tab::Shelf => (CARD_W, shelf_h(live::SHELF.lock().unwrap().len())), Tab::Glance => (360.0, 150.0), Tab::Call => (340.0, 150.0), Tab::Audio => (360.0, audio_h(AUDIO_N.load(Ordering::Relaxed))) }
 }
 
 /// Pestaña con la que se abre: la del modo de la isla (1 = música, 2 = temporizador), si tiene contenido;
 /// si no, la primera que lo tenga.
-pub fn initial_tab(isl_mode: u8, has_media: bool, has_timer: bool, has_shelf: bool) -> Option<Tab> {
+pub fn initial_tab(isl_mode: u8, has_media: bool, has_timer: bool, has_shelf: bool) -> Option<Tab> { initial_tab_c(isl_mode, false, has_media, has_timer, has_shelf) }
+
+/// Igual, contando con la llamada (manda sobre lo demás si la isla la enseña).
+pub fn initial_tab_c(isl_mode: u8, has_call: bool, has_media: bool, has_timer: bool, has_shelf: bool) -> Option<Tab> {
+    if has_call && (isl_mode == 5 || !(has_media || has_timer || has_shelf)) { return Some(Tab::Call); }
     match isl_mode {
         2 if has_timer => Some(Tab::Timer),
         1 if has_media => Some(Tab::Media),
@@ -255,7 +265,7 @@ struct Card {
     // Ratón
     hover: Option<u8>,
     pressed: Option<u8>,
-    glow: [f32; 48],
+    glow: [f32; 64],
     hits: Vec<(D2D_RECT_F, u8)>,
     outside_since: Option<Instant>,
     empty_since: Option<Instant>,
@@ -348,7 +358,7 @@ fn ensure() -> Option<()> {
         let cap = fac.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, ..Default::default() }, None).ok();
         let old = Instant::now() - Duration::from_secs(5);
         let c = Card { hwnd, fac, rt: None, surf: None, dw, cache: RefCell::new(Caches::default()), f, win: (0, 0, 1, 1), off: (0, 0), s: 1.0, bottom: false,
-            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 48], hits: Vec::new(),
+            origin: Origin::Click, open: false, opened: old, closed_at: old, w: 0.0, vw: 0.0, h: PILL_H, vh: 0.0, hover: None, pressed: None, glow: [0.0; 64], hits: Vec::new(),
             outside_since: None, empty_since: None, btn_prev: (false, false, false), art: None, art_at: old, art_k: 1.0, shown_title: Default::default(), prev_title: Default::default(),
             title_at: old, lines: (String::new(), 0.0, Vec::new()), play: (false, old), last: Instant::now(),
             drag: None, bar_k: 0.0, hold: None, bar_span: (0.0, 0.0, 0.0), prev_fg: HWND::default(),
@@ -369,6 +379,7 @@ pub fn open(origin: Origin) { open_tab(origin, None) }
 /// Abre la tarjeta en una pestaña (None = la del modo de la isla).
 pub fn open_tab(origin: Origin, want: Option<Tab>) {
     let (has_media, has_timer, has_shelf) = (MEDIA.lock().unwrap().is_some(), live::timer_left().is_some(), !live::SHELF.lock().unwrap().is_empty());
+    let has_call = live::CALL.lock().unwrap().is_some();
     dbg(&format!("open: fullscreen={} media={has_media} timer={has_timer} abierta={}", crate::fullscreen(), is_open()));
     if crate::fullscreen() { return; }
     if is_open() { if origin != Origin::Drop { close(Why::Toggle); } return; }
@@ -378,7 +389,9 @@ pub fn open_tab(origin: Origin, want: Option<Tab>) {
         // Al arrastrar archivos se abre la bandeja aunque esté vacía (es donde se sueltan)
         Some(Tab::Shelf) if has_shelf || origin == Origin::Drop => Tab::Shelf,
         Some(Tab::Glance) => Tab::Glance,
-        _ => match initial_tab(ISL_MODE.load(Ordering::Relaxed), has_media, has_timer, has_shelf) { Some(t) => t, None => return },
+        Some(Tab::Audio) => { refresh_outputs(); Tab::Audio }
+        Some(Tab::Call) if has_call => Tab::Call,
+        _ => match initial_tab_c(ISL_MODE.load(Ordering::Relaxed), has_call, has_media, has_timer, has_shelf) { Some(t) => t, None => return },
     };
     if ensure().is_none() { dbg("ensure falló"); return; }
     let Some((isl, _, s)) = island_px() else { dbg("sin isla"); return };
@@ -655,14 +668,15 @@ fn render() -> bool {
         let done = if timer.is_none() { (*live::LAST_DONE.lock().unwrap()).filter(|d| d.1.elapsed().as_secs() < 60) } else { None };
         // La pestaña se quedó sin contenido: se pasa a la otra si tiene
         let shelf: Vec<(String, Option<Arc<Vec<u8>>>)> = live::SHELF.lock().unwrap().clone();
-        let has = |t: Tab| match t { Tab::Media => media.is_some(), Tab::Timer => timer.is_some() || done.is_some(), Tab::Shelf => !shelf.is_empty(), Tab::Glance => false };
+        let call = live::CALL.lock().unwrap().clone();
+        let has = |t: Tab| match t { Tab::Media => media.is_some(), Tab::Timer => timer.is_some() || done.is_some(), Tab::Shelf => !shelf.is_empty(), Tab::Call => call.is_some(), Tab::Glance | Tab::Audio => false };
         if c.open && !has(c.tab) && !(c.tab == Tab::Shelf && c.dropping) {
             // La pestaña se quedó vacía: a la siguiente que tenga algo (la bandeja vacía se queda si se acaba de vaciar)
             let to = [Tab::Media, Tab::Timer, Tab::Shelf].into_iter().find(|t| *t != c.tab && has(*t));
-            let keep = c.tab == Tab::Shelf || c.tab == Tab::Glance || (c.tab == Tab::Timer && media.is_none() && shelf.is_empty());
+            let keep = c.tab == Tab::Shelf || c.tab == Tab::Glance || c.tab == Tab::Audio || (c.tab == Tab::Timer && media.is_none() && shelf.is_empty());
             if let Some(t) = to.filter(|_| !keep) { c.tab_prev = Some((c.tab, now, if t.idx() > c.tab.idx() { 1.0 } else { -1.0 })); c.tab = t; }
         }
-        let tabs: Vec<Tab> = [Tab::Media, Tab::Timer, Tab::Shelf, Tab::Glance].into_iter().filter(|t| has(*t) || *t == c.tab).collect();
+        let tabs: Vec<Tab> = TABS.into_iter().filter(|t| has(*t) || *t == c.tab).collect();
         // Iconos de la bandeja en la GPU, solo cuando cambia
         let sv = live::SHELF_VER.load(Ordering::Relaxed);
         if c.shelf_bmps.0 != sv {
@@ -723,7 +737,7 @@ fn render() -> bool {
         // En pausa la carátula se encoge un poco (como en el iPhone)
         moving |= ease_to(&mut c.art_k, if playing || media.is_none() { 1.0 } else { 0.92 }, 0.12, dt);
         // Brillo de «ratón encima» de cada botón
-        for i in 0..48 {
+        for i in 0..64 {
             let t = if c.hover == Some(i as u8) { 1.0 } else { 0.0 };
             let tau = if t > c.glow[i] { 0.05 } else { 0.12 };
             moving |= ease_to(&mut c.glow[i], t, tau, dt);
@@ -985,7 +999,86 @@ fn render() -> bool {
                             txt(&p, &c.f.title, t, cl + cw / 2.0 - tw / 2.0, ct + chh / 2.0 - 9.0, 18.0, &wa(0.6 * row(1.0)));
                         }
                     }
-                    Tab::Glance => {
+                    Tab::Call => {
+                        let k1 = row(1.0);
+                        let green = (0.30, 0.85, 0.45);
+                        let (ccx, ccy) = (cl + 22.0 + 32.0, ct + chh / 2.0 - 8.0);
+                        // Círculo verde con el teléfono y una onda que se abre cada 1,6 s (llamada en curso)
+                        let ph = (ui_secs() % 1.6) / 1.6;
+                        moving = true;
+                        let wave = 32.0 + 16.0 * ease_out(ph);
+                        rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: ccx, Y: ccy }, radiusX: wave, radiusY: wave }, &col_b(green, 0.25 * (1.0 - ph) * k1));
+                        rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: ccx, Y: ccy }, radiusX: 30.0, radiusY: 30.0 }, &col_b(green, k1));
+                        glyph_c(&p, &c.f.icon_l, "\u{E717}", ccx, ccy, &p.brush(rgba(0.0, 0.0, 0.0, 0.85 * k1)));
+                        let x0 = cl + 22.0 + 64.0 + 22.0;
+                        if let Some((name, _, since)) = &call {
+                            txt(&p, &c.f.title, &trunc(name, 26), x0, ct + 20.0 + lift(k1), 18.0, &wa(0.96 * k1));
+                            let k2 = row(2.0);
+                            txt(&p, &c.f.big, &live::mmss(since.elapsed().as_secs() as u32), x0, ct + 44.0 + lift(k2), 26.0, &col_b(green, k2));
+                        }
+                        let k3 = row(3.0);
+                        if k3 > 0.01 {
+                            let muted = live::mic_muted().unwrap_or(false);
+                            let by = ct + chh - 22.0 - 16.0 + lift(k3);
+                            let mut bx = x0;
+                            for (id, gl, lbl, on) in [(45u8, if muted { "\u{F781}" } else { "\u{E720}" }, if muted { i18n::t("Activar micro") } else { i18n::t("Silenciar") }, muted), (46, "\u{E8A7}", i18n::t("Volver a la llamada"), false)] {
+                                let w = p.width(&c.f.small, lbl) + 36.0;
+                                let r = rect(bx, by, bx + w, by + 30.0);
+                                let gk = c.glow[id as usize];
+                                let sc = if c.pressed == Some(id) && c.hover == Some(id) { 0.92 } else { 1.0 };
+                                scaled(&rt, bx + w / 2.0, by + 15.0, sc, || {
+                                    let bg = if on { col_b((1.0, 0.36, 0.33), (0.9 + 0.1 * gk) * k3) } else { wa((0.10 + 0.08 * gk) * k3) };
+                                    rt.FillRoundedRectangle(&rrect(r, 15.0), &bg);
+                                    glyph_c(&p, &c.f.icon_s, gl, bx + 15.0, by + 15.0, &wa(0.95 * k3));
+                                    txt(&p, &c.f.small, lbl, bx + 26.0, by, 30.0, &wa(0.95 * k3));
+                                });
+                                if k3 > 0.9 && live_t { hits.push((r, id)); }
+                                bx += w + 6.0;
+                            }
+                        }
+                    }
+                    Tab::Audio => {
+                        let k1 = row(1.0);
+                        txt(&p, &c.f.title, i18n::t("Salida de audio"), cl + 18.0, ct + 16.0 + lift(k1), 18.0, &wa(0.96 * k1));
+                        let list = AUDIO_LIST.lock().unwrap().clone();
+                        let acc = crate::profiles::accent(1.0);
+                        for (i, o) in list.iter().take(5).enumerate() {
+                            let ki = row(1.5 + i as f32 * 0.5);
+                            let y = ct + 50.0 + i as f32 * 40.0 + lift(ki);
+                            let id = 50 + i as u8;
+                            let r = rect(cl + 10.0, y, cl + cw - 10.0, y + 36.0);
+                            let gk = c.glow[id as usize];
+                            if gk > 0.01 { rt.FillRoundedRectangle(&rrect(r, 10.0), &wa(0.07 * gk * ki)); }
+                            // Icono en un círculo: del color de acento si es la que suena
+                            let (icx, icy) = (r.left + 22.0, y + 18.0);
+                            rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: icx, Y: icy }, radiusX: 13.0, radiusY: 13.0 }, &if o.default { p.brush(rgba(acc.r, acc.g, acc.b, ki)) } else { wa(0.12 * ki) });
+                            glyph_c(&p, &c.f.icon_s, audioout::glyph(&o.name), icx, icy, &wa(0.95 * ki));
+                            let mut nm = trunc(&o.name, 40);
+                            while p.width(&c.f.sub, &nm) > cw - 110.0 && nm.chars().count() > 6 { let n = nm.chars().count(); nm = trunc(&o.name, n - 3); }
+                            txt(&p, &c.f.sub, &nm, r.left + 44.0, y, 36.0, &wa((if o.default { 0.96 } else { 0.75 }) * ki));
+                            if o.default { glyph_c(&p, &c.f.icon_s, "\u{E73E}", r.right - 16.0, icy, &p.brush(rgba(acc.r, acc.g, acc.b, ki))); }
+                            if ki > 0.9 && live_t && !o.default { hits.push((r, id)); }
+                        }
+                        // Volumen: silenciar y barra (clic en la barra = ese volumen; la rueda también lo cambia)
+                        let kv = row(3.0);
+                        let (vol, muted) = audioout::volume();
+                        let vy = ct + chh - 30.0 + lift(kv);
+                        let gk = c.glow[47];
+                        if gk > 0.01 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: cl + 32.0, Y: vy }, radiusX: 15.0, radiusY: 15.0 }, &wa(0.10 * gk * kv)); }
+                        let vg = if muted || vol <= 0.001 { "\u{E74F}" } else if vol < 0.34 { "\u{E993}" } else if vol < 0.67 { "\u{E994}" } else { "\u{E995}" };
+                        glyph_c(&p, &c.f.icon_s, vg, cl + 32.0, vy, &wa(0.9 * kv));
+                        if kv > 0.9 && live_t { hits.push((rect(cl + 16.0, vy - 15.0, cl + 48.0, vy + 15.0), 47)); }
+                        let (l, r) = (cl + 58.0, cl + cw - 64.0);
+                        *VOL_SPAN.lock().unwrap() = (l, r);
+                        let bh = 3.0 + 1.5 * c.glow[48];
+                        rt.FillRoundedRectangle(&rrect(rect(l, vy - bh, r, vy + bh), bh), &wa(0.18 * kv));
+                        let fr = if muted { 0.0 } else { vol };
+                        let fx = (l + (r - l) * fr).max(l + bh * 2.0);
+                        rt.FillRoundedRectangle(&rrect(rect(l, vy - bh, fx, vy + bh), bh), &p.brush(rgba(acc.r, acc.g, acc.b, kv)));
+                        let pct = format!("{}%", (fr * 100.0).round() as i32);
+                        txt(&p, &c.f.small, &pct, r + 12.0, vy - 9.0, 18.0, &wa(0.7 * kv));
+                        if kv > 0.9 && live_t { hits.push((rect(l - 6.0, vy - 12.0, r + 6.0, vy + 12.0), 48)); }
+                    }                    Tab::Glance => {
                         let k1 = row(1.0);
                         let t = GetLocalTime();
                         // Hora grande y segundos al lado, en gris
@@ -1233,7 +1326,7 @@ fn render() -> bool {
                     if d.abs() > 0.2 { c.tab_x += d * (1.0 - (-dt / 0.06).exp()); moving = true; } else { c.tab_x = target; }
                     rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: r0 + c.tab_x, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.16 * ka));
                     for (i, t) in tabs.iter().enumerate() {
-                        let (id, gl) = match t { Tab::Media => (10u8, "\u{E8D6}"), Tab::Timer => (11, "\u{E916}"), Tab::Shelf => (12, "\u{E8B7}"), Tab::Glance => (13, "\u{E823}") };
+                        let (id, gl) = match t { Tab::Media => (10u8, "\u{E8D6}"), Tab::Timer => (11, "\u{E916}"), Tab::Shelf => (12, "\u{E8B7}"), Tab::Glance => (13, "\u{E823}"), Tab::Call => (14, "\u{E717}"), Tab::Audio => (9, "\u{E767}") };
                         let x = x_of(i);
                         let gk = c.glow[id as usize];
                         if gk > 0.01 && c.tab != *t { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x, Y: t0 + 13.0 }, radiusX: 13.0, radiusY: 13.0 }, &wa(0.08 * gk * ka)); }
@@ -1381,11 +1474,29 @@ fn tabs_now(cur: Tab) -> Vec<Tab> {
     let media = MEDIA.lock().unwrap().is_some();
     let timer = live::timer_left().is_some() || live::LAST_DONE.lock().unwrap().is_some();
     let shelf = !live::SHELF.lock().unwrap().is_empty();
-    [Tab::Media, Tab::Timer, Tab::Shelf, Tab::Glance].into_iter().filter(|t| *t == cur || match t { Tab::Media => media, Tab::Timer => timer, Tab::Shelf => shelf, Tab::Glance => false }).collect()
+    let call = live::CALL.lock().unwrap().is_some();
+    TABS.into_iter().filter(|t| *t == cur || match t { Tab::Media => media, Tab::Timer => timer, Tab::Shelf => shelf, Tab::Call => call, Tab::Glance | Tab::Audio => false }).collect()
+}
+
+// ---------------------------------------------------------------- salidas de audio
+static AUDIO_LIST: Mutex<Vec<audioout::Output>> = Mutex::new(Vec::new());
+static AUDIO_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(3);
+/// Extremos de la barra de volumen (DIP) para convertir un clic en volumen.
+static VOL_SPAN: Mutex<(f32, f32)> = Mutex::new((0.0, 1.0));
+
+/// Segundos desde que arrancó (animaciones continuas: la onda de la llamada).
+fn ui_secs() -> f32 { static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new(); T0.get_or_init(Instant::now).elapsed().as_secs_f32() }
+
+/// Vuelve a leer las salidas de audio (al abrir la pestaña y tras cambiar de salida).
+fn refresh_outputs() {
+    let l = audioout::outputs();
+    AUDIO_N.store(l.len(), Ordering::Relaxed);
+    *AUDIO_LIST.lock().unwrap() = l;
 }
 
 /// Cambia de pestaña con su fundido hacia el lado que toca.
 fn switch_tab(t: Tab) {
+    if t == Tab::Audio { refresh_outputs(); }
     CARD.with(|c| if let Some(c) = c.borrow_mut().as_mut() {
         if c.tab == t { return; }
         let dir = if t.idx() > c.tab.idx() { 1.0 } else { -1.0 };
@@ -1504,6 +1615,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     Some(11) => switch_tab(Tab::Timer),
                     Some(12) => switch_tab(Tab::Shelf),
                     Some(13) => switch_tab(Tab::Glance),
+                    Some(14) => switch_tab(Tab::Call),
+                    Some(9) => switch_tab(Tab::Audio),
+                    Some(45) => live::toggle_mic(),
+                    Some(46) => { live::focus_call(); close(Why::Toggle); }
+                    Some(47) => { audioout::toggle_mute(); }
+                    Some(48) => {
+                        let x = (lp.0 & 0xFFFF) as i16 as f32 / CARD.with(|c| c.borrow().as_ref().map(|c| c.s).unwrap_or(1.0));
+                        let (l, r) = *VOL_SPAN.lock().unwrap();
+                        if r > l { audioout::set_volume(((x - l) / (r - l)).clamp(0.0, 1.0)); }
+                    }
+                    Some(i @ 50..=54) => {
+                        let id = AUDIO_LIST.lock().unwrap().get((i - 50) as usize).map(|o| o.id.clone());
+                        if let Some(id) = id { audioout::set_default(&id); refresh_outputs(); live::show(live::Hud::Audio, 1); }
+                    }
                     Some(40) => live::caffeine_toggle(),
                     Some(41) => { live::pomodoro_start(); switch_tab(Tab::Timer); }
                     Some(42) => { close(Why::Toggle); crate::pick_color(); }

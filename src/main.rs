@@ -46,6 +46,7 @@ mod deskdata;
 mod deskw;
 mod deskw2;
 mod audioviz;
+mod audioout;
 mod dnd;
 mod faces;
 mod fileops;
@@ -72,12 +73,12 @@ use std::collections::HashMap;
 
 /// Contenido de la isla central. Cada modo entra con un fundido y la isla cambia de ancho con un muelle.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Idle, Media, Timer, Shelf, Hud(live::Hud) }
+enum Mode { Idle, Media, Timer, Shelf, Call, Hud(live::Hud) }
 
 impl Mode {
     fn key(&self) -> u8 {
         match self {
-            Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 15,
+            Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 15, Mode::Call => 38,
             Mode::Hud(live::Hud::Copied) => 16, Mode::Hud(live::Hud::Shelf) => 17,
             Mode::Hud(live::Hud::Volume(..)) => 3, Mode::Hud(live::Hud::Bright(_)) => 4,
             Mode::Hud(live::Hud::Power(..)) => 5, Mode::Hud(live::Hud::TimerDone) => 6,
@@ -427,7 +428,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance, CallMic, CallOpen,
 }
 
 impl Act {
@@ -438,7 +439,7 @@ impl Act {
     /// Los menús de la derecha se alinean por su borde derecho.
     fn right_side(self) -> bool { matches!(self, Act::Battery | Act::User) }
     /// Botones dentro de la isla: su resaltado es un círculo pequeño, no una píldora de la barra.
-    fn in_island(self) -> bool { matches!(self, Act::Island | Act::OpenPlayer | Act::OpenYtm | Act::HudDismiss | Act::TimerOpen | Act::ShelfCard) }
+    fn in_island(self) -> bool { matches!(self, Act::Island | Act::OpenPlayer | Act::OpenYtm | Act::HudDismiss | Act::TimerOpen | Act::ShelfCard | Act::CallOpen | Act::CallMic) }
 }
 
 // ---------------------------------------------------------------- estado de dibujo
@@ -1166,6 +1167,8 @@ fn run(a: Act) {
         Act::Caffeine => live::caffeine_toggle(),
         Act::ShelfCard => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)),
         Act::Glance => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)),
+        Act::CallMic => live::toggle_mic(),
+        Act::CallOpen => if card::click_opens() { card::open_tab(card::Origin::Click, Some(card::Tab::Call)); } else { live::focus_call(); },
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
         Act::ShelfShare => {
@@ -1181,6 +1184,7 @@ fn run(a: Act) {
                 (Some(live::Hud::Phone), _) => sys::open("ms-phone:"),
                 (Some(live::Hud::Disk(_)), _) => sys::open("ms-settings:storagesense"),
                 (Some(live::Hud::Cpu(_) | live::Hud::Mem(_)), _) => sys::open_args("taskmgr.exe", ""),
+                (Some(live::Hud::Volume(..) | live::Hud::Audio), _) if card::click_opens() => { live::dismiss(); card::open_tab(card::Origin::Click, Some(card::Tab::Audio)); return; }
                 (Some(live::Hud::Saver(_)), _) => sys::open("ms-settings:batterysaver"),
                 _ => {}
             }
@@ -1797,9 +1801,10 @@ fn paint(hwnd: HWND) {
             }
             if let Some(hh) = hud { g.last_hud = Some(hh); }
             let timer = live::timer_left();
-            // El temporizador repinta cada segundo mientras corre
-            if timer.is_some() != g.count_on {
-                g.count_on = timer.is_some();
+            let call = live::CALL.lock().unwrap().clone();
+            // El temporizador (y la llamada) repintan cada segundo mientras corren
+            if (timer.is_some() || call.is_some()) != g.count_on {
+                g.count_on = timer.is_some() || call.is_some();
                 if g.count_on { SetTimer(Some(hwnd), TIMER_COUNT, 1000, None); } else { let _ = KillTimer(Some(hwnd), TIMER_COUNT); }
             }
             // Repintado justo cuando caduca el aviso
@@ -1809,6 +1814,8 @@ fn paint(hwnd: HWND) {
             }
             let mode = match (hud, &media, timer) {
                 (Some(hh), _, _) => Mode::Hud(hh),
+                // Una llamada manda sobre la música y el temporizador (como en el iPhone)
+                _ if call.is_some() => Mode::Call,
                 (None, Some(_), _) => Mode::Media,
                 (None, None, Some(_)) => Mode::Timer,
                 (None, None, None) if !live::SHELF.lock().unwrap().is_empty() => Mode::Shelf,
@@ -1877,8 +1884,13 @@ fn paint(hwnd: HWND) {
             let shelf_cnt = shelf_n.to_string();
             let shelf_compact = 12.0 + 16.0 + 8.0 + p.width(&g.f.title, &shelf_cnt) + 14.0;
             let shelf_full = 12.0 + 16.0 + 10.0 + shelf_n as f32 * 30.0 + 6.0 + 26.0 + 4.0 + 26.0 + 8.0;
+            // Llamada: icono verde y el tiempo; al pasar el ratón, la app y el botón del micro
+            let call_txt = call.as_ref().map(|c| live::mmss(c.2.elapsed().as_secs() as u32)).unwrap_or_default();
+            let call_name = call.as_ref().map(|c| trunc(&c.0, 24)).unwrap_or_default();
+            let call_compact = 12.0 + 16.0 + 10.0 + p.width(&g.f.title, &call_txt) + 14.0;
+            let call_full = call_compact + p.width(&g.f.small, &call_name) + 10.0 + 26.0 + 6.0;
             let mode_size = |m: Mode| -> (f32, f32) {
-                match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
+                match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Call => (call_compact, call_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
                     let (_, l, bar) = hud_parts(h);
                     let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Face(_) => 14.0 + 2.0 * 12.0, live::Hud::Mem(_) | live::Hud::Cpu(_) => 26.0, _ => 0.0 };
                     // Con barra: texto + hueco + barra (84) + hueco + porcentaje, para que nunca se pisen
@@ -1895,7 +1907,7 @@ fn paint(hwnd: HWND) {
             }
             let expanded = match mode {
                 Mode::Media => g.isl_hover || g.expand_until.is_some_and(|t| now < t),
-                Mode::Timer | Mode::Shelf => g.isl_hover,
+                Mode::Timer | Mode::Shelf | Mode::Call => g.isl_hover,
                 Mode::Hud(_) => true,
                 Mode::Idle => false,
             };
@@ -1927,7 +1939,7 @@ fn paint(hwnd: HWND) {
             let open_t = |m: Mode| { let (c, f) = mode_size(m); if f > c + 1.0 { ((iw - c) / (f - c)).clamp(0.0, 1.0) } else { 0.0 } };
             // La tarjeta copia la isla tal cual está: le apunta cuánto está desplegada
             card::ISL_OPEN.store(match mode { Mode::Media | Mode::Timer => open_t(mode), _ => 0.0 }.to_bits(), Ordering::Relaxed);
-            card::ISL_MODE.store(match mode { Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 3, Mode::Hud(_) => 4 }, Ordering::Relaxed);
+            card::ISL_MODE.store(match mode { Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 3, Mode::Hud(_) => 4, Mode::Call => 5 }, Ordering::Relaxed);
             // Con la tarjeta abierta, la isla la pinta ella (aquí solo se sigue midiendo)
             let card_owns = card::owns_island();
             // Mientras cambia de ancho se estira un poco a lo alto (como la Dynamic Island al transformarse)
@@ -2080,6 +2092,30 @@ fn paint(hwnd: HWND) {
                             if t > 0.9 && live { hits.push((rect(sx + 1.0, sy + 1.0, sx + 25.0, sb - 1.0), Act::TimerStop)); }
                         }
                         if live { hits.push((ir, Act::TimerOpen)); }
+                    }
+                    Mode::Call => {
+                        let t = open_t(Mode::Call);
+                        let muted = live::mic_muted().unwrap_or(false);
+                        // El icono del teléfono late despacio, como el de una llamada en curso
+                        let beat = 0.75 + 0.25 * (g.t0.elapsed().as_secs_f32() * 2.4).sin().abs();
+                        popup::push_alpha(&rt, beat);
+                        p.glyph(&g.f.icon_s, "\u{E717}", ix + 12.0, 16.0, &green, None);
+                        rt.PopLayer();
+                        let cw = p.width(&g.f.title, &call_txt);
+                        // Compacta: el tiempo a la derecha; desplegada, se desliza junto al icono y deja sitio a la app
+                        let (x_c, x_o) = (ix + iw - 14.0 - cw, ix + 12.0 + 16.0 + 10.0);
+                        p.text(&g.f.title, &call_txt, x_c + (x_o - x_c) * t, &green, None);
+                        if t > 0.3 {
+                            let k = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
+                            let da = p.brush(rgba(1.0, 1.0, 1.0, 0.7 * k));
+                            p.text(&g.f.small, &call_name, ix + 12.0 + 16.0 + 10.0 + cw + 10.0, &da, None);
+                            // Micro: silenciar o activar (en rojo si está silenciado)
+                            let mx = ix + iw - 6.0 - 26.0;
+                            let mb = if muted { p.brush(rgba(1.0, 0.36, 0.33, k)) } else { p.brush(rgba(1.0, 1.0, 1.0, 0.96 * k)) };
+                            p.glyph(&g.f.icon_s, if muted { "\u{F781}" } else { "\u{E720}" }, mx, 26.0, &mb, None);
+                            if t > 0.9 && live { hits.push((rect(mx + 1.0, sy + 1.0, mx + 25.0, sb - 1.0), Act::CallMic)); }
+                        }
+                        if live { hits.push((ir, Act::CallOpen)); }
                     }
                     Mode::Shelf => {
                         // Compacta: icono y número; al pasar el ratón, los archivos (clic = abrir) y una X para vaciar
@@ -2780,7 +2816,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_FACETEST => { faces::set(wp.0 == 1); LRESULT(0) }
             faces::WM_FACE => { if wp.0 == 2 { faces::on_dblclick(lp); } else { faces::on_face_msg(wp); } LRESULT(0) }
             WM_HOTKEY if wp.0 as i32 == faces::HOTKEY_ID => { faces::toggle(); LRESULT(0) }
-            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), _ => card::close(card::Why::Toggle) } LRESULT(0) }
+            WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), 9 => card::open_tab(card::Origin::Click, Some(card::Tab::Call)), 10 => card::test_switch(card::Tab::Audio), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
                 let playing = MEDIA.lock().unwrap().as_ref().is_some_and(|m| m.playing);
@@ -3286,7 +3322,21 @@ fn main() {
             std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2500)); basket::test_show(1100, 500); });
         }
         // Prueba visual de la tarjeta: MACBAR_CARDTEST=1 la abre a los 3 s y la cierra a los 7 s
-        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "5") {
+        if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "6") {
+            // Variante de la llamada y de la salida de audio
+            std::thread::spawn(|| {
+                let post = |w: usize, l: isize| unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_CARDTEST, WPARAM(w), LPARAM(l)); };
+                *live::CALL.lock().unwrap() = Some(("Microsoft Teams".into(), "ms-teams.exe".into(), Instant::now() - Duration::from_secs(754)));
+                std::thread::sleep(Duration::from_millis(2500));
+                post(9, 0);
+                std::thread::sleep(Duration::from_millis(2500));
+                post(10, 0);
+                std::thread::sleep(Duration::from_millis(2500));
+                post(0, 0);
+                std::thread::sleep(Duration::from_millis(1500));
+                *live::CALL.lock().unwrap() = None;
+            });
+        } else         if std::env::var("MACBAR_CARDTEST").is_ok_and(|v| v == "5") {
             // Variante para medir el consumo: abierta y quieta 20 s
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(3000));
