@@ -74,12 +74,12 @@ use std::collections::HashMap;
 
 /// Contenido de la isla central. Cada modo entra con un fundido y la isla cambia de ancho con un muelle.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode { Idle, Media, Timer, Shelf, Call, Hud(live::Hud) }
+enum Mode { Idle, Media, Timer, Shelf, Call, Dl, Hud(live::Hud) }
 
 impl Mode {
     fn key(&self) -> u8 {
         match self {
-            Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 15, Mode::Call => 38,
+            Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 15, Mode::Call => 38, Mode::Dl => 40,
             Mode::Hud(live::Hud::Copied) => 16, Mode::Hud(live::Hud::Shelf) => 17,
             Mode::Hud(live::Hud::Volume(..)) => 3, Mode::Hud(live::Hud::Bright(_)) => 4,
             Mode::Hud(live::Hud::Power(..)) => 5, Mode::Hud(live::Hud::TimerDone) => 6,
@@ -92,7 +92,7 @@ impl Mode {
             Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
-            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36, Mode::Hud(live::Hud::Face(_)) => 37,
+            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36, Mode::Hud(live::Hud::Face(_)) => 37, Mode::Hud(live::Hud::DlStart) => 39,
         }
     }
 }
@@ -106,7 +106,9 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
     match h {
         Volume(v, m) => (if m || v <= 0.001 { "\u{E74F}" } else if v < 0.34 { "\u{E993}" } else if v < 0.67 { "\u{E994}" } else { "\u{E995}" }, if m { i18n::t("Silencio").into() } else { i18n::t("Volumen").into() }, true),
         Bright(_) => ("\u{E706}", i18n::t("Brillo").into(), true),
-        Power(_, ch) => (if ch { "\u{EA93}" } else { "\u{E83F}" }, if ch { i18n::t("Cargando").into() } else { i18n::t("Con batería").into() }, true),
+        // Cargando: cuánto falta para llenarse, si Windows lo sabe
+        Power(_, ch) => (if ch { "\u{EA93}" } else { "\u{E83F}" }, if ch { match live::charge_eta() { Some(m) => i18n::tf("Lleno en {}", &[&live::hm(m)]), None => i18n::t("Cargando").into() } } else { i18n::t("Con batería").into() }, true),
+        DlStart => ("\u{E896}", trunc(&i18n::tf("Descargando {}", &[&live::DL.lock().unwrap().as_ref().map(|d| d.0.clone()).unwrap_or_default()]), 40), false),
         TimerDone => ("\u{EA8F}", i18n::t("Se acabó el tiempo").into(), false),
         Net(true) => ("\u{E701}", i18n::t("Conectado a internet").into(), false),
         Net(false) => ("\u{F384}", i18n::t("Sin conexión").into(), false),
@@ -429,7 +431,7 @@ enum Act {
     // Abren un panel propio
     Logo, Weather, Tray, Wifi, Clock,
     // Acción directa
-    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance, CallMic, CallOpen,
+    Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance, CallMic, CallOpen, DlOpen,
 }
 
 impl Act {
@@ -876,6 +878,7 @@ fn media_thread(rx: Receiver<Cmd>) {
             Err(RecvTimeoutError::Disconnected) => return,
             Err(RecvTimeoutError::Timeout) => {}
         }
+        if std::env::var_os("MACBAR_DEMO").is_some() && std::env::var_os("MACBAR_DLTEST").is_some() { continue; }
         if std::env::var_os("MACBAR_DEMO").is_some() {
             // Modo demo para revisar el diseño sin reproducir nada
             // Carátula inventada: un degradado cálido con un círculo, para que se vea el color de la isla
@@ -1169,6 +1172,7 @@ fn run(a: Act) {
         Act::ShelfCard => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)),
         Act::Glance => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)),
         Act::CallMic => live::toggle_mic(),
+        Act::DlOpen => { if let Some(d) = live::known_folder(&FOLDERID_Downloads) { sys::open(&d); } }
         Act::CallOpen => if card::click_opens() { card::open_tab(card::Origin::Click, Some(card::Tab::Call)); } else { live::focus_call(); },
         Act::ShelfOpen(i) => { let p = live::SHELF.lock().unwrap().get(i as usize).map(|x| x.0.clone()); if let Some(p) = p { sys::open(&p); } }
         Act::ShelfClear => live::shelf_clear(),
@@ -1803,6 +1807,7 @@ fn paint(hwnd: HWND) {
             if let Some(hh) = hud { g.last_hud = Some(hh); }
             let timer = live::timer_left();
             let call = live::CALL.lock().unwrap().clone();
+            let dl = live::DL.lock().unwrap().clone();
             // El temporizador (y la llamada) repintan cada segundo mientras corren
             if (timer.is_some() || call.is_some()) != g.count_on {
                 g.count_on = timer.is_some() || call.is_some();
@@ -1819,6 +1824,8 @@ fn paint(hwnd: HWND) {
                 _ if call.is_some() => Mode::Call,
                 (None, Some(_), _) => Mode::Media,
                 (None, None, Some(_)) => Mode::Timer,
+                // Descarga en curso: cuando no hay música ni temporizador (al empezar se avisa siempre)
+                (None, None, None) if dl.is_some() => Mode::Dl,
                 (None, None, None) if !live::SHELF.lock().unwrap().is_empty() => Mode::Shelf,
                 _ => Mode::Idle,
             };
@@ -1890,8 +1897,13 @@ fn paint(hwnd: HWND) {
             let call_name = call.as_ref().map(|c| trunc(&c.0, 24)).unwrap_or_default();
             let call_compact = 12.0 + 16.0 + 10.0 + p.width(&g.f.title, &call_txt) + 14.0;
             let call_full = call_compact + p.width(&g.f.small, &call_name) + 10.0 + 26.0 + 6.0;
+            // Descarga: flecha y lo bajado; al pasar el ratón, el nombre, la velocidad y una barra que se mueve
+            let dl_amt = dl.as_ref().map(|d| live::human_bytes(d.1 as f64)).unwrap_or_default();
+            let dl_info = dl.as_ref().map(|d| format!("{} · {}/s", trunc(&d.0, 26), live::human_bytes(d.2 as f64))).unwrap_or_default();
+            let dl_compact = 12.0 + 16.0 + 10.0 + p.width(&g.f.title, &dl_amt) + 14.0;
+            let dl_full = (dl_compact + p.width(&g.f.small, &dl_info) + 16.0).max(dl_compact + 120.0);
             let mode_size = |m: Mode| -> (f32, f32) {
-                match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Call => (call_compact, call_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
+                match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Call => (call_compact, call_full), Mode::Dl => (dl_compact, dl_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
                     let (_, l, bar) = hud_parts(h);
                     let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Face(_) => 14.0 + 2.0 * 12.0, live::Hud::Mem(_) | live::Hud::Cpu(_) => 26.0, _ => 0.0 };
                     // Con barra: texto + hueco + barra (84) + hueco + porcentaje, para que nunca se pisen
@@ -1908,7 +1920,7 @@ fn paint(hwnd: HWND) {
             }
             let expanded = match mode {
                 Mode::Media => g.isl_hover || g.expand_until.is_some_and(|t| now < t),
-                Mode::Timer | Mode::Shelf | Mode::Call => g.isl_hover,
+                Mode::Timer | Mode::Shelf | Mode::Call | Mode::Dl => g.isl_hover,
                 Mode::Hud(_) => true,
                 Mode::Idle => false,
             };
@@ -1940,7 +1952,7 @@ fn paint(hwnd: HWND) {
             let open_t = |m: Mode| { let (c, f) = mode_size(m); if f > c + 1.0 { ((iw - c) / (f - c)).clamp(0.0, 1.0) } else { 0.0 } };
             // La tarjeta copia la isla tal cual está: le apunta cuánto está desplegada
             card::ISL_OPEN.store(match mode { Mode::Media | Mode::Timer => open_t(mode), _ => 0.0 }.to_bits(), Ordering::Relaxed);
-            card::ISL_MODE.store(match mode { Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 3, Mode::Hud(_) => 4, Mode::Call => 5 }, Ordering::Relaxed);
+            card::ISL_MODE.store(match mode { Mode::Idle => 0, Mode::Media => 1, Mode::Timer => 2, Mode::Shelf => 3, Mode::Hud(_) => 4, Mode::Call => 5, Mode::Dl => 6 }, Ordering::Relaxed);
             // Con la tarjeta abierta, la isla la pinta ella (aquí solo se sigue midiendo)
             let card_owns = card::owns_island();
             // Mientras cambia de ancho se estira un poco a lo alto (como la Dynamic Island al transformarse)
@@ -2093,6 +2105,32 @@ fn paint(hwnd: HWND) {
                             if t > 0.9 && live { hits.push((rect(sx + 1.0, sy + 1.0, sx + 25.0, sb - 1.0), Act::TimerStop)); }
                         }
                         if live { hits.push((ir, Act::TimerOpen)); }
+                    }
+                    Mode::Dl => {
+                        let t = open_t(Mode::Dl);
+                        let acc = profiles::accent(1.0);
+                        // La flecha baja y vuelve, como en el icono de descargas de macOS
+                        let bob = (g.t0.elapsed().as_secs_f32() * 3.0).sin() * 1.5;
+                        rt.SetTransform(&Matrix3x2 { M32: cmat.M32 + bob, ..cmat });
+                        p.glyph(&g.f.icon_s, "\u{E896}", ix + 12.0, 16.0, &p.brush(acc), None);
+                        rt.SetTransform(&cmat);
+                        let aw = p.width(&g.f.title, &dl_amt);
+                        let (x_c, x_o) = (ix + iw - 14.0 - aw, ix + 12.0 + 16.0 + 10.0);
+                        p.text(&g.f.title, &dl_amt, x_c + (x_o - x_c) * t, &white, None);
+                        if t > 0.3 {
+                            let k = ((t - 0.3) / 0.7).clamp(0.0, 1.0);
+                            p.text(&g.f.small, &dl_info, x_o + aw + 10.0, &p.brush(rgba(1.0, 1.0, 1.0, 0.6 * k)), None);
+                            // Barra sin final conocido: un tramo de luz que la recorre una y otra vez
+                            let (bl, br, yb) = (x_o, ix + iw - 12.0, pb - 5.0);
+                            rt.FillRoundedRectangle(&rrect(rect(bl, yb - 1.0, br, yb + 1.0), 1.0), &p.brush(rgba(1.0, 1.0, 1.0, 0.14 * k)));
+                            let ph = (g.t0.elapsed().as_secs_f32() * 0.7).fract();
+                            let seg = (br - bl) * 0.28;
+                            let sx = bl - seg + (br - bl + seg) * ph;
+                            rt.PushAxisAlignedClip(&rect(bl, yb - 2.0, br, yb + 2.0), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                            rt.FillRoundedRectangle(&rrect(rect(sx, yb - 1.0, sx + seg, yb + 1.0), 1.0), &p.brush(rgba(acc.r, acc.g, acc.b, k)));
+                            rt.PopAxisAlignedClip();
+                        }
+                        if live { hits.push((ir, Act::DlOpen)); }
                     }
                     Mode::Call => {
                         let t = open_t(Mode::Call);
@@ -3313,6 +3351,9 @@ fn main() {
         bar_ink_thread();
         hang_watch();
         search_extra::clip_start();
+        if std::env::var_os("MACBAR_DLTEST").is_some() {
+            std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(16000)); live::show(live::Hud::Power(80, true), 3000); });
+        }
         if std::env::var_os("MACBAR_SETTINGSTEST").is_some() {
             // Prueba visual de la configuración: se abre a los 2 s
             std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2000)); unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_FACETEST, WPARAM(7), LPARAM(0)); } });

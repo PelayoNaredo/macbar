@@ -22,6 +22,8 @@ pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(b
     Cpu(u8),
     /// Acción de la bandeja terminada: 0 = ZIP, 1 = PNG, 2 = JPG, 3 = OCR; y si salió bien
     FileOp(u8, bool),
+    /// Empieza una descarga
+    DlStart,
     /// Cara del escritorio: true = iconos, false = widgets
     Face(bool) }
 
@@ -727,10 +729,11 @@ pub fn start() {
     std::thread::spawn(net_thread);
     std::thread::spawn(keyboard_thread);
     std::thread::spawn(watch_thread);
+    std::thread::spawn(dl_thread);
 }
 
 // ---------------------------------------------------------------- descargas y capturas (sin sondeo: avisos del sistema de archivos)
-fn known_folder(id: &windows::core::GUID) -> Option<String> {
+pub(crate) fn known_folder(id: &windows::core::GUID) -> Option<String> {
     unsafe {
         let p = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG(0), None).ok()?;
         let s = p.to_string().ok();
@@ -784,6 +787,96 @@ fn watch_thread() {
         unsafe { let _ = FindNextChangeNotification(handles[i]); }
     }
 }
+// ---------------------------------------------------------------- tiempo hasta cargar del todo
+/// Minutos que faltan para llenar la batería al ritmo de carga de ahora (None si no carga o no se sabe).
+pub fn charge_eta() -> Option<u32> {
+    if sys::demo() { return Some(74); }
+    use windows::Devices::Power::Battery;
+    let r = Battery::AggregateBattery().ok()?.GetReport().ok()?;
+    let rate = r.ChargeRateInMilliwatts().ok()?.Value().ok()?;
+    let rem = r.RemainingCapacityInMilliwattHours().ok()?.Value().ok()?;
+    let full = r.FullChargeCapacityInMilliwattHours().ok()?.Value().ok()?;
+    eta_minutes(rate, rem, full)
+}
+
+/// Minutos hasta lleno con esa potencia de carga (mW) y esas capacidades (mWh).
+pub fn eta_minutes(rate: i32, rem: i32, full: i32) -> Option<u32> {
+    if rate <= 0 || full <= 0 || rem >= full { return None; }
+    let m = ((full - rem) as f64 / rate as f64 * 60.0).round() as u32;
+    (1..=24 * 60).contains(&m).then_some(m)
+}
+
+/// «1 h 20 min», «35 min».
+pub fn hm(m: u32) -> String { if m >= 60 { format!("{} h {} min", m / 60, m % 60) } else { format!("{m} min") } }
+
+// ---------------------------------------------------------------- descarga en curso
+/// Descarga en marcha: nombre (sin la extensión temporal), bytes ya bajados y velocidad (bytes/s).
+pub static DL: Mutex<Option<(String, u64, f32)>> = Mutex::new(None);
+
+/// Nombre limpio de un archivo a medio bajar («foto.jpg.crdownload» → «foto.jpg»; Chrome a veces usa
+/// «Unconfirmed 1234.crdownload» mientras pregunta).
+pub fn dl_name(n: &str) -> String {
+    let low = n.to_lowercase();
+    for e in [".crdownload", ".part", ".partial", ".download", ".opdownload"] {
+        if low.ends_with(e) { return n[..n.len() - e.len()].to_string(); }
+    }
+    n.to_string()
+}
+
+/// Cada segundo mira si en Descargas hay un archivo a medio bajar que esté creciendo.
+fn dl_thread() {
+    use windows::Win32::UI::Shell::FOLDERID_Downloads;
+    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    if sys::demo() && std::env::var_os("MACBAR_DLTEST").is_some() {
+        // Prueba visual: una descarga inventada que crece a ~6 MB/s durante 12 s
+        std::thread::sleep(Duration::from_secs(2));
+        show(Hud::DlStart, 2400);
+        for i in 0..12u64 {
+            *DL.lock().unwrap() = Some(("ubuntu-24.04-desktop-amd64.iso".into(), (i + 1) * 6_200_000, 6_200_000.0));
+            unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        *DL.lock().unwrap() = None;
+        return;
+    }
+    let Some(dir) = known_folder(&FOLDERID_Downloads) else { return };
+    let mut last: Option<(String, u64)> = None;
+    let mut speed = 0.0f32;
+    let mut was = false;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        // El que más recientemente ha cambiado, si ha cambiado hace menos de 8 s
+        let best = std::fs::read_dir(&dir).ok().and_then(|rd| rd.flatten().filter_map(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            let low = n.to_lowercase();
+            if ![".crdownload", ".part", ".partial", ".download", ".opdownload"].iter().any(|x| low.ends_with(x)) { return None; }
+            let m = e.metadata().ok()?;
+            let age = m.modified().ok()?.elapsed().ok()?;
+            (age < Duration::from_secs(8)).then_some((n, m.len(), age))
+        }).min_by_key(|x| x.2));
+        let now = best.map(|(n, len, _)| {
+            let d = match &last { Some((ln, l)) if *ln == n => len.saturating_sub(*l) as f32, _ => 0.0 };
+            speed = if last.as_ref().is_some_and(|x| x.0 == n) { speed * 0.6 + d * 0.4 } else { 0.0 };
+            last = Some((n.clone(), len));
+            (dl_name(&n), len, speed)
+        });
+        if now.is_none() { last = None; speed = 0.0; }
+        let started = now.is_some() && !was;
+        was = now.is_some();
+        let changed = { let mut g = DL.lock().unwrap(); let c = g.is_some() != now.is_some() || g.as_ref().map(|x| x.1) != now.as_ref().map(|x| x.1); *g = now; c };
+        // Al empezar, la isla lo dice un momento aunque esté sonando música
+        if started { show(Hud::DlStart, 2400); }
+        if changed { unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_HUD, WPARAM(1), LPARAM(0)); } }
+    }
+}
+
+/// «45,2 MB», «870 KB», «1,3 GB».
+pub fn human_bytes(b: f64) -> String {
+    let (v, u) = if b >= 1e9 { (b / 1e9, "GB") } else if b >= 1e6 { (b / 1e6, "MB") } else { (b / 1e3, "KB") };
+    let s = if v >= 100.0 { format!("{v:.0}") } else { format!("{v:.1}") };
+    format!("{} {u}", if crate::i18n::en() { s } else { s.replace('.', ",") })
+}
+
 // ---------------------------------------------------------------- rueda sobre el notch = volumen
 /// Sube o baja el volumen (paso de 2 %) y lo enseña al momento en la isla.
 pub fn nudge_volume(steps: i32) {
@@ -899,5 +992,24 @@ pub fn clipboard_changed(hwnd: HWND) {
         if desc.is_empty() { return; }
         *CLIP.lock().unwrap() = desc;
         show(Hud::Copied, 1500);
+    }
+}
+#[cfg(test)]
+mod tests_dl {
+    use super::*;
+
+    #[test]
+    fn descargas_y_carga() {
+        assert_eq!(dl_name("foto.jpg.crdownload"), "foto.jpg");
+        assert_eq!(dl_name("juego.zip.part"), "juego.zip");
+        assert_eq!(dl_name("normal.pdf"), "normal.pdf");
+        // 50 Wh de 60, cargando a 20 W: 30 min
+        assert_eq!(eta_minutes(20_000, 50_000, 60_000), Some(30));
+        assert_eq!(eta_minutes(0, 50_000, 60_000), None);
+        assert_eq!(eta_minutes(20_000, 60_000, 60_000), None);
+        assert_eq!(hm(80), "1 h 20 min");
+        assert_eq!(hm(35), "35 min");
+        assert!(human_bytes(45_200_000.0).starts_with("45"));
+        assert!(human_bytes(1_300_000_000.0).ends_with("GB"));
     }
 }

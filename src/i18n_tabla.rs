@@ -485,4 +485,6 @@ pub static EN: &[(&str, &str)] = &[
     ("Carpeta de configuración", "Settings folder"),
     ("Editar config.ini", "Edit config.ini"),
     ("Barra de menús estilo macOS para Windows 11", "macOS-style menu bar for Windows 11"),
+    ("Lleno en {}", "Full in {}"),
+    ("Descargando {}", "Downloading {}"),
 ];
