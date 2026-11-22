@@ -314,70 +314,21 @@ pub fn user_menu() -> Menu {
 }
 
 pub fn bar_menu() -> Menu {
+    // Corto: lo de uso rápido. Todo lo demás (perfiles, acento, idioma, posición, cada widget…) está en
+    // la Configuración
     let mut m = Menu::default();
-    let on = sys::autostart_enabled();
-    // Todas las opciones de abajo (y las de config.ini) en una ventana
     m.item(t("Configuración…"), A::Settings).sep();
-    m.check(t("Iniciar con Windows"), on, A::Autostart(!on))
-        .check(t("Widgets del escritorio"), crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
-    // Doble escritorio: cara de widgets o de iconos
+    m.check(t("Widgets del escritorio"), crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
     if crate::desk::enabled() {
         let away = crate::faces::AWAY.load(std::sync::atomic::Ordering::Relaxed);
-        m.item(format!("      {}", if away { t("Ver los widgets (Win+Alt+W)") } else { t("Ver los iconos del escritorio (Win+Alt+W)") }), A::Bar(crate::BAR_FACE))
-            .check(format!("      {}", t("Doble clic en el escritorio para cambiar")), crate::faces::dblclick_on(), A::Bar(crate::BAR_FACE_DBL));
-    }
-    // Cada widget por separado (solo con los widgets encendidos)
-    if crate::desk::enabled() {
-        for (i, (label, on)) in crate::desk::menu_items().into_iter().enumerate() {
-            m.check(format!("      {label}"), on, A::Bar(crate::BAR_WIDGET0 + i as u32));
-        }
-        // Color del texto de los widgets: según el fondo, o fijo para fondos claros u oscuros
-        m.sep();
-        let mode = crate::desk::ink_mode();
-        for (i, label) in ["Texto según el fondo", "Texto oscuro (fondos claros)", "Texto claro (fondos oscuros)"].into_iter().enumerate() {
-            m.check(format!("      {}", t(label)), mode == i as i8, A::Bar(crate::BAR_INK0 + i as u32));
-        }
-    }
-    // Perfiles: cada uno recuerda sus widgets y ajustes
-    m.sep().info(t("Perfiles"));
-    let cur = crate::profiles::active();
-    for (i, name) in crate::profiles::NAMES.iter().enumerate() {
-        let label = if crate::profiles::exists(i) || cur == Some(i) { t(name).to_string() } else { crate::i18n::tf("{} (guardar el actual)", &[&t(name)]) };
-        m.check(format!("      {label}"), cur == Some(i), A::Bar(crate::BAR_PROFILE0 + i as u32));
-    }
-    m.item(format!("      {}", t("Abrir la carpeta de perfiles…")), A::Bar(crate::BAR_PROFILES_DIR));
-    m.check(t("Modo presentación (sin avisos ni widgets)"), crate::profiles::presenting(), A::Bar(crate::BAR_PRESENT));
-    m.check(t("Cafeína (no dejar que el equipo se duerma)"), crate::live::caffeine_on(), A::Bar(crate::BAR_CAFFEINE));
-    m.check(t("Pomodoro (25 min de concentración)"), crate::live::POMO.load(std::sync::atomic::Ordering::Relaxed) != 0, A::Bar(crate::BAR_POMODORO));
-    m.item(t("Cuentagotas de color"), A::Bar(crate::BAR_PICKER));
-    m.check(t("Nota rápida (no sale al compartir pantalla)"), crate::notes::is_open(), A::Bar(crate::BAR_NOTE));
-    // Tema: color de acento, y un archivo para compartirlo
-    m.sep().info(t("Color de acento"));
-    let ai = crate::profiles::accent_index();
-    for (i, (name, _)) in crate::profiles::ACCENTS.iter().enumerate() {
-        m.check(format!("      {}", t(name)), ai == Some(i), A::Bar(crate::BAR_ACCENT0 + i as u32));
-    }
-    m.item(format!("      {}", t("Exportar tema…")), A::Bar(crate::BAR_THEME_EXPORT))
-        .item(format!("      {}", t("Importar tema…")), A::Bar(crate::BAR_THEME_IMPORT));
-    // Tarjeta de la isla
-    m.sep().info(t("Tarjeta de la isla"));
-    m.check(format!("      {}", t("Abrir con un clic en la isla")), crate::card::opt(crate::card::OPT_CLICK), A::Bar(crate::BAR_CARD_CLICK))
-        .check(format!("      {}", t("Abrir al dejar el ratón encima")), crate::card::opt(crate::card::OPT_HOVER), A::Bar(crate::BAR_CARD_HOVER))
-        .check(format!("      {}", t("Vistazo con la isla vacía")), crate::card::opt(crate::card::OPT_GLANCE), A::Bar(crate::BAR_CARD_GLANCE));
-    // Posición de la barra
-    m.sep().info(t("Posición de la barra"));
-    let b = crate::bar_bottom();
-    m.check(format!("      {}", t("Arriba")), !b, A::Bar(crate::BAR_POS_TOP))
-        .check(format!("      {}", t("Abajo")), b, A::Bar(crate::BAR_POS_BOTTOM))
-        .check(format!("      {}", t("Barra sólida con ventanas maximizadas")), crate::solid_bar(), A::Bar(crate::BAR_SOLID));
-    // Idioma de la interfaz
-    m.sep().info(t("Idioma"));
-    let lm = crate::i18n::mode();
-    for (i, label) in ["Automático (el de Windows)", "Español", "English"].into_iter().enumerate() {
-        m.check(format!("      {}", t(label)), lm == i as i8, A::Bar(crate::BAR_LANG0 + i as u32));
+        m.item(if away { t("Ver los widgets (Win+Alt+W)") } else { t("Ver los iconos del escritorio (Win+Alt+W)") }, A::Bar(crate::BAR_FACE));
     }
     m.sep()
-        .item(t("Editar configuración…"), A::EditConfig)
+        .check(t("Modo presentación (sin avisos ni widgets)"), crate::profiles::presenting(), A::Bar(crate::BAR_PRESENT))
+        .check(t("Cafeína (no dejar que el equipo se duerma)"), crate::live::caffeine_on(), A::Bar(crate::BAR_CAFFEINE))
+        .check(t("Pomodoro (25 min de concentración)"), crate::live::POMO.load(std::sync::atomic::Ordering::Relaxed) != 0, A::Bar(crate::BAR_POMODORO))
+        .item(t("Cuentagotas de color"), A::Bar(crate::BAR_PICKER))
+        .check(t("Nota rápida (no sale al compartir pantalla)"), crate::notes::is_open(), A::Bar(crate::BAR_NOTE))
         .sep()
         .item(t("Salir de macbar"), A::Bar(crate::BAR_QUIT));
     m
