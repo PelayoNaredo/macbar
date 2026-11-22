@@ -1,18 +1,21 @@
-//! Tercera tanda de diseños alternativos de los widgets, con estética de «matriz de puntos»: terminal
-//! con la ficha del equipo, espectro en puntos, juego de la vida al ritmo de la música, esfera de puntos,
-//! reloj redondo, casete con osciloscopio y unidades como barras de puntos. Todo con datos reales del PC
-//! y el color de acento como único color vivo. Como los de `deskv`/`deskv2`, cada uno es otro `Widget`
-//! con su propio tamaño (`desk::size`).
+//! Tercera tanda de diseños alternativos de los widgets, con el estilo de los demás (flotantes, la misma
+//! letra, los mismos grises y el acento solo en detalles minúsculos) y una pieza de cristal de verdad en
+//! cada uno: un tubo, un anillo o un orbe que REFRACTA lo que pasa por detrás (el contenido se dobla en
+//! los cantos, con una franja finísima azul y ámbar). Ficha del equipo, espectro, juego de la vida con
+//! burbujas, orbe, reloj redondo, casete y unidades. Todo con datos reales del PC. Como los de
+//! `deskv`/`deskv2`, cada uno es otro `Widget` con su propio tamaño (`desk::size`).
 
 use super::*;
 use desk::{size, DFonts, Kind};
 use deskw::Widget;
 use popup::Ui;
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
+use std::rc::Rc;
 
 // ================================================================ utilidades comunes
 fn ez(t: f32, delay: f32, dur: f32) -> f32 { popup::ease_out(((t - delay) / dur).clamp(0.0, 1.0)) }
 fn ellipse(x: f32, y: f32, r: f32) -> D2D1_ELLIPSE { D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: r, radiusY: r } }
+fn ell(x: f32, y: f32, rx: f32, ry: f32) -> D2D1_ELLIPSE { D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: rx, radiusY: ry } }
 fn v2(x: f32, y: f32) -> Vector2 { Vector2 { X: x, Y: y } }
 fn lerp(a: f32, b: f32, k: f32) -> f32 { a + (b - a) * k }
 
@@ -40,6 +43,8 @@ thread_local! {
     static STROKES: RefCell<HashMap<usize, ID2D1StrokeStyle>> = RefCell::new(HashMap::new());
     /// ¿Movimiento reducido? (se vuelve a mirar cada pocos segundos): (cuándo, valor)
     static REDUCED: std::cell::Cell<(f32, bool)> = const { std::cell::Cell::new((-100.0, false)) };
+    /// Degradados ya creados, por lienzo (los más recientes al final) y por colores y geometría
+    static GRADS: RefCell<Vec<(windows::core::IUnknown, HashMap<u64, ID2D1Brush>)>> = const { RefCell::new(Vec::new()) };
 }
 
 fn round_stroke(rt: &ID2D1RenderTarget) -> Option<ID2D1StrokeStyle> {
@@ -69,14 +74,20 @@ fn reduced() -> bool {
     v
 }
 
-/// Color de acento con opacidad.
+/// Color de acento con opacidad (solo para detalles minúsculos: un punto, una raya de 1-2 px).
 fn acc(a: f32) -> D2D1_COLOR_F { crate::profiles::accent(a) }
-
-/// Blanco fijo (para lo que va sobre un fondo oscuro propio: terminal, esfera del reloj, casete).
+/// Blanco con opacidad (brillos y reflejos: la luz es blanca también sobre fondo claro).
 fn wh(a: f32) -> D2D1_COLOR_F { rgba(1.0, 1.0, 1.0, a) }
+/// El mismo color con otra opacidad.
+fn with_a(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F { D2D1_COLOR_F { a, ..c } }
 
-/// Opacidad redondeada a pasos de 1/`n` (así los pinceles se reutilizan de la caché en vez de crear uno por punto).
+/// Opacidad redondeada a pasos de 1/`n` (así los pinceles y degradados se reutilizan de la caché).
 fn q(a: f32, n: f32) -> f32 { (a.clamp(0.0, 1.0) * n).round() / n }
+
+/// Un círculo relleno.
+fn dot(rt: &ID2D1RenderTarget, x: f32, y: f32, r: f32, b: &ID2D1Brush) {
+    if r > 0.05 { unsafe { rt.FillEllipse(&ellipse(x, y, r), b); } }
+}
 
 /// Espectro de ahora (en modo demo, uno de muestra si aún no llega nada).
 fn levels_now() -> [f32; audioviz::BANDS] {
@@ -109,96 +120,447 @@ fn col_level(l: &[f32; audioviz::BANDS], c: usize, cols: usize) -> f32 {
     (l[a.min(audioviz::BANDS - 1)] * (1.0 - fr) + l[b] * fr).clamp(0.0, 1.0)
 }
 
-/// Un punto relleno.
-fn dot(rt: &ID2D1RenderTarget, x: f32, y: f32, r: f32, b: &ID2D1Brush) {
-    if r > 0.05 { unsafe { rt.FillEllipse(&ellipse(x, y, r), b); } }
-}
-
-/// Un punto hueco (solo el borde).
-fn ring_dot(rt: &ID2D1RenderTarget, x: f32, y: f32, r: f32, b: &ID2D1Brush, sw: f32) {
-    if r > 0.05 { unsafe { rt.DrawEllipse(&ellipse(x, y, r), b, sw, None); } }
-}
-
-/// Fila de puntos tipo contador ●●●●○○: `on` de `n` encendidos. Devuelve el ancho.
-#[allow(clippy::too_many_arguments)]
-fn dot_row(rt: &ID2D1RenderTarget, x: f32, cy: f32, n: usize, on: usize, pitch: f32, r: f32, b_on: &ID2D1Brush, b_off: &ID2D1Brush) -> f32 {
-    for i in 0..n {
-        let px = x + i as f32 * pitch;
-        if i < on { dot(rt, px, cy, r, b_on); } else { dot(rt, px, cy, r * 0.62, b_off); }
-    }
-    (n.max(1) - 1) as f32 * pitch + 2.0 * r
-}
-
-// ---------------------------------------------------------------- dígitos de puntos
-/// Letra de puntos: pequeña de 3×5 o grande de 5×7 (solo dígitos y «:»).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DotFont { Small, Big }
-
-/// Filas de cada dígito de 3×5 (el bit alto es la columna de la izquierda).
-const SMALL: [[u8; 5]; 10] = [
-    [0b111, 0b101, 0b101, 0b101, 0b111], [0b010, 0b110, 0b010, 0b010, 0b111], [0b111, 0b001, 0b111, 0b100, 0b111],
-    [0b111, 0b001, 0b111, 0b001, 0b111], [0b101, 0b101, 0b111, 0b001, 0b001], [0b111, 0b100, 0b111, 0b001, 0b111],
-    [0b111, 0b100, 0b111, 0b101, 0b111], [0b111, 0b001, 0b001, 0b001, 0b001], [0b111, 0b101, 0b111, 0b101, 0b111],
-    [0b111, 0b101, 0b111, 0b001, 0b111],
-];
-/// Filas de cada dígito de 5×7.
-const BIG: [[u8; 7]; 10] = [
-    [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-    [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-    [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-    [0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110],
-    [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-    [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
-    [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
-    [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-    [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-    [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
-];
-const COLON_S: [u8; 5] = [0, 1, 0, 1, 0];
-const COLON_B: [u8; 7] = [0, 0, 1, 0, 1, 0, 0];
-
-/// Ancho en columnas y filas de un carácter (None si la letra no lo tiene).
-fn glyph(c: char, f: DotFont) -> Option<(usize, &'static [u8])> {
-    match (c, f) {
-        ('0'..='9', DotFont::Small) => Some((3, &SMALL[c as usize - '0' as usize])),
-        ('0'..='9', DotFont::Big) => Some((5, &BIG[c as usize - '0' as usize])),
-        (':', DotFont::Small) => Some((1, &COLON_S)),
-        (':', DotFont::Big) => Some((1, &COLON_B)),
-        _ => None,
+/// Barra fina como las de los widgets clásicos: carril y relleno blanco.
+fn bar(ui: &Ui, x: f32, y: f32, w: f32, h: f32, frac: f32) {
+    unsafe {
+        ui.rt.FillRoundedRectangle(&rrect(rect(x, y, x + w, y + h), h / 2.0), &ui.track);
+        let fw = (w * frac.clamp(0.0, 1.0)).max(if frac > 0.0 { h } else { 0.0 });
+        if fw > 0.0 { ui.rt.FillRoundedRectangle(&rrect(rect(x, y, x + fw, y + h), h / 2.0), &ui.white); }
     }
 }
 
-/// Columnas que ocupa un texto (con una columna de separación entre caracteres).
-fn dot_cols(s: &str, f: DotFont) -> usize {
-    let n: usize = s.chars().map(|c| glyph(c, f).map(|g| g.0).unwrap_or(1) + 1).sum();
-    n.saturating_sub(1)
+// ---------------------------------------------------------------- transformaciones
+/// a · b (primero a, luego b) para transformaciones 2D de Direct2D.
+fn mulm(a: &Matrix3x2, b: &Matrix3x2) -> Matrix3x2 {
+    Matrix3x2 {
+        M11: a.M11 * b.M11 + a.M12 * b.M21, M12: a.M11 * b.M12 + a.M12 * b.M22,
+        M21: a.M21 * b.M11 + a.M22 * b.M21, M22: a.M21 * b.M12 + a.M22 * b.M22,
+        M31: a.M31 * b.M11 + a.M32 * b.M21 + b.M31, M32: a.M31 * b.M12 + a.M32 * b.M22 + b.M32,
+    }
+}
+fn cur_xf(ui: &Ui) -> Matrix3x2 { let mut m = Matrix3x2::default(); unsafe { ui.rt.GetTransform(&mut m); } m }
+
+/// Pone el origen en (cx, cy) con escala (sx, sy) encima de `base`: así se dibuja en «espacio unidad»
+/// (un círculo de radio 1) y los degradados, definidos una vez en ese espacio, valen para cualquier
+/// tamaño y sitio sin crear otros.
+fn place(ui: &Ui, base: &Matrix3x2, cx: f32, cy: f32, sx: f32, sy: f32) {
+    unsafe { ui.rt.SetTransform(&mulm(&Matrix3x2 { M11: sx, M12: 0.0, M21: 0.0, M22: sy, M31: cx, M32: cy }, base)); }
+}
+/// Escala `k` alrededor de (cx, cy), sin cambiar el sistema de coordenadas del widget.
+fn scale_about(ui: &Ui, base: &Matrix3x2, cx: f32, cy: f32, k: f32) {
+    unsafe { ui.rt.SetTransform(&mulm(&Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: cx * (1.0 - k), M32: cy * (1.0 - k) }, base)); }
+}
+fn reset(ui: &Ui, base: &Matrix3x2) { unsafe { ui.rt.SetTransform(base); } }
+
+// ---------------------------------------------------------------- degradados cacheados
+/// Huella de un degradado: tipo, paradas y geometría.
+fn gkey(kind: u32, stops: &[(f32, D2D1_COLOR_F)], geo: [f32; 4]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ kind as u64;
+    let mut eat = |v: u32| { h ^= v as u64; h = h.wrapping_mul(0x0100_0000_01b3); };
+    for (p, c) in stops { eat(p.to_bits()); eat(pack(c)); }
+    for g in geo { eat(g.to_bits()); }
+    h
 }
 
-/// Filas de la letra.
-fn dot_rows(f: DotFont) -> usize { if f == DotFont::Small { 5 } else { 7 } }
+/// Degradado de la caché del lienzo actual (o recién creado con `make`).
+fn grad_cached(ui: &Ui, key: u64, make: impl FnOnce(&ID2D1RenderTarget) -> Option<ID2D1Brush>) -> Option<ID2D1Brush> {
+    use windows::core::Interface;
+    let unk = ui.rt.cast::<windows::core::IUnknown>().ok()?;
+    GRADS.with(|g| {
+        let mut g = g.borrow_mut();
+        let i = match g.iter().position(|e| e.0 == unk) {
+            Some(i) => i,
+            None => {
+                // Pocos lienzos a la vez (uno por widget y su capa): los que ya no se usan se van solos
+                if g.len() >= 16 { g.remove(0); }
+                g.push((unk, HashMap::new()));
+                g.len() - 1
+            }
+        };
+        if let Some(b) = g[i].1.get(&key) { return Some(b.clone()); }
+        let b = make(ui.rt)?;
+        if g[i].1.len() > 320 { g[i].1.clear(); }
+        g[i].1.insert(key, b.clone());
+        Some(b)
+    })
+}
 
-/// ¿Está encendido el punto (col, fila) del carácter?
-fn glyph_on(rows: &[u8], w: usize, col: usize, row: usize) -> bool { rows.get(row).is_some_and(|b| (b >> (w - 1 - col)) & 1 == 1) }
+fn stop_coll(rt: &ID2D1RenderTarget, stops: &[(f32, D2D1_COLOR_F)]) -> Option<ID2D1GradientStopCollection> {
+    let v: Vec<D2D1_GRADIENT_STOP> = stops.iter().map(|(p, c)| D2D1_GRADIENT_STOP { position: *p, color: *c }).collect();
+    unsafe { rt.CreateGradientStopCollection(&v, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP).ok() }
+}
 
-/// Dibuja `s` en puntos: (x, y) es el centro del primer punto de arriba a la izquierda. Con `off`, los
-/// puntos apagados de cada carácter se ven tenues (pincel y radio). Devuelve el ancho.
-#[allow(clippy::too_many_arguments)]
-fn dot_text(rt: &ID2D1RenderTarget, s: &str, f: DotFont, x: f32, y: f32, pitch: f32, r: f32, on: &ID2D1Brush, off: Option<(&ID2D1Brush, f32)>) -> f32 {
-    let mut cx = x;
-    for c in s.chars() {
-        let Some((gw, rows)) = glyph(c, f) else { cx += pitch * 2.0; continue };
-        for row in 0..rows.len() {
-            for col in 0..gw {
-                let (px, py) = (cx + col as f32 * pitch, y + row as f32 * pitch);
-                if glyph_on(rows, gw, col, row) { dot(rt, px, py, r, on); } else if let Some((b, r2)) = off { dot(rt, px, py, r2, b); }
+/// Degradado lineal de (x0, y0) a (x1, y1), de la caché.
+fn lin(ui: &Ui, x0: f32, y0: f32, x1: f32, y1: f32, stops: &[(f32, D2D1_COLOR_F)]) -> ID2D1Brush {
+    grad_cached(ui, gkey(1, stops, [x0, y0, x1, y1]), |rt| unsafe {
+        let col = stop_coll(rt, stops)?;
+        rt.CreateLinearGradientBrush(&D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: v2(x0, y0), endPoint: v2(x1, y1) }, None, &col).ok().map(Into::into)
+    }).unwrap_or_else(|| ui.brush(stops[0].1))
+}
+
+/// Degradado radial en espacio unidad (centro en el origen, radio 1; ver `place`). (ox, oy) desplaza el
+/// foco del degradado, para brillos descentrados.
+fn rad(ui: &Ui, ox: f32, oy: f32, stops: &[(f32, D2D1_COLOR_F)]) -> ID2D1Brush {
+    grad_cached(ui, gkey(2, stops, [ox, oy, 0.0, 0.0]), |rt| unsafe {
+        let col = stop_coll(rt, stops)?;
+        let p = D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES { center: v2(0.0, 0.0), gradientOriginOffset: v2(ox, oy), radiusX: 1.0, radiusY: 1.0 };
+        rt.CreateRadialGradientBrush(&p, None, &col).ok().map(Into::into)
+    }).unwrap_or_else(|| ui.brush(stops[0].1))
+}
+
+/// Resplandor suave: un círculo de `r` cuyo color se desvanece hacia el borde.
+fn glow(ui: &Ui, base: &Matrix3x2, x: f32, y: f32, r: f32, c: D2D1_COLOR_F, a: f32) {
+    if a < 0.005 || r < 0.5 { return; }
+    place(ui, base, x, y, r, r);
+    let b = rad(ui, 0.0, 0.0, &[(0.0, with_a(c, q(a, 40.0))), (0.45, with_a(c, q(a * 0.4, 40.0))), (1.0, with_a(c, 0.0))]);
+    unsafe { ui.rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &b); }
+    reset(ui, base);
+}
+
+// ---------------------------------------------------------------- tipografía fina
+/// Letras grandes y finas de estos diseños (como la del Mínimo y el Póster): se crean una vez por hilo.
+struct GFonts { clock: IDWriteTextFormat, up: IDWriteTextFormat, mid: IDWriteTextFormat }
+thread_local! { static GF: std::cell::OnceCell<Rc<GFonts>> = const { std::cell::OnceCell::new() }; }
+
+fn gfonts(ui: &Ui) -> Rc<GFonts> {
+    GF.with(|c| c.get_or_init(|| {
+        let dw = ui.p.dw;
+        Rc::new(GFonts {
+            clock: make_format(dw, FONT, 54.0, DWRITE_FONT_WEIGHT_LIGHT),
+            up: make_format(dw, FONT, 78.0, DWRITE_FONT_WEIGHT_LIGHT),
+            mid: make_format(dw, FONT, 21.0, DWRITE_FONT_WEIGHT_LIGHT),
+        })
+    }).clone())
+}
+
+// ================================================================ cristal que refracta
+// Cada diseño tiene una pieza de cristal macizo (un orbe, un tubo o un anillo). Lo que pasa por detrás
+// se dibuja también en una imagen aparte y, dentro de la forma del cristal, se pinta esa imagen
+// desplazada con un mapa de desplazamiento (efecto DisplacementMap de Direct2D): casi nada en el centro
+// y mucho en los cantos, donde además se invierte, como en un tubo de vidrio de verdad. Dos copias más
+// con algo más y algo menos de desplazamiento, teñidas de azul y ámbar, dan la aberración cromática de
+// los cantos. El mapa y las formas se hacen una vez; por fotograma solo se vuelve a dibujar el contenido.
+
+/// El «alma» de una pieza: un punto (orbe), un segmento horizontal (tubo) o una circunferencia (anillo).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Core { Point(f32, f32), Seg(f32, f32, f32), Ring(f32, f32, f32) }
+
+/// Pieza de cristal: su alma engordada `r` (radio del orbe o del tubo).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Piece { core: Core, r: f32 }
+
+impl Piece {
+    fn orb(cx: f32, cy: f32, r: f32) -> Self { Piece { core: Core::Point(cx, cy), r } }
+    fn tube(x0: f32, x1: f32, cy: f32, r: f32) -> Self { Piece { core: Core::Seg(x0, x1, cy), r } }
+    fn ring(cx: f32, cy: f32, rr: f32, r: f32) -> Self { Piece { core: Core::Ring(cx, cy, rr), r } }
+    /// Del alma de la pieza a (x, y), en unidades de su grosor (dentro del cristal si mide ≤ 1).
+    fn rel(&self, x: f32, y: f32) -> (f32, f32) {
+        let (vx, vy) = match self.core {
+            Core::Point(cx, cy) => (x - cx, y - cy),
+            Core::Seg(x0, x1, cy) => (x - x.clamp(x0, x1), y - cy),
+            Core::Ring(cx, cy, rr) => {
+                let (dx, dy) = (x - cx, y - cy);
+                let d = (dx * dx + dy * dy).sqrt().max(1e-4);
+                (dx - dx / d * rr, dy - dy / d * rr)
+            }
+        };
+        (vx / self.r, vy / self.r)
+    }
+    /// Desplazamiento (DIP) con el que se mira lo de detrás desde (x, y); None fuera del cristal.
+    fn disp(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let (ux, uy) = self.rel(x, y);
+        let m = (ux * ux + uy * uy).sqrt();
+        if m > 1.0 { return None; }
+        if m < 1e-5 { return Some((0.0, 0.0)); }
+        // El orbe es una lente más suave (si no, el núcleo se estira en un aro que deslumbra)
+        let k = if matches!(self.core, Core::Point(..)) { 0.55 } else { 1.0 };
+        let b = bend(m) * self.r * k;
+        Some((ux / m * b, uy / m * b))
+    }
+}
+
+/// Cuánto se desvía la mirada a una distancia `m` del alma (0 en el alma, 1 en el canto), en unidades
+/// del grosor; negativo = hacia el alma. Casi nada en el centro, mucho en los cantos y pasando al otro
+/// lado del alma al final (lo de detrás se ve invertido junto al canto, como en el vidrio macizo).
+fn bend(m: f32) -> f32 { -(0.2 * m + 1.05 * m * m * m) }
+
+/// Lo más que se desplaza la mirada en una pieza de grosor `r`.
+fn max_bend(r: f32) -> f32 { -bend(1.0) * r }
+
+/// Color del mapa para un desplazamiento `d` (DIP) con `span` (px) de recorrido total y `s` px por DIP.
+fn map_byte(d: f32, s: f32, span: f32) -> u8 { ((0.5 + d * s / span).clamp(0.0, 1.0) * 255.0).round() as u8 }
+
+/// Color de un pincel sólido (para rehacer los de la interfaz en otro lienzo).
+fn col_of(b: &ID2D1Brush) -> D2D1_COLOR_F {
+    use windows::core::Interface;
+    b.cast::<ID2D1SolidColorBrush>().map(|s| unsafe { s.GetColor() }).unwrap_or(rgba(1.0, 1.0, 1.0, 1.0))
+}
+
+/// Capa recortada por una geometría.
+fn push_mask(rt: &ID2D1RenderTarget, g: &ID2D1Geometry) {
+    use std::mem::ManuallyDrop;
+    let mut lp = D2D1_LAYER_PARAMETERS {
+        contentBounds: rect(-1e6, -1e6, 1e6, 1e6),
+        geometricMask: ManuallyDrop::new(Some(g.clone())),
+        maskAntialiasMode: D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+        maskTransform: Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 },
+        opacity: 1.0,
+        opacityBrush: ManuallyDrop::new(None),
+        layerOptions: D2D1_LAYER_OPTIONS_NONE,
+    };
+    unsafe { rt.PushLayer(&lp, None); ManuallyDrop::drop(&mut lp.geometricMask); }
+}
+
+/// Arco de circunferencia (ángulos en radianes, en el sentido del reloj desde las 3).
+fn arc_geo(f: &ID2D1Factory, cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Option<ID2D1Geometry> {
+    unsafe {
+        let path = f.CreatePathGeometry().ok()?;
+        let sink = path.Open().ok()?;
+        sink.BeginFigure(v2(cx + r * a0.cos(), cy + r * a0.sin()), D2D1_FIGURE_BEGIN_HOLLOW);
+        sink.AddArc(&D2D1_ARC_SEGMENT { point: v2(cx + r * a1.cos(), cy + r * a1.sin()), size: D2D_SIZE_F { width: r, height: r }, rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE, arcSize: if a1 - a0 > PI { D2D1_ARC_SIZE_LARGE } else { D2D1_ARC_SIZE_SMALL } });
+        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+        sink.Close().ok()?;
+        Some(path.into())
+    }
+}
+
+/// `a` combinada con `b` (unión, resta…) en una geometría nueva.
+fn combine(f: &ID2D1Factory, a: &ID2D1Geometry, b: &ID2D1Geometry, mode: D2D1_COMBINE_MODE) -> Option<ID2D1Geometry> {
+    unsafe {
+        let path = f.CreatePathGeometry().ok()?;
+        let sink = path.Open().ok()?;
+        a.CombineWithGeometry(b, mode, None, 0.1, &sink).ok()?;
+        sink.Close().ok()?;
+        Some(path.into())
+    }
+}
+
+/// Recursos de la refracción, rehechos solo si cambia el lienzo, el tamaño o las piezas.
+struct LensRes {
+    key: (windows::core::IUnknown, u32, u32),
+    off: ID2D1BitmapRenderTarget,
+    inside: ID2D1Geometry,
+    outside: ID2D1Geometry,
+    /// Desplazamiento normal, más (azul) y menos (ámbar); y los dos tintes
+    disp: [ID2D1Effect; 3],
+    tint: [ID2D1Effect; 2],
+    /// Brillos curvos de los cantos: (geometría, grosor, opacidad)
+    arcs: Vec<(ID2D1Geometry, f32, f32)>,
+}
+
+/// Una o varias piezas de cristal que refractan el contenido que se dibuja detrás.
+#[derive(Default)]
+pub(crate) struct Lens {
+    pieces: Vec<Piece>,
+    res: Option<LensRes>,
+    /// Caché de medidas y pinceles del lienzo de la imagen aparte
+    cache: RefCell<Caches>,
+}
+
+impl Lens {
+    /// Cambia las piezas (si son otras, se rehacen el mapa y las formas).
+    fn set(&mut self, pieces: &[Piece]) {
+        if self.pieces != pieces { self.pieces = pieces.to_vec(); self.res = None; }
+    }
+
+    /// Prepara los recursos. false si no se puede (sin contexto de dispositivo): entonces se dibuja sin refracción.
+    fn prepare(&mut self, ui: &Ui, w: f32, h: f32) -> bool {
+        use windows::core::Interface;
+        let Ok(unk) = ui.rt.cast::<windows::core::IUnknown>() else { return false };
+        let s = ui.s.max(0.5);
+        let (pw, ph) = ((w * s).ceil() as u32, (h * s).ceil() as u32);
+        if self.res.as_ref().is_some_and(|r| r.key == (unk.clone(), pw, ph)) { return true; }
+        self.res = self.build(ui, unk, w, h, pw, ph);
+        self.res.is_some()
+    }
+
+    fn build(&self, ui: &Ui, unk: windows::core::IUnknown, w: f32, h: f32, pw: u32, ph: u32) -> Option<LensRes> {
+        use windows::core::Interface;
+        let s = ui.s.max(0.5);
+        let dc: ID2D1DeviceContext = ui.rt.cast().ok()?;
+        let fac = unsafe { ui.rt.GetFactory().ok()? };
+        unsafe {
+            let off = ui.rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: w, height: h }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok()?;
+            // Mapa de desplazamiento: rojo = x, verde = y (0,5 = quieto)
+            let span = 2.0 * self.pieces.iter().map(|p| max_bend(p.r)).fold(1.0, f32::max) * s + 4.0;
+            let mut px = vec![0u8; (pw * ph * 4) as usize];
+            for j in 0..ph {
+                for i in 0..pw {
+                    let (x, y) = ((i as f32 + 0.5) / s, (j as f32 + 0.5) / s);
+                    let (dx, dy) = self.pieces.iter().find_map(|p| p.disp(x, y)).unwrap_or((0.0, 0.0));
+                    let o = ((j * pw + i) * 4) as usize;
+                    px[o] = 128;
+                    px[o + 1] = map_byte(dy, s, span);
+                    px[o + 2] = map_byte(dx, s, span);
+                    px[o + 3] = 255;
+                }
+            }
+            let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0 * s, dpiY: 96.0 * s };
+            let map = ui.rt.CreateBitmap(D2D_SIZE_U { width: pw, height: ph }, Some(px.as_ptr() as _), pw * 4, &bp).ok()?;
+            // Efectos: tres desplazamientos (el bueno, uno algo mayor y otro algo menor) y dos tintes
+            let mut disp = Vec::new();
+            for k in [1.0f32, 1.07, 0.93] {
+                let e = dc.CreateEffect(&CLSID_D2D1DisplacementMap).ok()?;
+                e.SetValue(D2D1_DISPLACEMENTMAP_PROP_SCALE.0 as u32, D2D1_PROPERTY_TYPE_FLOAT, &(span * k).to_le_bytes()).ok()?;
+                e.SetValue(D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_R.0 as u32).to_le_bytes()).ok()?;
+                e.SetValue(D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT.0 as u32, D2D1_PROPERTY_TYPE_ENUM, &(D2D1_CHANNEL_SELECTOR_G.0 as u32).to_le_bytes()).ok()?;
+                e.SetInput(1, &map, false);
+                disp.push(e);
+            }
+            let mut tint = Vec::new();
+            // Azul y ámbar: se queda el canal propio y algo de los otros, con menos opacidad
+            for (i, m) in [[0.15f32, 0.35, 1.0, 0.55], [1.0, 0.62, 0.15, 0.55]].iter().enumerate() {
+                let e = dc.CreateEffect(&CLSID_D2D1ColorMatrix).ok()?;
+                let mut mx = [0.0f32; 20];
+                let l = [0.30f32, 0.55, 0.15];
+                // Salida = luminancia por el tinte, alfa reducida
+                for (row, lw) in l.iter().enumerate() { for col in 0..3 { mx[row * 4 + col] = lw * m[col]; } }
+                mx[15] = m[3];
+                let bytes: Vec<u8> = mx.iter().flat_map(|v| v.to_le_bytes()).collect();
+                e.SetValue(D2D1_COLORMATRIX_PROP_COLOR_MATRIX.0 as u32, D2D1_PROPERTY_TYPE_MATRIX_5X4, &bytes).ok()?;
+                let src = disp[i + 1].GetOutput().ok()?;
+                e.SetInput(0, &src, false);
+                tint.push(e);
+            }
+            // Formas: el cristal y todo lo demás
+            let mut inside: Option<ID2D1Geometry> = None;
+            let mut arcs = Vec::new();
+            for p in &self.pieces {
+                let g: ID2D1Geometry = match p.core {
+                    Core::Point(cx, cy) => fac.CreateEllipseGeometry(&ellipse(cx, cy, p.r)).ok()?.into(),
+                    Core::Seg(x0, x1, cy) => fac.CreateRoundedRectangleGeometry(&rrect(rect(x0 - p.r, cy - p.r, x1 + p.r, cy + p.r), p.r)).ok()?.into(),
+                    Core::Ring(cx, cy, rr) => {
+                        let o: ID2D1Geometry = fac.CreateEllipseGeometry(&ellipse(cx, cy, rr + p.r)).ok()?.into();
+                        let i: ID2D1Geometry = fac.CreateEllipseGeometry(&ellipse(cx, cy, rr - p.r)).ok()?.into();
+                        combine(&fac, &o, &i, D2D1_COMBINE_MODE_EXCLUDE)?
+                    }
+                };
+                inside = Some(match inside { None => g, Some(a) => combine(&fac, &a, &g, D2D1_COMBINE_MODE_UNION)? });
+                // Brillo curvo arriba a la izquierda (donde da la luz) y un reflejo tenue abajo a la derecha
+                match p.core {
+                    Core::Point(cx, cy) => {
+                        arcs.push((arc_geo(&fac, cx, cy, p.r * 0.84, PI * 1.08, PI * 1.42)?, 2.2, 0.60));
+                        arcs.push((arc_geo(&fac, cx, cy, p.r * 0.86, PI * 0.10, PI * 0.40)?, 1.2, 0.18));
+                    }
+                    Core::Ring(cx, cy, rr) => {
+                        arcs.push((arc_geo(&fac, cx, cy, rr + p.r * 0.55, PI * 1.10, PI * 1.40)?, 1.8, 0.55));
+                        arcs.push((arc_geo(&fac, cx, cy, rr - p.r * 0.55, PI * 0.10, PI * 0.40)?, 1.2, 0.20));
+                    }
+                    Core::Seg(..) => {}
+                }
+            }
+            let inside = inside?;
+            let all: ID2D1Geometry = fac.CreateRectangleGeometry(&rect(-50.0, -50.0, w + 50.0, h + 50.0)).ok()?.into();
+            let outside = combine(&fac, &all, &inside, D2D1_COMBINE_MODE_EXCLUDE)?;
+            Some(LensRes { key: (unk, pw, ph), off, inside, outside, disp: disp.try_into().ok()?, tint: tint.try_into().ok()?, arcs })
+        }
+    }
+
+    /// Dibuja `f` fuera del cristal (lo de dentro lo pone `refract`, doblado).
+    fn outside(&self, ui: &Ui, f: impl FnOnce(&Ui)) {
+        match &self.res {
+            Some(r) => { push_mask(ui.rt, &r.outside); f(ui); unsafe { ui.rt.PopLayer(); } }
+            None => f(ui),
+        }
+    }
+
+    /// Sombra muy suave debajo de cada pieza (antes de todo lo demás).
+    fn shade(&self, ui: &Ui, base: &Matrix3x2) {
+        let a = 1.0 - 0.6 * ui.ink;
+        for p in &self.pieces {
+            match p.core {
+                Core::Point(cx, cy) => glow(ui, base, cx, cy + p.r * 0.18, p.r * 1.12, rgba(0.0, 0.0, 0.0, 1.0), 0.20 * a),
+                Core::Seg(x0, x1, cy) => {
+                    for (g, dy, al) in [(1.0f32, 3.0f32, 0.10f32), (4.0, 6.0, 0.05)] {
+                        unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(x0 - p.r - g, cy - p.r + dy - g, x1 + p.r + g, cy + p.r + dy + g), p.r + g), &ui.brush(rgba(0.0, 0.0, 0.0, q(al * a, 100.0)))); }
+                    }
+                }
+                Core::Ring(..) => {}
             }
         }
-        cx += (gw + 1) as f32 * pitch;
     }
-    dot_cols(s, f).saturating_sub(1) as f32 * pitch
+
+    /// Dibuja `f` en la imagen aparte y la pinta dentro del cristal, doblada y con los cantos irisados.
+    fn refract(&self, ui: &Ui, f: impl FnOnce(&Ui)) {
+        use windows::core::Interface;
+        let Some(r) = &self.res else { return };
+        let brt: &ID2D1RenderTarget = &r.off;
+        unsafe {
+            brt.BeginDraw();
+            brt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
+            brt.SetTransform(&Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 });
+        }
+        {
+            let p = Painter { rt: brt, dw: ui.p.dw, cache: &self.cache, h: ui.p.h, s: ui.s };
+            let c = |b: &ID2D1Brush| p.brush(col_of(b));
+            let (white, dim, faint, card, card_edge, off, on, hov, track) = (c(&ui.white), c(&ui.dim), c(&ui.faint), c(&ui.card), c(&ui.card_edge), c(&ui.off), c(&ui.on), c(&ui.hov), c(&ui.track));
+            let shadow = ui.shadow.as_ref().map(|b| p.brush(col_of(b)));
+            let sub = Ui { p, rt: brt, f: ui.f, w: ui.w, s: ui.s, hover: None, shadow, glow: HashMap::new(), hits: Vec::new(),
+                white, dim, faint, card, card_edge, off, on, hov, track, ink: ui.ink };
+            f(&sub);
+        }
+        if unsafe { brt.EndDraw(None, None) }.is_err() { return; }
+        let Ok(dc) = ui.rt.cast::<ID2D1DeviceContext>() else { return };
+        let Ok(bmp) = (unsafe { r.off.GetBitmap() }) else { return };
+        push_mask(ui.rt, &r.inside);
+        unsafe {
+            // Apenas un velo de cristal (3-6 % de blanco)
+            ui.rt.FillGeometry(&r.inside, &ui.brush(wh(0.045)), None);
+            for e in &r.disp { e.SetInput(0, &bmp, true); }
+            // Primero los cantos de color (desplazados algo más y algo menos) y encima la imagen buena
+            for e in &r.tint {
+                if let Ok(img) = e.GetOutput() { dc.DrawImage(&img, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER); }
+            }
+            if let Ok(img) = r.disp[0].GetOutput() { dc.DrawImage(&img, None, None, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_COMPOSITE_MODE_SOURCE_OVER); }
+            ui.rt.PopLayer();
+        }
+    }
+
+    /// Brillos del cristal: canto fino con la luz arriba, brillo especular curvo y un reflejo tenue abajo.
+    fn shine(&self, ui: &Ui) {
+        let st = round_stroke(ui.rt);
+        let k = ui.ink;
+        for p in &self.pieces {
+            let (top, bot) = match p.core { Core::Point(_, cy) | Core::Seg(_, _, cy) => (cy - p.r, cy + p.r), Core::Ring(_, cy, rr) => (cy - rr - p.r, cy + rr + p.r) };
+            let edge = lin(ui, 0.0, top, 0.0, bot, &[(0.0, wh(lerp(0.42, 0.85, k))), (0.5, wh(lerp(0.06, 0.25, k))), (1.0, wh(lerp(0.20, 0.5, k)))]);
+            let inner = ui.wa(0.05);
+            unsafe {
+                match p.core {
+                    Core::Point(cx, cy) => {
+                        ui.rt.DrawEllipse(&ellipse(cx, cy, p.r - 0.5), &edge, 1.0, None);
+                        ui.rt.DrawEllipse(&ellipse(cx, cy, p.r - 2.5), &inner, 1.0, None);
+                    }
+                    Core::Seg(x0, x1, cy) => {
+                        ui.rt.DrawRoundedRectangle(&rrect(rect(x0 - p.r + 0.5, cy - p.r + 0.5, x1 + p.r - 0.5, cy + p.r - 0.5), p.r - 0.5), &edge, 1.0, None);
+                        // Brillo largo arriba y cáustica tenue abajo, que se apagan hacia los extremos
+                        let fade = |a: f32| lin(ui, x0 - p.r * 0.4, 0.0, x1 + p.r * 0.4, 0.0, &[(0.0, wh(0.0)), (0.12, wh(a)), (0.88, wh(a)), (1.0, wh(0.0))]);
+                        ui.rt.DrawLine(v2(x0 - p.r * 0.4, cy - p.r * 0.64), v2(x1 + p.r * 0.4, cy - p.r * 0.64), &fade(0.55), 1.6, st.as_ref());
+                        ui.rt.DrawLine(v2(x0, cy + p.r * 0.74), v2(x1, cy + p.r * 0.74), &fade(0.16), 1.0, st.as_ref());
+                    }
+                    Core::Ring(cx, cy, rr) => {
+                        ui.rt.DrawEllipse(&ellipse(cx, cy, rr + p.r - 0.5), &edge, 1.0, None);
+                        ui.rt.DrawEllipse(&ellipse(cx, cy, rr - p.r + 0.5), &edge, 1.0, None);
+                    }
+                }
+            }
+        }
+        if let Some(r) = &self.res {
+            for (g, sw, a) in &r.arcs { unsafe { ui.rt.DrawGeometry(g, &ui.brush(wh(*a)), *sw, st.as_ref()); } }
+        }
+    }
+
+    /// Todo junto: sombra, contenido fuera del cristal, contenido refractado dentro y brillos. Sin
+    /// contexto de dispositivo, el contenido va normal y encima solo los brillos.
+    fn draw(&mut self, ui: &Ui, base: &Matrix3x2, w: f32, h: f32, f: impl Fn(&Ui)) {
+        let ok = self.prepare(ui, w, h);
+        self.shade(ui, base);
+        if ok { self.outside(ui, &f); self.refract(ui, &f); } else { f(ui); }
+        self.shine(ui);
+    }
 }
 
-// ================================================================ Sistema: «Terminal»
+// ================================================================ Sistema: «Ficha»
 /// Datos fijos del equipo (se leen una vez).
 struct SysInfo { user: String, pc: String, os: String, cpu: String, model: String }
 
@@ -265,16 +627,19 @@ fn uptime_words(s: u64) -> String {
     if d > 0 { format!("{d} d {h} h {m} min") } else if h > 0 { format!("{h} h {m} min") } else { format!("{m} min") }
 }
 
-/// Tiempo encendido para los dígitos de puntos: «H:MM:SS» (las horas pueden tener varias cifras).
-fn uptime_clock(s: u64) -> String { format!("{:02}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) }
+/// Tiempo encendido en grande: «3:25» (horas:minutos) o, pasado un día, «2d 3h».
+fn uptime_big(s: u64) -> String {
+    let (d, h, m) = (s / 86400, s / 3600 % 24, s / 60 % 60);
+    if d > 0 { format!("{d}d {h}h") } else { format!("{h}:{m:02}") }
+}
 
-/// Ventana de terminal con la ficha del equipo (como un «fetch»): logo de puntos y tiempo encendido a la
-/// izquierda, claves en el color de acento a la derecha y una barra de estado con contadores de puntos.
+/// Ficha del equipo: el tiempo encendido grande y fino con un tubo de cristal que lo cruza y lo dobla;
+/// a la derecha, claves en gris y valores en blanco; abajo, procesador y memoria en barras finas.
 #[derive(Default)]
-pub struct TermW { cpu: f32, ram: f32 }
+pub struct TermW { cpu: f32, ram: f32, lens: Lens }
 
 impl Widget for TermW {
-    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
+    fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
         let (w, h) = size(Kind::System);
         let info = sysinfo();
         let sd = deskdata::SYS.lock().unwrap().clone();
@@ -283,67 +648,36 @@ impl Widget for TermW {
         let kin = ez(t, 0.1, 0.9);
         approach(&mut self.cpu, cpu_now * kin, dt.min(0.2), 0.3);
         approach(&mut self.ram, ram_now * kin, dt.min(0.2), 0.3);
-        // Va sobre su propio fondo oscuro: sin el halo de los flotantes
-        let halo = ui.shadow.take();
         let rt = ui.rt;
-        let (white, dim, faint, off, line) = (ui.brush(wh(0.95)), ui.brush(wh(0.55)), ui.brush(wh(0.30)), ui.brush(wh(0.10)), ui.brush(wh(0.07)));
-        let accent = ui.brush(acc(1.0));
-        unsafe {
-            rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, w, h), 16.0), &ui.brush(rgba(0.055, 0.056, 0.064, 0.94)));
-            rt.DrawRoundedRectangle(&rrect(rect(0.5, 0.5, w - 0.5, h - 0.5), 15.5), &ui.brush(wh(0.10)), 1.0, None);
-            // Barra de título y barra de estado
-            rt.FillRectangle(&rect(0.0, 32.0, w, 33.0), &line);
-            rt.FillRectangle(&rect(0.0, h - 31.0, w, h - 30.0), &line);
-        }
-        // Semáforo: el primero en el acento
-        for (i, b) in [&accent, &off, &off].into_iter().enumerate() { dot(rt, 18.0 + i as f32 * 16.0, 16.5, 5.5, b); }
-        let who = format!("{}@{}", if info.user.is_empty() { "usuario" } else { &info.user }, if info.pc.is_empty() { "equipo" } else { &info.pc });
-        ui.text_c(&ui.f.lbl, &format!("{who} — fetch"), w / 2.0, 7.0, 20.0, &white);
-        let ncores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
-        if ncores > 0 { ui.text_r(&ui.f.small, &i18n::tf("{} hilos", &[&ncores]), w - 16.0, 7.0, 20.0, &faint); }
+        let base = cur_xf(ui);
+        let gf = gfonts(ui);
+        let pc = if info.pc.is_empty() { "equipo" } else { &info.pc };
+        let user = if info.user.is_empty() { "usuario" } else { &info.user };
+        deskw::header(ui, d, &title_case(pc), &format!("{user}@{pc}"), w);
 
-        // ---- Logo: la ventana de Windows en puntos (4 cuadros, uno en el acento)
-        let (lx, ly, lp) = (30.0, 56.0, 15.0);
-        for j in 0..9usize {
-            for i in 0..9usize {
-                let (x, y) = (lx + i as f32 * lp, ly + j as f32 * lp);
-                if i == 4 || j == 4 { dot(rt, x, y, 1.3, &off); continue; }
-                // Entran en diagonal, desde arriba a la izquierda
-                let k = ez(t, 0.02 * (i + j) as f32, 0.35);
-                let b = if i > 4 && j > 4 { &accent } else { &white };
-                dot(rt, x, y, lp * 0.36 * crate::ease_back(k), b);
-            }
-        }
-        // ---- Tiempo encendido en dígitos de puntos (cuenta cada segundo)
+        // ---- Tiempo encendido, grande y fino, con el tubo de cristal por encima
         let up = if sys::demo() { 3 * 3600 + 25 * 60 + 9 } else { (unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }) / 1000 };
-        let s = uptime_clock(up);
-        let span = 8.0 * lp;
-        let cols = dot_cols(&s, DotFont::Small).max(1);
-        let pp = (span / (cols - 1) as f32).min(6.0);
-        let tx = lx + (span - (cols - 1) as f32 * pp) / 2.0;
-        let ty = ly + 9.0 * lp + 12.0;
-        popup::push_alpha(rt, ez(t, 0.3, 0.5));
-        dot_text(rt, &s, DotFont::Small, tx, ty, pp, pp * 0.36, &white, Some((&off, pp * 0.14)));
-        unsafe { rt.PopLayer(); }
-        ui.text_c(&ui.f.small, i18n::t("encendido"), lx + span / 2.0, ty + (dot_rows(DotFont::Small) - 1) as f32 * pp + 8.0, 16.0, &dim);
+        let big = uptime_big(up);
+        let ku = ez(t, 0.1, 0.6);
+        self.lens.set(&[Piece::tube(44.0, 170.0, 136.0, 19.0)]);
+        let draw_up = |u: &Ui| {
+            popup::push_alpha(u.rt, ku);
+            u.text(&gf.up, &big, 18.0, 62.0 + 8.0 * (1.0 - ku), 100.0, &u.white);
+            unsafe { u.rt.PopLayer(); }
+        };
+        self.lens.draw(ui, &base, w, h, draw_up);
+        // Un punto de acento diminuto: el equipo sigue encendido
+        dot(rt, 23.0, 184.0, 2.2, &ui.brush(acc(1.0)));
+        ui.text(&ui.f.small, &format!("{} · {}", i18n::t("encendido"), uptime_words(up)), 31.0, 175.0, 18.0, &ui.dim);
 
-        // ---- Ficha: usuario@equipo y las claves en el acento
-        let x0 = 196.0;
-        let (uw, at_w) = (ui.p.width(&ui.f.name, &info.user), ui.p.width(&ui.f.name, "@"));
-        let hy = 42.0;
-        ui.text(&ui.f.name, &info.user, x0, hy, 20.0, &white);
-        ui.text(&ui.f.name, "@", x0 + uw, hy, 20.0, &accent);
-        ui.text(&ui.f.name, &info.pc, x0 + uw + at_w, hy, 20.0, &white);
-        let tw = ui.p.width(&ui.f.name, &who).max(60.0);
-        let n = (tw / 6.0) as usize;
-        for i in 0..n { dot(rt, x0 + 1.5 + i as f32 * 6.0, hy + 25.0, 1.1, &faint); }
+        // ---- Ficha: claves en gris y valores en blanco
+        let x0 = 236.0;
         let st = deskdata::STORE.lock().unwrap().clone();
         let c_drive = st.as_ref().and_then(|s| s.drives.iter().find(|d| d.root.to_ascii_uppercase().starts_with("C:")).or(s.drives.first()).cloned());
         let media = MEDIA.lock().unwrap().clone();
         let mut rows: Vec<(&str, String)> = vec![
             (i18n::t("SO"), info.os.clone()),
-            (i18n::t("Equipo"), { let pc = title_case(&info.pc); if info.model.is_empty() { pc } else { format!("{pc} · {}", info.model) } }),
-            ("CPU", format!("{}{}{:.0} %", info.cpu, if info.cpu.is_empty() { "" } else { " · " }, cpu_now)),
+            ("CPU", if info.cpu.is_empty() { "—".into() } else { info.cpu.clone() }),
             ("RAM", sd.as_ref().filter(|s| s.ram_total > 0).map(|s| format!("{} / {}", deskdata::fmt_bytes(s.ram_used), deskdata::fmt_bytes(s.ram_total))).unwrap_or_else(|| "—".into())),
         ];
         if let Some(dr) = &c_drive {
@@ -353,64 +687,47 @@ impl Widget for TermW {
             rows.push((key, format!("{} / {} ({:.0} %)", deskdata::fmt_bytes(used), deskdata::fmt_bytes(dr.total), used as f32 * 100.0 / dr.total.max(1) as f32)));
         }
         if let Some((p, ch)) = crate::battery() { rows.push((i18n::t("Batería"), if ch { i18n::tf("{} % · cargando", &[&p]) } else { format!("{p} %") })); }
-        rows.push((i18n::t("Encendido"), uptime_words(up)));
+        if !info.model.is_empty() { rows.push((i18n::t("Modelo"), info.model.clone())); }
         rows.push((i18n::t("Sonando"), media.as_ref().map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }).unwrap_or_else(|| "—".into())));
-        let kx = x0 + 84.0;
-        let maxw = w - 18.0 - kx;
-        let mut y = hy + 34.0;
-        for (i, (k, v)) in rows.iter().enumerate() {
+        let kx = x0 + 80.0;
+        let maxw = w - 20.0 - kx;
+        let mut y = 58.0;
+        for (i, (k, v)) in rows.iter().take(7).enumerate() {
             let ki = ez(t, 0.12 + 0.04 * i as f32, 0.35);
             popup::push_alpha(rt, ki);
             let dx = 6.0 * (1.0 - ki);
-            ui.text(&ui.f.lbl, k, x0 + dx, y, 19.0, &accent);
-            ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, v, maxw), kx + dx, y, 19.0, &white);
+            ui.text(&ui.f.sub, k, x0 + dx, y, 20.0, &ui.dim);
+            ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, v, maxw), kx + dx, y, 20.0, &ui.white);
             unsafe { rt.PopLayer(); }
-            y += 19.5;
+            y += 23.0;
         }
-        // Muestras de color: grises y el acento
-        let ks = ez(t, 0.5, 0.4);
-        popup::push_alpha(rt, ks);
-        let sy = y + 5.0;
-        for (i, g) in [0.0f32, 0.16, 0.30, 0.44, 0.58, 0.72, 0.86, 0.97].iter().enumerate() {
-            let x = x0 + i as f32 * 17.0;
-            unsafe {
-                rt.FillRoundedRectangle(&rrect(rect(x, sy, x + 14.0, sy + 14.0), 2.5), &ui.brush(rgba(*g, *g, *g + 0.01, 1.0)));
-                rt.DrawRoundedRectangle(&rrect(rect(x + 0.5, sy + 0.5, x + 13.5, sy + 13.5), 2.0), &off, 1.0, None);
-            }
-        }
-        unsafe { rt.FillRoundedRectangle(&rrect(rect(x0 + 8.0 * 17.0, sy, x0 + 8.0 * 17.0 + 14.0, sy + 14.0), 2.5), &accent); rt.PopLayer(); }
 
-        // ---- Barra de estado: pestaña, procesador y memoria en puntos, y la hora
-        let by = h - 30.0;
-        unsafe { rt.FillRoundedRectangle(&rrect(rect(12.0, by + 6.0, 62.0, by + 24.0), 5.0), &ui.brush(wh(0.92))); }
-        ui.text_c(&ui.f.small, "fetch", 37.0, by + 6.0, 18.0, &ui.brush(rgba(0.06, 0.06, 0.07, 1.0)));
-        let mut x = 78.0;
-        for (lab, v) in [("cpu", self.cpu), ("ram", self.ram)] {
-            ui.text(&ui.f.small, lab, x, by + 6.0, 18.0, &dim);
-            x += ui.p.width(&ui.f.small, lab) + 8.0;
-            let on = (v / 10.0).round().clamp(0.0, 10.0) as usize;
-            let b_on = if v >= 85.0 { &accent } else { &white };
-            x += dot_row(rt, x + 2.6, by + 15.0, 10, on, 7.0, 2.6, b_on, &faint) + 6.0;
-            let pct = format!("{:.0} %", v);
-            ui.text(&ui.f.small, &pct, x, by + 6.0, 18.0, &white);
-            x += ui.p.width(&ui.f.small, "100 %") + 16.0;
+        // ---- Abajo: procesador y memoria en barras finas y la hora
+        ui.sep(h - 58.0);
+        let fy = h - 42.0;
+        let mut x = 20.0;
+        for (lab, v) in [("CPU", self.cpu), ("RAM", self.ram)] {
+            ui.text(&ui.f.small, lab, x, fy, 22.0, &ui.dim);
+            let bx = x + ui.p.width(&ui.f.small, "RAM") + 10.0;
+            bar(ui, bx, fy + 9.0, 120.0, 4.0, v / 100.0);
+            ui.text(&ui.f.small, &format!("{:.0} %", v), bx + 128.0, fy, 22.0, &ui.white);
+            x = bx + 128.0 + ui.p.width(&ui.f.small, "100 %") + 26.0;
         }
         let now = unsafe { GetLocalTime() };
-        ui.text_r(&ui.f.lbl, &format!("{:02}:{:02}", now.wHour, now.wMinute), w - 16.0, by + 5.0, 20.0, &white);
-        ui.shadow = halo;
+        ui.text_r(&gf.mid, &format!("{:02}:{:02}", now.wHour, now.wMinute), w - 20.0, fy - 1.0, 24.0, &ui.white);
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
     fn animating(&self, t: f32) -> bool { t < 1.4 }
 }
 
-// ================================================================ Visualizador: «Puntos»
-const DCOLS: usize = 40;
+// ================================================================ Visualizador: «Cristal»
+const DCOLS: usize = 30;
 
-/// Espectro en columnas de puntos: puntos apagados de fondo, columnas encendidas, un pico hueco que cae
-/// despacio en cada una y el pico más alto en el acento.
-pub struct SpecDotsW { lv: [f32; DCOLS], peak: [f32; DCOLS], hold: [f32; DCOLS], alive: f32, moving: bool }
+/// Espectro en barras finas blancas con su pico (el más alto, una raya diminuta en el acento) y un tubo de
+/// cristal tumbado por delante que las dobla al pasar.
+pub struct SpecDotsW { lv: [f32; DCOLS], peak: [f32; DCOLS], hold: [f32; DCOLS], alive: f32, moving: bool, lens: Lens }
 
-impl Default for SpecDotsW { fn default() -> Self { SpecDotsW { lv: [0.0; DCOLS], peak: [0.0; DCOLS], hold: [0.0; DCOLS], alive: 0.0, moving: false } } }
+impl Default for SpecDotsW { fn default() -> Self { SpecDotsW { lv: [0.0; DCOLS], peak: [0.0; DCOLS], hold: [0.0; DCOLS], alive: 0.0, moving: false, lens: Lens::default() } } }
 
 /// Altura de una columna para un nivel: algo comprimida (con música, el espectro casi nunca baja de la mitad
 /// y las columnas irían siempre casi llenas).
@@ -442,36 +759,40 @@ impl Widget for SpecDotsW {
         let on = energy / DCOLS as f32 > 0.02;
         self.alive += ((if on { 1.0 } else { 0.0 }) - self.alive) * (1.0 - (-dt / 0.3).exp());
         let rt = ui.rt;
+        let base = cur_xf(ui);
         // Línea de estado
         let live = self.alive > 0.5;
-        dot(rt, 20.0, 19.0, 3.0, &ui.brush(acc(if live { 1.0 } else { 0.35 })));
-        let status = if live { i18n::tf("barras {} · en vivo", &[&DCOLS]) } else { i18n::t("en pausa").to_string() };
-        ui.text(&ui.f.small, &status, 30.0, 10.0, 18.0, &ui.dim);
+        dot(rt, 21.0, 19.0, 2.6, &ui.brush(if live { acc(1.0) } else { ui.ic(0.3) }));
+        ui.text(&ui.f.small, if live { i18n::t("en vivo") } else { i18n::t("en pausa") }, 30.0, 10.0, 18.0, &ui.dim);
         let title = MEDIA.lock().unwrap().as_ref().map(|m| m.title.clone());
-        if let Some(tt) = title { let s = fit(ui, &ui.f.small, &tt, w * 0.45); ui.text_r(&ui.f.small, &s, w - 18.0, 10.0, 18.0, &ui.faint); }
-        // Rejilla
-        let (x0, x1, base) = (20.0, w - 20.0, h - 16.0);
-        let pitch = (x1 - x0) / (DCOLS - 1) as f32;
-        let rows = ((base - 40.0) / pitch).floor() as usize + 1;
-        let (b_on, b_off, b_ring) = (ui.wa(0.95), ui.wa(0.11), ui.wa(0.55));
-        let (r_on, r_off) = (pitch * 0.36, pitch * 0.13);
-        // Columna con el pico más alto (va en el acento)
-        let top = (0..DCOLS).fold(0, |a, c| if self.peak[c] > self.peak[a] { c } else { a });
-        let b_acc = ui.brush(acc(1.0));
-        for c in 0..DCOLS {
-            let x = x0 + c as f32 * pitch;
-            // Al aparecer, las columnas suben de izquierda a derecha
-            let kin = ez(t, 0.012 * c as f32, 0.5);
-            let n = ((shape(self.lv[c]) * rows as f32).round() * kin) as usize;
-            let pr = ((shape(self.peak[c]) * rows as f32).round() * kin) as usize;
-            for r in 0..rows {
-                let y = base - r as f32 * pitch;
-                if r < n { dot(rt, x, y, r_on, &b_on); }
-                else if pr > 0 && r == pr - 1 && pr > n {
-                    if c == top && self.peak[c] > 0.06 { dot(rt, x, y, r_on, &b_acc); } else { ring_dot(rt, x, y, r_on * 0.82, &b_ring, 1.3); }
-                } else { dot(rt, x, y, r_off, &b_off); }
+        if let Some(tt) = title { let s = fit(ui, &ui.f.small, &tt, w * 0.55); ui.text_r(&ui.f.small, &s, w - 18.0, 10.0, 18.0, &ui.faint); }
+        // Barras
+        let (x0, x1, top, floor) = (20.0, w - 20.0, 40.0, h - 16.0);
+        let pitch = (x1 - x0) / DCOLS as f32;
+        let bw = (pitch * 0.48).round().max(2.0);
+        let span = floor - top;
+        let top_c = (0..DCOLS).fold(0, |a, c| if self.peak[c] > self.peak[a] { c } else { a });
+        let (lv, peak) = (self.lv, self.peak);
+        let mid = (top + floor) / 2.0 + 14.0;
+        self.lens.set(&[Piece::tube(48.0, w - 48.0, mid, 26.0)]);
+        let draw_bars = |u: &Ui| {
+            let fill = lin(u, 0.0, top, 0.0, floor, &[(0.0, u.ic(0.95)), (1.0, u.ic(0.45))]);
+            let (b_peak, a_peak) = (u.wa(0.55), u.brush(acc(1.0)));
+            for c in 0..DCOLS {
+                let x = (x0 + c as f32 * pitch + (pitch - bw) / 2.0).round();
+                // Al aparecer, las barras suben de izquierda a derecha
+                let kin = ez(t, 0.012 * c as f32, 0.5);
+                let hh = (shape(lv[c]) * span * kin).max(bw);
+                unsafe { u.rt.FillRoundedRectangle(&rrect(rect(x, floor - hh, x + bw, floor), bw / 2.0), &fill); }
+                let ph = shape(peak[c]) * span * kin;
+                if ph > hh + 3.0 {
+                    let y = floor - ph;
+                    let b = if c == top_c && peak[c] > 0.06 { &a_peak } else { &b_peak };
+                    unsafe { u.rt.FillRectangle(&rect(x, y - 0.75, x + bw, y + 0.75), b); }
+                }
             }
-        }
+        };
+        self.lens.draw(ui, &base, w, h, draw_bars);
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
     fn tick(&mut self) -> bool {
@@ -484,8 +805,13 @@ impl Widget for SpecDotsW {
 }
 
 // ================================================================ Visualizador: «Vida»
-const LC: usize = 46;
-const LR: usize = 22;
+const LC: usize = 24;
+const LR: usize = 11;
+/// Lo que tarda una célula en aparecer (crece con rebote) y en irse (se encoge y se desvanece).
+const BORN_S: f32 = 0.28;
+const DIE_S: f32 = 0.4;
+/// Lo que dura el brillo extra de las células que siembra un golpe.
+const TINT_S: f32 = 1.6;
 
 /// Una generación del juego de la vida en una rejilla toroidal (`c` columnas × `r` filas). Devuelve la población.
 fn life_step(cur: &[bool], next: &mut [bool], c: usize, r: usize) -> usize {
@@ -508,6 +834,16 @@ fn life_step(cur: &[bool], next: &mut [bool], c: usize, r: usize) -> usize {
     pop
 }
 
+/// Número fijo 0..1 para la casilla `i` (variante `k`): desplaza y da tamaño a cada burbuja para que
+/// no se vea la rejilla.
+fn cell_rand(i: usize, k: u32) -> f32 {
+    let mut x = (i as u32).wrapping_mul(0x9E37_79B9) ^ k.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x2C1B_3C6D);
+    x ^= x >> 12;
+    (x & 0xFFFF) as f32 / 65535.0
+}
+
 /// Huella de una rejilla (para ver si se ha quedado quieta o oscilando).
 fn grid_hash(g: &[bool]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -515,14 +851,22 @@ fn grid_hash(g: &[bool]) -> u64 {
     h
 }
 
-/// Juego de la vida en una rejilla de puntos: cada golpe de graves siembra células que nacen en el acento
-/// y pasan a blanco; si se extingue o se estanca, se vuelve a sembrar. Sin música avanza despacio solo.
-pub struct LifeW { cells: Vec<bool>, next: Vec<bool>, born: Vec<f32>, gens: u64, pop: usize, acc: f32, rng: u64, hist: [u64; 2], stale: u32, bass_avg: f32, last_beat: f32, now: f32, alive: f32 }
+/// Juego de la vida con células como burbujas de cristal (aro de luz, brillo y halo) que aparecen
+/// creciendo y se van desvaneciéndose; cada golpe de graves siembra un grupo que nace más brillante.
+/// Si se extingue o se estanca, se vuelve a sembrar. Sin música avanza despacio solo.
+pub struct LifeW {
+    cells: Vec<bool>, next: Vec<bool>, born: Vec<f32>, died: Vec<f32>, seeded: Vec<bool>,
+    gens: u64, pop: usize, acc: f32, rng: u64, hist: [u64; 2], stale: u32, bass_avg: f32, last_beat: f32, now: f32, alive: f32,
+    /// Burbujas a dibujar en este fotograma (x, y, escala, opacidad, brillo extra), reutilizado
+    buf: Vec<(f32, f32, f32, f32, f32)>,
+}
 
 impl Default for LifeW {
     fn default() -> Self {
         let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
-        let mut l = LifeW { cells: vec![false; LC * LR], next: vec![false; LC * LR], born: vec![-10.0; LC * LR], gens: 0, pop: 0, acc: 0.0, rng: seed, hist: [0; 2], stale: 0, bass_avg: 0.0, last_beat: -10.0, now: 0.0, alive: 0.0 };
+        let n = LC * LR;
+        let mut l = LifeW { cells: vec![false; n], next: vec![false; n], born: vec![-10.0; n], died: vec![-10.0; n], seeded: vec![false; n],
+            gens: 0, pop: 0, acc: 0.0, rng: seed, hist: [0; 2], stale: 0, bass_avg: 0.0, last_beat: -10.0, now: 0.0, alive: 0.0, buf: Vec::with_capacity(n) };
         l.reseed();
         l
     }
@@ -534,14 +878,15 @@ impl LifeW {
     fn reseed(&mut self) {
         for i in 0..LC * LR {
             let v = self.rand() % 100 < 28;
-            if v && !self.cells[i] { self.born[i] = self.now; }
+            if v && !self.cells[i] { self.born[i] = self.now; self.seeded[i] = false; }
+            if !v && self.cells[i] { self.died[i] = self.now; }
             self.cells[i] = v;
         }
         self.gens = 0;
         self.stale = 0;
         self.pop = self.cells.iter().filter(|c| **c).count();
     }
-    /// Un golpe: un grupo de células nuevas en un sitio al azar (nacen en el acento).
+    /// Un golpe: un grupo de células nuevas en un sitio al azar (nacen más brillantes).
     fn burst(&mut self) {
         let (cx, cy) = ((self.rand() % LC as u64) as usize, (self.rand() % LR as u64) as usize);
         // Pentominó R (crece mucho) o una mancha al azar de 4×4
@@ -549,13 +894,16 @@ impl LifeW {
         let cells: Vec<(usize, usize)> = if self.rand() % 3 == 0 { R_PENTO.to_vec() } else { (0..16).filter(|_| self.rand() % 2 == 0).map(|i| (i % 4, i / 4)).collect() };
         for (dx, dy) in cells {
             let i = ((cy + dy) % LR) * LC + (cx + dx) % LC;
-            if !self.cells[i] { self.cells[i] = true; self.born[i] = self.now; }
+            if !self.cells[i] { self.cells[i] = true; self.born[i] = self.now; self.seeded[i] = true; }
         }
     }
     fn step(&mut self) {
         self.pop = life_step(&self.cells, &mut self.next, LC, LR);
-        // Lo que nace por las reglas sale ya en blanco (en el acento solo lo que siembra un golpe)
-        for i in 0..LC * LR { if self.next[i] && !self.cells[i] { self.born[i] = self.now - 0.9 + 0.12; } }
+        for i in 0..LC * LR {
+            // Lo que nace por las reglas no lleva el brillo extra (es solo de lo que siembra un golpe)
+            if self.next[i] && !self.cells[i] { self.born[i] = self.now; self.seeded[i] = false; }
+            if !self.next[i] && self.cells[i] { self.died[i] = self.now; }
+        }
         std::mem::swap(&mut self.cells, &mut self.next);
         self.gens += 1;
         let hsh = grid_hash(&self.cells);
@@ -579,37 +927,76 @@ impl Widget for LifeW {
         let beat = self.alive > 0.5 && bass > 0.3 && bass > self.bass_avg * 1.15 + 0.03 && self.now - self.last_beat > 0.28;
         self.bass_avg += (bass - self.bass_avg) * (1.0 - (-dt / 0.6).exp());
         if beat { self.last_beat = self.now; self.burst(); }
-        let every = if reduced() { 1.0 } else if self.alive > 0.5 { 0.11 } else { 0.5 };
+        let red = reduced();
+        let every = if red { 1.0 } else if self.alive > 0.5 { 0.11 } else { 0.5 };
         self.acc += dt;
         let mut n = 0;
         while self.acc >= every && n < 2 { self.acc -= every; self.step(); n += 1; }
         if self.acc > every { self.acc = 0.0; }
 
         let rt = ui.rt;
-        // Línea de estado: generación y población; un punto de acento que destella con cada golpe
+        let base = cur_xf(ui);
+        // Línea de estado: generación y población; un punto de acento diminuto que destella con cada golpe
         let flash = (1.0f32 - (self.now - self.last_beat) / 0.5).clamp(0.0, 1.0);
-        dot(rt, 20.0, 19.0, 3.0, &ui.brush(acc(0.3 + 0.7 * flash)));
+        dot(rt, 21.0, 19.0, 2.6, &ui.brush(acc(q(0.35 + 0.65 * flash, 10.0))));
         ui.text(&ui.f.small, &i18n::tf("gen {} · pob {}", &[&self.gens, &self.pop]), 30.0, 10.0, 18.0, &ui.dim);
         let right = if self.alive > 0.5 { i18n::t("al ritmo") } else { i18n::t("en pausa") };
         ui.text_r(&ui.f.small, right, w - 18.0, 10.0, 18.0, &ui.faint);
-        // Rejilla: recién nacidas en el acento que pasan a blanco en ~1 s (8 pasos de color, pinceles de la caché)
-        let (x0, y0) = (20.0, 40.0);
-        let pitch = (w - 40.0) / (LC - 1) as f32;
-        let (a, wc) = (acc(1.0), ui.ic(0.92));
-        let ramp: [ID2D1Brush; 8] = std::array::from_fn(|i| { let k = i as f32 / 7.0; ui.brush(rgba(lerp(a.r, wc.r, k), lerp(a.g, wc.g, k), lerp(a.b, wc.b, k), lerp(1.0, wc.a, k))) });
-        let b_off = ui.wa(0.10);
+
+        // Burbujas: primero se reúnen (posición, escala, opacidad y brillo) y luego se pintan por capas
+        let (x0, y0) = (26.0, 48.0);
+        let pitch = (w - 52.0) / (LC - 1) as f32;
+        let r0 = pitch * 0.44;
         let kin = ez(t, 0.0, 0.6);
+        self.buf.clear();
         for y in 0..LR {
             for x in 0..LC {
                 let i = y * LC + x;
-                let (px, py) = (x0 + x as f32 * pitch, y0 + y as f32 * pitch);
+                // Cada burbuja algo desplazada de su casilla, de su propio tamaño y flotando despacio
+                let bob = if red { 0.0 } else { (self.now * 0.9 + cell_rand(i, 3) * TAU).sin() * 1.3 };
+                let (px, py) = (x0 + (x as f32 + (cell_rand(i, 1) - 0.5) * 0.5) * pitch, y0 + (y as f32 + (cell_rand(i, 2) - 0.5) * 0.5) * pitch + bob);
+                let sz = 0.8 + 0.35 * cell_rand(i, 4);
                 if self.cells[i] {
                     let age = (self.now - self.born[i]).max(0.0);
-                    let step = ((age / 0.9).min(1.0) * 7.0).round() as usize;
-                    let pop_in = 0.6 + 0.4 * (age / 0.12).min(1.0);
-                    dot(rt, px, py, pitch * 0.36 * pop_in * kin, &ramp[step]);
-                } else { dot(rt, px, py, pitch * 0.12, &b_off); }
+                    let s = if red { 1.0 } else { crate::ease_back((age / BORN_S).min(1.0)) };
+                    let a = (age / (BORN_S * 0.6)).min(1.0);
+                    let extra = if self.seeded[i] { (1.0 - age / TINT_S).clamp(0.0, 1.0) } else { 0.0 };
+                    self.buf.push((px, py, s * sz * kin, a * kin, extra));
+                } else {
+                    let gone = self.now - self.died[i];
+                    if gone < DIE_S && !red {
+                        let k = 1.0 - gone / DIE_S;
+                        self.buf.push((px, py - 3.0 * (1.0 - k), (0.55 + 0.45 * k) * sz * kin, k * k * 0.8 * kin, 0.0));
+                    }
+                }
             }
+        }
+        let c = ui.ic(1.0);
+        // Capa 1: halos (se suman en los grupos y dan un resplandor suave)
+        for &(px, py, s, a, extra) in &self.buf {
+            let (a, extra) = (q(a, 8.0), q(extra, 4.0));
+            if a <= 0.0 || s <= 0.01 { continue; }
+            place(ui, &base, px, py, r0 * s * 2.2, r0 * s * 2.2);
+            let b = rad(ui, 0.0, 0.0, &[(0.0, with_a(c, 0.10 * a + 0.12 * extra * a)), (1.0, with_a(c, 0.0))]);
+            unsafe { rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &b); }
+        }
+        // Capa 2: la gota de cristal, casi transparente dentro, con un aro de luz junto al borde
+        for &(px, py, s, a, extra) in &self.buf {
+            let (a, extra) = (q(a, 8.0), q(extra, 4.0));
+            if a <= 0.0 || s <= 0.01 { continue; }
+            let a2 = (a * (1.0 + 0.4 * extra)).min(1.0);
+            place(ui, &base, px, py, r0 * s, r0 * s);
+            let b = rad(ui, -0.3, -0.35, &[(0.0, with_a(c, 0.30 * a2)), (0.6, with_a(c, 0.10 * a2)), (0.9, with_a(c, 0.50 * a2)), (1.0, with_a(c, 0.10 * a2))]);
+            unsafe { rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &b); }
+        }
+        reset(ui, &base);
+        // Capa 3: el brillo especular
+        for &(px, py, s, a, _) in &self.buf {
+            let a = q(a, 8.0);
+            if a <= 0.0 || s <= 0.01 { continue; }
+            let r = r0 * s;
+            unsafe { rt.FillEllipse(&ell(px - 0.32 * r, py - 0.42 * r, 0.30 * r, 0.17 * r), &ui.brush(wh(q(0.7 * a, 10.0)))); }
+            dot(rt, px + 0.38 * r, py + 0.40 * r, 0.09 * r, &ui.brush(wh(q(0.35 * a, 10.0))));
         }
     }
     fn click(&mut self, _id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
@@ -623,14 +1010,17 @@ impl Widget for LifeW {
         true
     }
     fn animating(&self, _t: f32) -> bool { true }
-    fn frame_ms(&self) -> u32 { if self.alive > 0.01 { 33 } else if reduced() { 250 } else { 100 } }
+    fn frame_ms(&self) -> u32 { if self.alive > 0.01 { 33 } else if reduced() { 250 } else { 50 } }
 }
 
 // ================================================================ Visualizador: «Órbita»
-const ORB_N: usize = 400;
-const ORB_RING: usize = 120;
+const ORB_N: usize = 70;
+const RING_N: usize = 84;
 /// Ángulo áureo (radianes): reparte los puntos de la esfera sin que se amontonen.
 const GOLDEN: f32 = 2.399_963;
+/// Anillo de partículas: semiejes respecto al radio del orbe.
+const RING_RX: f32 = 1.55;
+const RING_RY: f32 = 0.30;
 
 /// Puntos repartidos por igual sobre una esfera de radio 1 (espiral de Fibonacci).
 fn fib_sphere(n: usize) -> Vec<[f32; 3]> {
@@ -650,11 +1040,30 @@ fn rotate(p: [f32; 3], yaw: f32, pitch: f32) -> [f32; 3] {
     [x, p[1] * cp - z * sp, p[1] * sp + z * cp]
 }
 
-/// Esfera de puntos que gira, con profundidad (tamaño y brillo según lo cerca que está) y un anillo
-/// inclinado de puntos con una «luna» en el acento; el radio late con la energía del audio.
-pub struct OrbW { pts: Vec<[f32; 3]>, yaw: f32, energy: f32, alive: f32 }
+/// Orbe de cristal macizo: dentro, una nube de partículas que gira y un núcleo blanco que late con el
+/// audio; alrededor, un anillo de partículas. Todo lo que queda detrás del orbe se ve a través de él,
+/// doblado como por una lente, con una luna diminuta en el acento.
+pub struct OrbW { pts: Vec<[f32; 3]>, yaw: f32, energy: f32, alive: f32, lens: Lens }
 
-impl Default for OrbW { fn default() -> Self { OrbW { pts: fib_sphere(ORB_N), yaw: 3.77, energy: 0.0, alive: 0.0 } } }
+impl Default for OrbW { fn default() -> Self { OrbW { pts: fib_sphere(ORB_N), yaw: 3.77, energy: 0.0, alive: 0.0, lens: Lens::default() } } }
+
+/// Partículas del anillo de un lado (`front`: las de delante del orbe), con desenfoque fingido.
+#[allow(clippy::too_many_arguments)]
+fn orbit_ring(u: &Ui, base: &Matrix3x2, cx: f32, cy: f32, r: f32, yaw: f32, ki: f32, front: bool) {
+    for i in 0..RING_N {
+        let a = i as f32 / RING_N as f32 * TAU + yaw * 0.6;
+        let (s, c) = a.sin_cos();
+        if (s >= 0.0) != front { continue; }
+        let (x, y) = (cx + c * RING_RX * r * ki, cy + s * RING_RY * r * ki);
+        let d = (s + 1.0) / 2.0;
+        let hr = 2.0 + 2.5 * (1.0 - d);
+        place(u, base, x, y, hr, hr);
+        let b = rad(u, 0.0, 0.0, &[(0.0, u.ic(q((0.08 + 0.18 * d) * ki, 10.0))), (1.0, u.ic(0.0))]);
+        unsafe { u.rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &b); }
+        reset(u, base);
+        dot(u.rt, x, y, 0.5 + 0.8 * d, &u.wa(q((0.30 + 0.6 * d) * ki, 10.0)));
+    }
+}
 
 impl Widget for OrbW {
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
@@ -666,54 +1075,38 @@ impl Widget for OrbW {
         let target = (band_mean(&src, 0, 8) * 0.7 + e * 0.6).min(1.0);
         self.energy += (target - self.energy) * (1.0 - (-dt / (if target > self.energy { 0.05 } else { 0.25 })).exp());
         if !reduced() { self.yaw = (self.yaw + dt * 0.42) % TAU; }
-        let pitch = -0.36;
         let rt = ui.rt;
-        ui.text(&ui.f.small, &i18n::tf("puntos {} · giro {}°", &[&ORB_N, &(self.yaw.to_degrees().round() as i32)]), 18.0, 8.0, 18.0, &ui.dim);
+        let base = cur_xf(ui);
+        let live = self.alive > 0.5;
+        dot(rt, 21.0, 19.0, 2.6, &ui.brush(if live { acc(1.0) } else { ui.ic(0.3) }));
+        ui.text(&ui.f.small, if live { i18n::t("en vivo") } else { i18n::t("en pausa") }, 30.0, 10.0, 18.0, &ui.dim);
         let ki = ez(t, 0.0, 0.8);
+        let en = q(self.energy, 16.0);
         let (cx, cy) = (w / 2.0, h / 2.0 + 10.0);
-        let rad = (w.min(h) * 0.28) * (0.7 + 0.3 * ki) * (1.0 + 0.10 * self.energy);
-        // 12 brillos de punto (pinceles de la caché)
-        let shades: [ID2D1Brush; 13] = std::array::from_fn(|i| ui.wa(q(i as f32 / 12.0, 12.0) * ki));
-        let proj = |p: [f32; 3], r: f32| -> (f32, f32, f32) { let f = 1.0 + 0.10 * p[2]; (cx + p[0] * r * f, cy - p[1] * r * f, p[2]) };
-        // Anillo inclinado: gira despacio por su cuenta
-        let ring_r = 1.42;
-        let ring_pt = |i: usize| -> [f32; 3] {
-            let a = i as f32 / ORB_RING as f32 * TAU + self.yaw * 0.6;
-            let p = [a.cos() * ring_r, 0.0, a.sin() * ring_r];
-            // Inclinado respecto al ecuador y luego con la misma cabeceada que la esfera
-            let (s, c) = (0.42f32).sin_cos();
-            let p = [p[0] * c - p[1] * s, p[0] * s + p[1] * c, p[2]];
-            rotate(p, 0.0, pitch)
-        };
-        let ring_dot_at = |i: usize, front: bool| {
-            let p = ring_pt(i);
-            if (p[2] >= 0.0) != front { return; }
-            let (x, y, z) = proj(p, rad);
-            // Por detrás y dentro del disco de la esfera: tapado
-            if z < 0.0 && ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() < rad * 0.98 { return; }
-            let a = 0.18 + 0.30 * (z / ring_r + 1.0) / 2.0;
-            dot(rt, x, y, 0.85, &shades[(a * 12.0).round() as usize]);
-        };
-        let sphere = |front: bool| {
-            for p in &self.pts {
-                let p = rotate(*p, self.yaw, pitch);
-                if (p[2] >= 0.0) != front { continue; }
-                let (x, y, z) = proj(p, rad);
-                let d = (z + 1.0) / 2.0;
-                let a = 0.14 + 0.82 * d.powf(1.4);
-                dot(rt, x, y, 0.55 + 1.45 * d, &shades[(a * 12.0).round().min(12.0) as usize]);
+        let r = (w.min(h) * 0.27).round();
+        let (yaw, pts) = (self.yaw, &self.pts);
+        self.lens.set(&[Piece::orb(cx, cy, r)]);
+        // Lo de detrás: la mitad de atrás del anillo, la nube de dentro y el núcleo que late
+        let back = |u: &Ui| {
+            // En la imagen aparte no hay transformación: cada lienzo usa la suya
+            let b0 = cur_xf(u);
+            orbit_ring(u, &b0, cx, cy, r, yaw, ki, false);
+            glow(u, &b0, cx, cy, r * (0.16 + 0.14 * en) * ki, u.ic(1.0), (0.35 + 0.35 * en) * ki);
+            for p in pts {
+                let p = rotate(*p, yaw, -0.36);
+                let d = (p[2] + 1.0) / 2.0;
+                dot(u.rt, cx + p[0] * r * 0.55, cy - p[1] * r * 0.55, 0.5 + 0.9 * d, &u.wa(q((0.15 + 0.6 * d) * ki, 10.0)));
             }
+            dot(u.rt, cx, cy, 1.8 + 1.4 * en, &u.wa(0.9 * ki));
         };
-        // De atrás hacia delante: anillo de detrás, esfera, anillo de delante
-        for i in 0..ORB_RING { ring_dot_at(i, false); }
-        sphere(false);
-        sphere(true);
-        for i in 0..ORB_RING { ring_dot_at(i, true); }
-        // La luna: un punto del anillo en el acento
-        let p = ring_pt(0);
-        let (x, y, z) = proj(p, rad);
-        let hidden = z < 0.0 && ((x - cx).powi(2) + (y - cy).powi(2)).sqrt() < rad * 0.98;
-        if !hidden { dot(rt, x, y, 2.4 + 0.8 * (z / ring_r).max(0.0), &ui.brush(acc(ki))); }
+        self.lens.draw(ui, &base, w, h, back);
+        // La mitad de delante del anillo, por encima del cristal
+        orbit_ring(ui, &base, cx, cy, r, yaw, ki, true);
+        // La luna: recorre el anillo; detrás del orbe se ve apagada
+        let a = yaw * 1.3;
+        let (mx, my) = (cx + a.cos() * RING_RX * r * ki, cy + a.sin() * RING_RY * r * ki);
+        let behind = a.sin() < 0.0 && ((mx - cx).powi(2) + (my - cy).powi(2)).sqrt() < r;
+        dot(rt, mx, my, 2.4, &ui.brush(acc(if behind { 0.35 } else { 1.0 } * ki)));
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
     fn tick(&mut self) -> bool {
@@ -726,82 +1119,61 @@ impl Widget for OrbW {
 }
 
 // ================================================================ Relojes: «Ojo»
-/// Radio de la esfera del reloj en puntos (la rejilla va de -10 a 10).
-const EYE_R: f32 = 10.45;
-/// Desde aquí hacia fuera, los puntos forman el arco de los segundos.
-const EYE_BAND: f32 = 8.9;
+/// Fracción del minuto (0..1) que marca el arco de los segundos.
+fn sec_frac(s: u16) -> f32 { (s.min(59) as f32) / 60.0 }
 
-/// ¿Encienden los dígitos el punto (i, j) de la rejilla del ojo? Horas arriba (filas -7..-1) y minutos
-/// abajo (1..7), cada número con dos dígitos de 5×7 y una columna libre en medio.
-fn eye_digit_on(i: i32, j: i32, hh: u16, mm: u16) -> bool {
-    let (val, row) = match j { -7..=-1 => (hh, (j + 7) as usize), 1..=7 => (mm, (j - 1) as usize), _ => return false };
-    let (d, col) = match i { -5..=-1 => (val / 10 % 10, (i + 5) as usize), 1..=5 => (val % 10, (i - 1) as usize), _ => return false };
-    glyph(char::from(b'0' + d as u8), DotFont::Big).is_some_and(|(w, rows)| glyph_on(rows, w, col, row))
-}
-
-/// Ángulo (0 arriba, en el sentido del reloj) del punto (i, j).
-fn eye_angle(i: i32, j: i32) -> f32 { let a = (i as f32).atan2(-(j as f32)); if a < 0.0 { a + TAU } else { a } }
-
-/// Reloj redondo de matriz de puntos: la hora arriba, los minutos abajo y un arco de puntos por el borde
-/// que marca los segundos, con el punto de ahora en el acento.
+/// Reloj redondo: la hora grande y fina, el día debajo, un anillo de cristal que dobla los extremos de
+/// los números y, por fuera, un arco finísimo de los segundos con la punta en el acento.
 #[derive(Default)]
-pub struct EyeW { band: Vec<(f32, i32, i32)> }
+pub struct EyeW { sec: f32, moving: bool, lens: Lens }
 
 impl Widget for EyeW {
-    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, _dt: f32) {
+    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
         let (w, h) = size(Kind::Clocks);
-        if self.band.is_empty() {
-            for j in -10..=10 { for i in -10..=10 {
-                let d = ((i * i + j * j) as f32).sqrt();
-                if d <= EYE_R && d >= EYE_BAND { self.band.push((eye_angle(i, j), i, j)); }
-            } }
-            self.band.sort_by(|a, b| a.0.total_cmp(&b.0));
-        }
-        let halo = ui.shadow.take();
         let rt = ui.rt;
+        let base = cur_xf(ui);
+        let gf = gfonts(ui);
         let (cx, cy) = (w / 2.0, h / 2.0);
-        let rad = w.min(h) / 2.0 - 6.0;
-        let pitch = (rad - 7.0) / EYE_R;
-        let k0 = ez(t, 0.0, 0.5);
-        unsafe {
-            rt.FillEllipse(&ellipse(cx, cy, rad), &ui.brush(rgba(0.045, 0.046, 0.052, 0.95)));
-            rt.DrawEllipse(&ellipse(cx, cy, rad - 0.5), &ui.brush(wh(0.10)), 1.0, None);
-            rt.DrawEllipse(&ellipse(cx, cy, rad + 3.5), &ui.brush(wh(0.05 * k0)), 1.0, None);
-        }
         let now = unsafe { GetLocalTime() };
-        let frac = (now.wSecond as f32 + 1.0) / 60.0;
-        let cut = frac * TAU;
-        // El punto de ahora: el último del arco que ya ha llegado
-        let cur = self.band.iter().rposition(|b| b.0 <= cut + 1e-4);
-        let (b_on, b_off, b_sec, b_acc) = (ui.brush(wh(0.96)), ui.brush(wh(0.085)), ui.brush(wh(0.42)), ui.brush(acc(1.0)));
-        for j in -10..=10i32 {
-            for i in -10..=10i32 {
-                let d = ((i * i + j * j) as f32).sqrt();
-                if d > EYE_R { continue; }
-                let (x, y) = (cx + i as f32 * pitch, cy + j as f32 * pitch);
-                if eye_digit_on(i, j, now.wHour, now.wMinute) {
-                    // Los dígitos aparecen de arriba abajo
-                    let k = ez(t, 0.15 + 0.02 * (j + 10) as f32, 0.3);
-                    dot(rt, x, y, pitch * 0.38 * k, &b_on);
-                    if k < 1.0 { dot(rt, x, y, pitch * 0.16 * (1.0 - k), &b_off); }
-                } else if d >= EYE_BAND && eye_angle(i, j) <= cut + 1e-4 && cur.is_some() {
-                    let is_cur = cur.is_some_and(|c| self.band[c].1 == i && self.band[c].2 == j);
-                    let k = ez(t, 0.3, 0.5);
-                    if is_cur { dot(rt, x, y, pitch * 0.44 * k, &b_acc); } else { dot(rt, x, y, pitch * 0.30 * k, &b_sec); }
-                } else { dot(rt, x, y, pitch * 0.16 * k0, &b_off); }
-            }
+        let kt = ez(t, 0.1, 0.5);
+        let hm = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        let date = format!("{} {}", i18n::weekday(now.wDayOfWeek as usize), now.wDay);
+        self.lens.set(&[Piece::ring(cx, cy - 4.0, 50.0, 15.0)]);
+        let face = |u: &Ui| {
+            popup::push_alpha(u.rt, kt);
+            u.text_c(&gf.clock, &hm, cx, cy - 36.0 + 6.0 * (1.0 - kt), 60.0, &u.white);
+            u.text_c(&u.f.sub, &date, cx, cy + 64.0, 18.0, &u.dim);
+            unsafe { u.rt.PopLayer(); }
+        };
+        self.lens.draw(ui, &base, w, h, face);
+
+        // Segundero: carril finísimo, arco blanco y la punta en el acento
+        let target = sec_frac(now.wSecond);
+        if target < self.sec - 0.01 || reduced() { self.sec = target; self.moving = false; }
+        else { self.moving = approach(&mut self.sec, target, dt.min(0.1), 0.09); }
+        let ar = w.min(h) / 2.0 - 8.0;
+        let ka = ez(t, 0.25, 0.5);
+        unsafe { rt.DrawEllipse(&ellipse(cx, cy, ar), &ui.wa(q(0.10 * ka, 100.0)), 1.0, None); }
+        let pt = |a: f32| v2(cx + ar * a.sin(), cy - ar * a.cos());
+        let frac = self.sec * ka;
+        const SEG: f32 = 120.0;
+        let n = (frac * SEG).ceil() as usize;
+        let arc_b = ui.wa(0.55);
+        for i in 0..n {
+            let (a0, a1) = (i as f32 / SEG * TAU, ((i + 1) as f32 / SEG).min(frac) * TAU);
+            unsafe { rt.DrawLine(pt(a0), pt(a1), &arc_b, 1.5, None); }
         }
-        ui.shadow = halo;
+        let head = pt(frac * TAU);
+        dot(rt, head.X, head.Y, 2.6 * ka, &ui.brush(acc(1.0)));
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
-    fn animating(&self, t: f32) -> bool { t < 1.2 }
+    fn animating(&self, t: f32) -> bool { t < 1.2 || self.moving }
 }
 
 // ================================================================ Música: «Casete»
 const WN: usize = 72;
-const TRAIL: usize = 5;
-const HUB: f32 = 13.0;
-const PACK: f32 = 33.0;
+const HUB: f32 = 11.0;
+const PACK: f32 = 27.0;
 
 /// Radio de la cinta en cada bobina (izquierda, derecha) para un progreso 0..1: la cinta que pasa es
 /// superficie, así que el radio va con la raíz (la de la izquierda se vacía y la de la derecha se llena).
@@ -811,40 +1183,42 @@ fn reel_radii(prog: f32) -> (f32, f32) {
     ((HUB * HUB + span * (1.0 - p)).sqrt(), (HUB * HUB + span * p).sqrt())
 }
 
-/// Casete con dos bobinas que pasan la cinta según el progreso real y giran solo mientras suena; a la
-/// derecha, un osciloscopio con estela y contadores de puntos de graves, medios y agudos.
-pub struct TapeW { ang: [f32; 2], spin: f32, wave: [[f32; WN]; TRAIL], head: usize, trail_t: f32, phase: [f32; 6], lv: [f32; audioviz::BANDS], alive: f32, playing: bool, moving: bool }
+/// «1:14» (o «61:05» si pasa de la hora).
+fn mmss(s: u32) -> String { format!("{}:{:02}", s / 60, s % 60) }
+
+/// Casete oscuro y realista a la izquierda (como el disco del Vinilo), con dos bobinas que pasan la
+/// cinta según el progreso real y giran solo mientras suena; a la derecha, la canción, una onda que
+/// pasa por dentro de un tubo de cristal, el progreso y los controles.
+pub struct TapeW { ang: [f32; 2], spin: f32, phase: [f32; 6], lv: [f32; audioviz::BANDS], wave: [f32; WN], alive: f32, playing: bool, moving: bool, lens: Lens }
 
 impl Default for TapeW {
-    fn default() -> Self { TapeW { ang: [0.0, 1.1], spin: 0.0, wave: [[0.0; WN]; TRAIL], head: 0, trail_t: 0.0, phase: [0.0; 6], lv: [0.0; audioviz::BANDS], alive: 0.0, playing: false, moving: false } }
+    fn default() -> Self { TapeW { ang: [0.0, 1.1], spin: 0.0, phase: [0.0; 6], lv: [0.0; audioviz::BANDS], wave: [0.0; WN], alive: 0.0, playing: false, moving: false, lens: Lens::default() } }
 }
 
 impl TapeW {
-    /// Una bobina: cinta enrollada (con su borde de puntos), buje con dientes y eje.
-    fn reel(ui: &Ui, cx: f32, cy: f32, r: f32, ang: f32) {
+    /// Una bobina: la cinta enrollada (casi negra, con un brillo en diagonal como el de la cinta de
+    /// verdad), el buje blanco con sus seis dientes por dentro, que giran, y el hueco del eje.
+    fn reel(ui: &Ui, base: &Matrix3x2, cx: f32, cy: f32, r: f32, ang: f32) {
         let rt = ui.rt;
+        let st = round_stroke(rt);
+        place(ui, base, cx, cy, r, r);
+        let tape = rad(ui, 0.0, 0.0, &[(0.0, rgba(0.09, 0.075, 0.07, 1.0)), (0.85, rgba(0.15, 0.12, 0.11, 1.0)), (1.0, rgba(0.24, 0.20, 0.18, 1.0))]);
+        let sheen = lin(ui, -0.8, -0.8, 0.8, 0.8, &[(0.0, wh(0.13)), (0.42, wh(0.0)), (0.58, wh(0.0)), (1.0, wh(0.07))]);
         unsafe {
-            rt.FillEllipse(&ellipse(cx, cy, r), &ui.brush(rgba(0.23, 0.215, 0.205, 1.0)));
-            rt.DrawEllipse(&ellipse(cx, cy, r - 0.5), &ui.brush(wh(0.08)), 1.0, None);
+            rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &tape);
+            rt.FillEllipse(&ellipse(0.0, 0.0, 1.0), &sheen);
         }
-        // Borde de la cinta en puntos (giran con la bobina)
-        let n = ((TAU * r) / 6.5).floor().max(6.0) as usize;
-        let b = ui.brush(wh(0.30));
-        for i in 0..n {
-            let a = ang + i as f32 / n as f32 * TAU;
-            dot(rt, cx + a.cos() * (r - 3.0), cy + a.sin() * (r - 3.0), 1.1, &b);
-        }
-        // Buje: aro claro y seis dientes
+        reset(ui, base);
+        let hub = ui.brush(rgba(0.90, 0.90, 0.92, 1.0));
         unsafe {
-            rt.FillEllipse(&ellipse(cx, cy, HUB - 1.0), &ui.brush(rgba(0.09, 0.09, 0.10, 1.0)));
-            rt.DrawEllipse(&ellipse(cx, cy, HUB - 2.0), &ui.brush(wh(0.78)), 2.0, None);
+            rt.FillEllipse(&ellipse(cx, cy, HUB - 1.0), &hub);
+            rt.FillEllipse(&ellipse(cx, cy, HUB - 4.5), &ui.brush(rgba(0.10, 0.10, 0.11, 1.0)));
         }
-        let teeth = ui.brush(wh(0.85));
         for i in 0..6 {
-            let a = ang * 1.0 + i as f32 / 6.0 * TAU;
-            dot(rt, cx + a.cos() * 6.5, cy + a.sin() * 6.5, 1.6, &teeth);
+            let a = ang + i as f32 / 6.0 * TAU;
+            let (s, c) = a.sin_cos();
+            unsafe { rt.DrawLine(v2(cx + c * (HUB - 5.0), cy + s * (HUB - 5.0)), v2(cx + c * (HUB - 7.2), cy + s * (HUB - 7.2)), &hub, 1.6, st.as_ref()); }
         }
-        dot(rt, cx, cy, 2.4, &ui.brush(wh(0.5)));
     }
 }
 
@@ -861,7 +1235,7 @@ impl Widget for TapeW {
         let (rl, rr) = reel_radii(prog);
         // La cinta corre a velocidad constante: la bobina más pequeña gira más deprisa
         if !reduced() {
-            let v = 30.0 * self.spin;
+            let v = 26.0 * self.spin;
             self.ang[0] = (self.ang[0] + v / rl * dt) % TAU;
             self.ang[1] = (self.ang[1] + v / rr * dt) % TAU;
         }
@@ -873,130 +1247,115 @@ impl Widget for TapeW {
         self.alive += ((if energy / audioviz::BANDS as f32 > 0.02 { 1.0 } else { 0.0 }) - self.alive) * (1.0 - (-dt / 0.3).exp());
         moving |= self.alive > 0.01 && self.alive < 0.99;
 
-        let halo = ui.shadow.take();
         let rt = ui.rt;
-        let base = { let mut mm = Matrix3x2::default(); unsafe { rt.GetTransform(&mut mm); } mm };
-        let (white, dim, faint, off) = (ui.brush(wh(0.95)), ui.brush(wh(0.55)), ui.brush(wh(0.28)), ui.brush(wh(0.10)));
-        let accent = ui.brush(acc(1.0));
+        let base = cur_xf(ui);
+        let st = round_stroke(rt);
 
-        // ---- La casete (entra desde la izquierda)
+        // ---- La casete (entra desde la izquierda): cuerpo oscuro como el disco del Vinilo
         let kc = ez(t, 0.0, 0.6);
-        let (bx0, by0, bx1, by1) = (8.0 - 14.0 * (1.0 - kc), 8.0, 300.0 - 14.0 * (1.0 - kc), h - 8.0);
+        let off = 14.0 * (1.0 - kc);
+        let (bx0, by0, bx1, by1) = (14.0 - off, 26.0, 240.0 - off, h - 26.0);
         popup::push_alpha(rt, kc);
         ui.hit(rect(bx0, by0, bx1, by1), 4);
         let hk = ui.heat(4);
         unsafe {
-            rt.FillRoundedRectangle(&rrect(rect(bx0 + 1.0, by0 + 3.0, bx1 + 1.0, by1 + 4.0), 13.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.30)));
-            rt.FillRoundedRectangle(&rrect(rect(bx0, by0, bx1, by1), 12.0), &ui.brush(rgba(0.075 + 0.02 * hk, 0.075 + 0.02 * hk, 0.085 + 0.02 * hk, 0.96)));
-            rt.DrawRoundedRectangle(&rrect(rect(bx0 + 0.5, by0 + 0.5, bx1 - 0.5, by1 - 0.5), 11.5), &ui.brush(wh(0.11)), 1.0, None);
+            rt.FillRoundedRectangle(&rrect(rect(bx0 + 1.0, by0 + 3.0, bx1 + 1.0, by1 + 4.0), 13.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.32)));
+            rt.FillRoundedRectangle(&rrect(rect(bx0, by0, bx1, by1), 12.0), &ui.brush(rgba(0.075 + 0.02 * hk, 0.075 + 0.02 * hk, 0.085 + 0.02 * hk, 1.0)));
+            let sheen = lin(ui, 0.0, by0, 0.0, by1, &[(0.0, wh(0.07)), (0.5, wh(0.0)), (1.0, wh(0.02))]);
+            rt.FillRoundedRectangle(&rrect(rect(bx0, by0, bx1, by1), 12.0), &sheen);
+            rt.DrawRoundedRectangle(&rrect(rect(bx0 + 0.5, by0 + 0.5, bx1 - 0.5, by1 - 0.5), 11.5), &ui.brush(wh(0.10)), 1.0, None);
         }
-        for (sx, sy) in [(bx0 + 8.0, by0 + 8.0), (bx1 - 8.0, by0 + 8.0), (bx0 + 8.0, by1 - 8.0), (bx1 - 8.0, by1 - 8.0)] { ring_dot(rt, sx, sy, 2.4, &faint, 1.0); }
-        // Etiqueta: cara «A» en el acento, título y artista
-        let (lx0, ly0, lx1, ly1) = (bx0 + 18.0, by0 + 12.0, bx1 - 18.0, by0 + 52.0);
-        unsafe { rt.FillRoundedRectangle(&rrect(rect(lx0, ly0, lx1, ly1), 6.0), &ui.brush(wh(0.06))); }
-        ui.text(&d.title, "A", lx0 + 9.0, ly0 + 9.0, 22.0, &accent);
-        let tx = lx0 + 32.0;
-        let maxw = lx1 - tx - 8.0;
-        let (title, artist) = match &m { Some(m) => (m.title.clone(), m.artist.clone()), None => (i18n::t("Nada sonando").to_string(), i18n::t("Pon algo de música").to_string()) };
-        ui.text(&ui.f.lbl, &fit(ui, &ui.f.lbl, &title, maxw), tx, ly0 + 4.0, 18.0, &white);
-        ui.text(&ui.f.small, &fit(ui, &ui.f.small, &artist, maxw), tx, ly0 + 21.0, 16.0, &dim);
+        for (sx, sy) in [(bx0 + 8.0, by0 + 8.0), (bx1 - 8.0, by0 + 8.0), (bx0 + 8.0, by1 - 8.0), (bx1 - 8.0, by1 - 8.0)] {
+            dot(rt, sx, sy, 2.0, &ui.brush(wh(0.12)));
+        }
+        // Etiqueta: una franja clara con la cara «A»
+        unsafe { rt.FillRoundedRectangle(&rrect(rect(bx0 + 18.0, by0 + 10.0, bx1 - 18.0, by0 + 28.0), 4.0), &ui.brush(wh(0.07))); }
+        ui.text(&ui.f.small, "A", bx0 + 25.0, by0 + 10.0, 18.0, &ui.brush(wh(0.55)));
+        ui.text_r(&ui.f.small, "C60", bx1 - 25.0, by0 + 10.0, 18.0, &ui.brush(wh(0.30)));
         // Ventana con las dos bobinas y la cinta que pasa por abajo
-        let (wx0, wy0, wx1, wy1) = (bx0 + 26.0, by0 + 60.0, bx1 - 26.0, by0 + 132.0);
+        let (wx0, wy0, wx1, wy1) = (bx0 + 26.0, by0 + 36.0, bx1 - 26.0, by0 + 100.0);
         unsafe {
-            rt.FillRoundedRectangle(&rrect(rect(wx0, wy0, wx1, wy1), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.40)));
+            rt.FillRoundedRectangle(&rrect(rect(wx0, wy0, wx1, wy1), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.45)));
             rt.DrawRoundedRectangle(&rrect(rect(wx0 + 0.5, wy0 + 0.5, wx1 - 0.5, wy1 - 0.5), 9.5), &ui.brush(wh(0.07)), 1.0, None);
         }
         let rcy = (wy0 + wy1) / 2.0;
-        let (c1, c2) = (bx0 + 84.0, bx1 - 84.0);
-        let (g1, g2, gy) = (wx0 + 10.0, wx1 - 10.0, wy1 + 9.0);
-        let tape = ui.brush(rgba(0.30, 0.28, 0.26, 1.0));
-        let st = round_stroke(rt);
+        let (c1, c2) = (bx0 + 70.0, bx1 - 70.0);
+        let (g1, g2, gy) = (wx0 + 8.0, wx1 - 8.0, wy1 + 8.0);
+        let tape = ui.brush(rgba(0.36, 0.30, 0.26, 0.9));
         unsafe {
-            rt.DrawLine(v2(c1 - rl * 0.75, rcy + rl * 0.66), v2(g1, gy), &tape, 1.4, st.as_ref());
-            rt.DrawLine(v2(g1, gy), v2(g2, gy), &tape, 1.4, st.as_ref());
-            rt.DrawLine(v2(g2, gy), v2(c2 + rr * 0.75, rcy + rr * 0.66), &tape, 1.4, st.as_ref());
+            rt.DrawLine(v2(c1 - rl * 0.75, rcy + rl * 0.66), v2(g1, gy), &tape, 1.2, st.as_ref());
+            rt.DrawLine(v2(g1, gy), v2(g2, gy), &tape, 1.2, st.as_ref());
+            rt.DrawLine(v2(g2, gy), v2(c2 + rr * 0.75, rcy + rr * 0.66), &tape, 1.2, st.as_ref());
         }
-        Self::reel(ui, c1, rcy, rl, self.ang[0]);
-        Self::reel(ui, c2, rcy, rr, self.ang[1]);
-        for gx in [g1, g2] { dot(rt, gx, gy, 2.6, &ui.brush(wh(0.35))); }
-        // Cabezal
-        unsafe { rt.FillRoundedRectangle(&rrect(rect((bx0 + bx1) / 2.0 - 16.0, gy - 1.0, (bx0 + bx1) / 2.0 + 16.0, gy + 7.0), 2.5), &ui.brush(wh(0.16))); }
-        // Abajo: tiempo transcurrido en puntos y controles
-        let el = secs.map(|s| s.0 as u32).unwrap_or(0);
-        let ts = format!("{:02}:{:02}", (el / 60).min(99), el % 60);
-        let pp = 3.4;
-        let ty = by1 - 31.0;
-        dot_text(rt, &ts, DotFont::Small, bx0 + 20.0, ty, pp, pp * 0.40, &white, Some((&off, pp * 0.16)));
-        let tw = dot_cols(&ts, DotFont::Small) as f32 * pp;
-        ui.text(&ui.f.small, if playing { "PLAY" } else { i18n::t("PAUSA") }, bx0 + 26.0 + tw, ty - 3.0, 16.0, if playing { &white } else { &dim });
-        if playing { dot(rt, bx0 + 34.0 + tw + ui.p.width(&ui.f.small, "PLAY"), ty + 5.0, 2.4, &accent); }
-        let cyb = ty + 6.0;
-        for (i, (g, id)) in [("\u{E892}", 1u32), (if playing { "\u{E769}" } else { "\u{E768}" }, 2), ("\u{E893}", 3)].into_iter().enumerate() {
-            let bx = bx1 - 92.0 + i as f32 * 34.0;
-            let hk = ui.heat(id);
-            let pr = 1.0 - 0.12 * desk::press(id);
-            unsafe {
-                rt.SetTransform(&mulm(&Matrix3x2 { M11: pr, M12: 0.0, M21: 0.0, M22: pr, M31: bx * (1.0 - pr), M32: cyb * (1.0 - pr) }, &base));
-                if hk > 0.01 || id == 2 { rt.FillEllipse(&ellipse(bx, cyb, 13.0), &ui.brush(wh(if id == 2 { 0.10 + 0.08 * hk } else { 0.08 * hk }))); }
-            }
-            ui.glyph(&ui.f.icon, g, bx - 10.0, cyb - 10.0, 20.0, 20.0, &white);
-            unsafe { rt.SetTransform(&base); }
-            ui.hit(rect(bx - 15.0, cyb - 15.0, bx + 15.0, cyb + 15.0), id);
-        }
+        Self::reel(ui, &base, c1, rcy, rl, self.ang[0]);
+        Self::reel(ui, &base, c2, rcy, rr, self.ang[1]);
+        for gx in [g1, g2] { dot(rt, gx, gy, 2.2, &ui.brush(wh(0.35))); }
+        let hx = (bx0 + bx1) / 2.0;
+        unsafe { rt.FillRoundedRectangle(&rrect(rect(hx - 16.0, gy - 1.0, hx + 16.0, gy + 6.0), 2.5), &ui.brush(wh(0.16))); }
         unsafe { rt.PopLayer(); }
 
-        // ---- Osciloscopio: suma de senos con las bandas como amplitudes, con estela
-        let ks = ez(t, 0.15, 0.6);
-        popup::push_alpha(rt, ks);
-        let (sx0, sy0, sx1, sy1) = (316.0, 8.0, w - 8.0, 118.0);
-        unsafe {
-            rt.FillRoundedRectangle(&rrect(rect(sx0, sy0, sx1, sy1), 10.0), &ui.brush(rgba(0.035, 0.036, 0.042, 0.95)));
-            rt.DrawRoundedRectangle(&rrect(rect(sx0 + 0.5, sy0 + 0.5, sx1 - 0.5, sy1 - 0.5), 9.5), &ui.brush(wh(0.10)), 1.0, None);
-        }
-        // Rejilla de puntos
-        let gb = ui.brush(wh(0.07));
-        let mut gy2 = sy0 + 11.0;
-        while gy2 < sy1 - 6.0 { let mut gx = sx0 + 11.0; while gx < sx1 - 6.0 { dot(rt, gx, gy2, 0.8, &gb); gx += 11.0; } gy2 += 11.0; }
-        if self.alive > 0.5 { dot(rt, sx1 - 10.0, sy0 + 10.0, 2.6, &accent); }
+        // ---- A la derecha: la canción
+        let x0 = 262.0;
+        let xr = w - 18.0;
+        let (title, artist) = match &m { Some(m) => (m.title.clone(), m.artist.clone()), None => (i18n::t("Nada sonando").to_string(), i18n::t("Pon algo de música").to_string()) };
+        ui.text(&d.title, &fit(ui, &d.title, &title, xr - x0), x0, 16.0, 22.0, &ui.white);
+        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &artist, xr - x0), x0, 38.0, 18.0, &ui.dim);
+
+        // ---- Onda: suma de senos con las bandas como amplitudes, que pasa por dentro del tubo
         let groups = [band_mean(&self.lv, 0, 4), band_mean(&self.lv, 4, 9), band_mean(&self.lv, 9, 15), band_mean(&self.lv, 15, 22), band_mean(&self.lv, 22, 29), band_mean(&self.lv, 29, 36)];
         const FREQ: [f32; 6] = [1.0, 2.0, 3.5, 5.0, 8.0, 13.0];
         const SPEED: [f32; 6] = [1.3, 2.1, 3.4, 4.6, 6.1, 8.3];
         if !reduced() { for i in 0..6 { self.phase[i] = (self.phase[i] + dt * SPEED[i]) % TAU; } }
-        let amp = (sy1 - sy0) * 0.40;
-        let mut cur = [0.0f32; WN];
-        for (x, c) in cur.iter_mut().enumerate() {
+        let kw = 1.0 - (-dt / 0.05).exp();
+        for x in 0..WN {
             let u = x as f32 / (WN - 1) as f32;
             let mut v = 0.0;
             for i in 0..6 { v += groups[i] * (TAU * FREQ[i] * u + self.phase[i] + i as f32).sin() / (1.0 + i as f32 * 0.35); }
             // Se apaga suave hacia los bordes
             let edge = (u * (1.0 - u) * 4.0).min(1.0).sqrt();
-            *c = (v * 0.55).clamp(-1.0, 1.0) * edge;
+            let target = (v * 0.55).clamp(-1.0, 1.0) * edge;
+            self.wave[x] += (target - self.wave[x]) * kw;
         }
-        self.trail_t += dt;
-        if self.trail_t >= 0.045 { self.trail_t = 0.0; self.head = (self.head + 1) % TRAIL; }
-        self.wave[self.head] = cur;
-        let (mid, sw) = ((sy0 + sy1) / 2.0, (sx1 - sx0 - 20.0) / (WN - 1) as f32);
-        for age in (0..TRAIL).rev() {
-            let wv = &self.wave[(self.head + TRAIL - age) % TRAIL];
-            let (b, width) = if age == 0 { (ui.brush(wh(0.95)), 1.6) } else { (ui.brush(wh(q(0.30 - 0.05 * age as f32, 20.0))), 1.2) };
-            for x in 1..WN {
-                let (xa, xb) = (sx0 + 10.0 + (x - 1) as f32 * sw, sx0 + 10.0 + x as f32 * sw);
-                unsafe { rt.DrawLine(v2(xa, mid - wv[x - 1] * amp), v2(xb, mid - wv[x] * amp), &b, width, st.as_ref()); }
+        let (mid, tr) = (92.0, 20.0);
+        let amp = tr * 1.25;
+        let wave = self.wave;
+        let sw = (xr - x0) / (WN - 1) as f32;
+        let ks = ez(t, 0.15, 0.6);
+        self.lens.set(&[Piece::tube(x0 + tr, xr - tr, mid, tr)]);
+        let draw_wave = |u: &Ui| {
+            let line = u.wa(q(0.92 * ks, 20.0));
+            let haze = u.wa(q(0.10 * ks, 50.0));
+            unsafe { u.rt.FillRectangle(&rect(x0, mid, xr, mid + 1.0 / u.s.max(0.5)), &u.wa(0.10 * ks)); }
+            for (b, width) in [(&haze, 5.0f32), (&line, 1.6)] {
+                for x in 1..WN {
+                    let (xa, xb) = (x0 + (x - 1) as f32 * sw, x0 + x as f32 * sw);
+                    unsafe { u.rt.DrawLine(v2(xa, mid - wave[x - 1] * amp), v2(xb, mid - wave[x] * amp), b, width, st.as_ref()); }
+                }
             }
+        };
+        self.lens.draw(ui, &base, w, h, draw_wave);
+
+        // ---- Progreso (la punta, un punto diminuto en el acento) y tiempos
+        let py = 132.0;
+        bar(ui, x0, py, xr - x0, 3.0, prog);
+        if secs.is_some() { dot(rt, x0 + (xr - x0) * prog, py + 1.5, 2.6, &ui.brush(acc(1.0))); }
+        if let Some((p, e)) = secs {
+            ui.text(&ui.f.small, &mmss(p as u32), x0, py + 6.0, 16.0, &ui.faint);
+            ui.text_r(&ui.f.small, &mmss(e as u32), xr, py + 6.0, 16.0, &ui.faint);
         }
-        // Contadores de puntos: graves, medios y agudos
-        let bands = [(i18n::t("graves"), band_mean(&self.lv, 0, 8)), (i18n::t("medios"), band_mean(&self.lv, 8, 22)), (i18n::t("agudos"), band_mean(&self.lv, 22, 36))];
-        let n = 18usize;
-        let dx0 = sx0 + 60.0;
-        let pitch = (sx1 - 6.0 - dx0) / (n - 1) as f32;
-        for (i, (lab, v)) in bands.iter().enumerate() {
-            let y = sy1 + 20.0 + i as f32 * 21.0;
-            ui.text(&ui.f.small, lab, sx0 + 2.0, y - 9.0, 18.0, &dim);
-            let on = (v * 1.25 * n as f32).round().clamp(0.0, n as f32) as usize;
-            dot_row(rt, dx0, y, n, on, pitch, 2.4, &white, &off);
+        // ---- Controles
+        let cyb = h - 26.0;
+        let ccx = (x0 + xr) / 2.0;
+        for (i, (g, id)) in [("\u{E892}", 1u32), (if playing { "\u{E769}" } else { "\u{E768}" }, 2), ("\u{E893}", 3)].into_iter().enumerate() {
+            let bx = ccx + (i as f32 - 1.0) * 56.0;
+            let hk = ui.heat(id);
+            let pr = 1.0 - 0.12 * desk::press(id);
+            scale_about(ui, &base, bx, cyb, pr);
+            if hk > 0.01 || id == 2 { unsafe { rt.FillEllipse(&ellipse(bx, cyb, 17.0), &ui.wa(if id == 2 { 0.10 + 0.08 * hk } else { 0.08 * hk })); } }
+            ui.glyph(&d.glyph_m, g, bx - 14.0, cyb - 14.0, 28.0, 28.0, &ui.white);
+            reset(ui, &base);
+            ui.hit(rect(bx - 18.0, cyb - 18.0, bx + 18.0, cyb + 18.0), id);
         }
-        unsafe { rt.PopLayer(); }
-        ui.shadow = halo;
         self.moving = moving;
     }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
@@ -1017,64 +1376,61 @@ impl Widget for TapeW {
     fn frame_ms(&self) -> u32 { 33 }
 }
 
-/// a · b (primero a, luego b) para transformaciones 2D de Direct2D.
-fn mulm(a: &Matrix3x2, b: &Matrix3x2) -> Matrix3x2 {
-    Matrix3x2 {
-        M11: a.M11 * b.M11 + a.M12 * b.M21, M12: a.M11 * b.M12 + a.M12 * b.M22,
-        M21: a.M21 * b.M11 + a.M22 * b.M21, M22: a.M21 * b.M12 + a.M22 * b.M22,
-        M31: a.M31 * b.M11 + a.M32 * b.M21 + b.M31, M32: a.M31 * b.M12 + a.M32 * b.M22 + b.M32,
-    }
-}
-
-// ================================================================ Almacenamiento: «Matriz»
-const MDOTS: usize = 36;
-
-/// Cuántos puntos de `n` van encendidos para un uso `frac` (al menos uno si hay algo usado).
-fn used_dots(frac: f32, n: usize) -> usize {
-    if frac <= 0.0 { return 0; }
-    ((frac.clamp(0.0, 1.0) * n as f32).round() as usize).clamp(1, n)
-}
-
-/// Cada unidad como una barra de puntos: lo usado en blanco, lo libre tenue y, por encima del 90 %, en el acento.
+// ================================================================ Almacenamiento: «Tubos»
+/// Como el clásico (icono, nombre y «libres de»), pero lo usado de cada unidad es una barra blanca que
+/// va dentro de un tubo de cristal: se ve doblada en los cantos del tubo.
 #[derive(Default)]
-pub struct DriveDotsW { fills: Vec<f32>, moving: bool }
+pub struct DriveDotsW { fills: Vec<f32>, moving: bool, lens: Lens }
 
 impl Widget for DriveDotsW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, _h) = size(Kind::Storage);
+        let (w, h) = size(Kind::Storage);
         let st = deskdata::STORE.lock().unwrap().clone();
         let n = st.as_ref().map(|s| s.drives.len()).unwrap_or(0);
         deskw::header(ui, d, i18n::t("Almacenamiento"), &match n { 0 => String::new(), 1 => i18n::t("1 unidad").into(), n => i18n::tf("{} unidades", &[&n]) }, w);
         let Some(st) = st else { return };
-        let rt = ui.rt;
+        let base = cur_xf(ui);
         let pad = 20.0;
-        let mut y = 54.0;
-        self.fills.resize(st.drives.len().min(3), 0.0);
+        let tr = 9.0;
+        let shown = st.drives.len().min(3);
+        self.fills.resize(shown, 0.0);
         self.moving = false;
-        let (b_on, b_off, b_acc) = (ui.white.clone(), ui.wa(0.13), ui.brush(acc(1.0)));
+        let mut pieces = Vec::new();
+        let mut rows = Vec::new();
         for (i, dr) in st.drives.iter().take(3).enumerate() {
+            let y = 56.0 + i as f32 * 54.0;
             let used = dr.total.saturating_sub(dr.free);
             let frac = used as f32 / dr.total.max(1) as f32;
             let letter = dr.root.trim_end_matches('\\');
             let name = if dr.label.is_empty() { i18n::tf("Disco ({})", &[&letter]) } else { format!("{} ({letter})", dr.label) };
             let id = 40 + i as u32;
             let hk = ui.heat(id);
-            ui.card_k(rect(pad - 8.0, y - 5.0, w - pad + 8.0, y + 40.0), hk);
-            let free = i18n::tf("{} libres", &[&deskdata::fmt_bytes(dr.free)]);
+            ui.card_k(rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + 46.0), hk);
+            ui.glyph(&ui.f.icon_l, "\u{EDA2}", pad + 3.0 * hk, y, 20.0, 20.0, &ui.wa(0.72 + 0.25 * hk));
+            let free = i18n::tf("{} libres de {}", &[&deskdata::fmt_bytes(dr.free), &deskdata::fmt_bytes(dr.total)]);
             let fw = ui.p.width(&ui.f.sub, &free);
-            ui.text(&ui.f.name, &fit(ui, &ui.f.name, &name, w - 2.0 * pad - fw - 12.0), pad + 3.0 * hk, y, 20.0, &ui.white);
+            ui.text(&ui.f.name, &fit(ui, &ui.f.name, &name, w - 2.0 * pad - fw - 40.0), pad + 28.0 + 4.0 * hk, y, 20.0, &ui.white);
             ui.text_r(&ui.f.sub, &free, w - pad, y, 20.0, &ui.dim);
             // Se llena en cascada al aparecer; después sigue al dato con suavidad
             let k = ez(t, 0.15 + i as f32 * 0.12, 0.9);
             if t < 1.1 { self.fills[i] = frac * k; } else { self.moving |= approach(&mut self.fills[i], frac, dt, 0.4); }
-            let on = used_dots(self.fills[i], MDOTS);
-            let full = frac >= 0.9;
-            let pitch = (w - 2.0 * pad - 6.0) / (MDOTS - 1) as f32;
-            let r = pitch * 0.34 * (1.0 + 0.12 * hk);
-            dot_row(rt, pad + 3.0, y + 29.0, MDOTS, on, pitch, r, if full { &b_acc } else { &b_on }, &b_off);
-            ui.hit(rect(pad - 8.0, y - 5.0, w - pad + 8.0, y + 40.0), id);
-            y += 48.0;
+            let cy = y + 33.0;
+            pieces.push(Piece::tube(pad + tr, w - pad - tr, cy, tr));
+            rows.push((cy, self.fills[i], frac >= 0.9));
+            ui.hit(rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + 46.0), id);
         }
+        if pieces.is_empty() { return; }
+        self.lens.set(&pieces);
+        let draw_fill = |u: &Ui| {
+            for &(cy, f, full) in &rows {
+                let (x0, x1) = (pad + 3.0, w - pad - 3.0);
+                let xe = x0 + ((x1 - x0) * f.clamp(0.0, 1.0)).max(if f > 0.0 { 7.0 } else { 0.0 });
+                if xe > x0 { unsafe { u.rt.FillRoundedRectangle(&rrect(rect(x0, cy - 2.0, xe, cy + 2.0), 2.0), &u.wa(0.85)); } }
+                // Casi llena: una raya diminuta en el acento en la punta
+                if full && xe > x0 + 4.0 { unsafe { u.rt.FillRectangle(&rect(xe - 3.0, cy - 2.5, xe - 1.5, cy + 2.5), &u.brush(acc(1.0))); } }
+            }
+        };
+        self.lens.draw(ui, &base, w, h, draw_fill);
     }
     fn click(&mut self, id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         match id? {
@@ -1091,27 +1447,6 @@ impl Widget for DriveDotsW {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn digitos_de_puntos() {
-        // Todos los dígitos existen en las dos letras, con su ancho y alto
-        for c in '0'..='9' {
-            let (w, rows) = glyph(c, DotFont::Small).unwrap();
-            assert_eq!((w, rows.len()), (3, 5));
-            assert!(rows.iter().all(|r| *r < 8));
-            let (w, rows) = glyph(c, DotFont::Big).unwrap();
-            assert_eq!((w, rows.len()), (5, 7));
-            assert!(rows.iter().all(|r| *r < 32));
-        }
-        assert!(glyph('x', DotFont::Small).is_none());
-        // «12:34» en pequeña: 4 dígitos de 3 + «:» de 1 + 4 separaciones = 17 columnas
-        assert_eq!(dot_cols("12:34", DotFont::Small), 17);
-        assert_eq!(dot_cols("00", DotFont::Big), 11);
-        assert_eq!(dot_rows(DotFont::Big), 7);
-        // El 1 pequeño: columna del medio encendida en todas las filas
-        let (w, one) = glyph('1', DotFont::Small).unwrap();
-        assert!((0..5).all(|r| glyph_on(one, w, 1, r)));
-    }
 
     #[test]
     fn juego_de_la_vida() {
@@ -1140,13 +1475,24 @@ mod tests {
     }
 
     #[test]
-    fn vida_se_resiembra() {
+    fn vida_se_resiembra_y_anota_muertes() {
         let mut l = LifeW::default();
         assert!(l.pop > 0);
         // Vacía: al dar un paso se vuelve a sembrar
         l.cells.iter_mut().for_each(|c| *c = false);
         l.step();
         assert!(l.pop > 0 && l.gens == 0);
+        // Una célula sola muere en el paso siguiente y queda anotado cuándo (para desvanecerla)
+        l.cells.iter_mut().for_each(|c| *c = false);
+        l.cells[LC + 1] = true;
+        l.now = 5.0;
+        l.step();
+        assert!(!l.cells[LC + 1] && l.died[LC + 1] == 5.0);
+        // Lo que siembra un golpe queda marcado
+        l.cells.iter_mut().for_each(|c| *c = false);
+        l.burst();
+        assert!((0..LC * LR).any(|i| l.cells[i] && l.seeded[i]));
+        for i in 0..50 { let v = cell_rand(i, 1); assert!((0.0..=1.0).contains(&v)); }
     }
 
     #[test]
@@ -1156,28 +1502,48 @@ mod tests {
         // Todos sobre la esfera y repartidos (el centro de masas cerca del centro)
         for v in &p { assert!(((v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() - 1.0).abs() < 1e-4); }
         let c: [f32; 3] = p.iter().fold([0.0; 3], |a, v| [a[0] + v[0], a[1] + v[1], a[2] + v[2]]);
-        for k in c { assert!((k / ORB_N as f32).abs() < 0.02); }
+        for k in c { assert!((k / ORB_N as f32).abs() < 0.03); }
         // Girar no cambia la distancia al centro
         let r = rotate([0.3, 0.4, 0.866], 1.2, -0.36);
         assert!(((r[0] * r[0] + r[1] * r[1] + r[2] * r[2]).sqrt() - 1.0).abs() < 1e-3);
     }
 
     #[test]
-    fn reloj_ojo() {
-        // 10:58 → arriba el 1 y el 0, abajo el 5 y el 8; nada en la fila del medio ni fuera de los dígitos
-        assert!(eye_digit_on(-3, -7, 10, 58)); // el 1 de arriba: columna del medio, primera fila
-        assert!(!eye_digit_on(0, -4, 10, 58));
-        assert!(!eye_digit_on(-3, 0, 10, 58));
-        assert!(!eye_digit_on(7, 3, 10, 58));
-        // Los dígitos no tocan la banda de los segundos
-        for j in -10..=10i32 { for i in -10..=10i32 {
-            if eye_digit_on(i, j, 88, 88) { assert!((((i * i + j * j) as f32).sqrt()) < EYE_BAND); }
-        } }
-        // Ángulos: arriba 0, derecha un cuarto, abajo media vuelta
-        assert!(eye_angle(0, -10).abs() < 1e-5);
-        assert!((eye_angle(10, 0) - TAU / 4.0).abs() < 1e-5);
-        assert!((eye_angle(0, 10) - TAU / 2.0).abs() < 1e-5);
-        assert!((eye_angle(-10, 0) - 3.0 * TAU / 4.0).abs() < 1e-5);
+    fn refraccion_del_cristal() {
+        // Nada en el alma, mucho en el canto y pasando al otro lado; crece hacia fuera
+        assert_eq!(bend(0.0), 0.0);
+        assert!(bend(1.0) < -1.0);
+        for i in 1..20 { assert!(bend(i as f32 / 20.0) < bend((i - 1) as f32 / 20.0)); }
+        // Orbe: fuera no hay desplazamiento; dentro apunta hacia el centro
+        let o = Piece::orb(100.0, 100.0, 40.0);
+        assert!(o.disp(150.0, 100.0).is_none());
+        let (dx, dy) = o.disp(130.0, 100.0).unwrap();
+        assert!(dx < 0.0 && dy.abs() < 1e-4);
+        // Tubo: en la parte recta solo se desplaza en vertical; en los extremos, hacia el alma
+        let t = Piece::tube(50.0, 150.0, 60.0, 10.0);
+        let (dx, dy) = t.disp(100.0, 65.0).unwrap();
+        assert!(dx.abs() < 1e-4 && dy < 0.0);
+        assert!(t.disp(100.0, 71.0).is_none());
+        let (dx, _) = t.disp(157.0, 60.0).unwrap();
+        assert!(dx < 0.0);
+        // Anillo: dentro del tubo circular, fuera del hueco y del borde exterior no
+        let r = Piece::ring(0.0, 0.0, 60.0, 10.0);
+        assert!(r.disp(65.0, 0.0).is_some() && r.disp(45.0, 0.0).is_none() && r.disp(75.0, 0.0).is_none());
+        // Mapa: 0,5 es quieto y se satura en los extremos
+        assert_eq!(map_byte(0.0, 1.5, 100.0), 128);
+        assert_eq!(map_byte(1000.0, 1.5, 100.0), 255);
+        assert_eq!(map_byte(-1000.0, 1.5, 100.0), 0);
+        assert!((max_bend(10.0) - 12.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn reloj_y_tiempos() {
+        assert_eq!(sec_frac(0), 0.0);
+        assert!((sec_frac(30) - 0.5).abs() < 1e-6);
+        assert!(sec_frac(59) < 1.0);
+        assert!(sec_frac(61) < 1.0);
+        assert_eq!(mmss(74), "1:14");
+        assert_eq!(mmss(3665), "61:05");
     }
 
     #[test]
@@ -1215,19 +1581,27 @@ mod tests {
     }
 
     #[test]
+    fn huella_de_degradados() {
+        // Mismos colores y geometría: misma huella; cualquier cambio, otra
+        let s = [(0.0, rgba(1.0, 1.0, 1.0, 0.5)), (1.0, rgba(1.0, 1.0, 1.0, 0.0))];
+        assert_eq!(gkey(1, &s, [0.0, 0.0, 0.0, 1.0]), gkey(1, &s, [0.0, 0.0, 0.0, 1.0]));
+        assert_ne!(gkey(1, &s, [0.0, 0.0, 0.0, 1.0]), gkey(2, &s, [0.0, 0.0, 0.0, 1.0]));
+        assert_ne!(gkey(1, &s, [0.0, 0.0, 0.0, 1.0]), gkey(1, &s, [0.0, 0.0, 0.0, 2.0]));
+        let s2 = [(0.0, rgba(1.0, 1.0, 1.0, 0.6)), (1.0, rgba(1.0, 1.0, 1.0, 0.0))];
+        assert_ne!(gkey(1, &s, [0.0; 4]), gkey(1, &s2, [0.0; 4]));
+        assert_eq!(q(0.53, 10.0), 0.5);
+    }
+
+    #[test]
     fn textos_del_equipo() {
         assert_eq!(short_cpu("AMD Ryzen 7 5800H with Radeon Graphics"), "AMD Ryzen 7 5800H");
         assert_eq!(short_cpu("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"), "Intel Core i7-9750H");
         assert_eq!(short_cpu("AMD Ryzen 9 5900X 12-Core Processor"), "AMD Ryzen 9 5900X");
         assert_eq!(short_cpu("AMD Ryzen AI 7 350 w/ Radeon 860M"), "AMD Ryzen AI 7 350");
         assert_eq!(title_case("OMEN-PELAYO"), "Omen-Pelayo");
-        assert_eq!(uptime_clock(3 * 3600 + 25 * 60 + 9), "03:25:09");
-        assert_eq!(uptime_clock(125 * 3600), "125:00:00");
+        assert_eq!(uptime_big(3 * 3600 + 25 * 60 + 9), "3:25");
+        assert_eq!(uptime_big(2 * 86400 + 3 * 3600), "2d 3h");
         assert_eq!(uptime_words(90), "1 min");
         assert_eq!(uptime_words(2 * 86400 + 3 * 3600 + 4 * 60), "2 d 3 h 4 min");
-        assert_eq!(used_dots(0.0, 36), 0);
-        assert_eq!(used_dots(0.001, 36), 1);
-        assert_eq!(used_dots(0.5, 36), 18);
-        assert_eq!(used_dots(3.0, 36), 36);
     }
 }

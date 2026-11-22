@@ -474,13 +474,13 @@ pub fn variants(k: Kind) -> &'static [&'static str] {
     match k {
         Kind::Weather => &["Clásico", "Cielo", "Mínimo"],
         Kind::Calendar => &["Clásico", "Hoy", "Póster"],
-        Kind::System => &["Clásico", "Anillos", "Terminal"],
+        Kind::System => &["Clásico", "Anillos", "Ficha"],
         Kind::Music => &["Clásico", "Carátula", "Vinilo", "Casete"],
         Kind::Photos => &["Clásico", "Polaroid"],
-        Kind::Visual => &["Clásico", "Radial", "Puntos", "Vida", "Órbita"],
+        Kind::Visual => &["Clásico", "Radial", "Cristal", "Vida", "Órbita"],
         Kind::Countdown => &["Clásico", "Paletas"],
         Kind::Clocks => &["Clásico", "Ojo"],
-        Kind::Storage => &["Clásico", "Matriz"],
+        Kind::Storage => &["Clásico", "Tubos"],
         _ => &["Clásico"],
     }
 }
@@ -528,13 +528,13 @@ pub fn size(k: Kind) -> (f32, f32) {
         (Kind::Photos, 1) => return (230.0, 260.0),
         (Kind::Visual, 1) => return (230.0, 230.0),
         (Kind::Countdown, 1) => return (320.0, 150.0),
-        // Tercera tanda (puntos)
+        // Tercera tanda (cristal)
         (Kind::System, 2) => return (560.0, 300.0),
         (Kind::Visual, 2) | (Kind::Visual, 3) => return (380.0, 220.0),
         (Kind::Visual, 4) => return (260.0, 270.0),
         (Kind::Clocks, 1) => return (220.0, 220.0),
         (Kind::Music, 3) => return (520.0, 200.0),
-        (Kind::Storage, 1) => return (380.0, 200.0),
+        (Kind::Storage, 1) => return (380.0, 226.0),
         _ => {}
     }
     match k {
