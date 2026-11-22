@@ -45,6 +45,7 @@ mod desk;
 mod deskdata;
 mod deskw;
 mod dnd;
+mod faces;
 mod fileops;
 mod i18n;
 mod i18n_tabla;
@@ -87,7 +88,7 @@ impl Mode {
             Mode::Hud(live::Hud::Phone) => 25, Mode::Hud(live::Hud::CamOn) => 26, Mode::Hud(live::Hud::MicOn) => 27,
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
-            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36,
+            Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36, Mode::Hud(live::Hud::Face(_)) => 37,
         }
     }
 }
@@ -120,6 +121,7 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         // Sin barra lineal: lleva un anillo radial pequeño a la derecha (ver Mode::Hud)
         Mem(_) => ("\u{E964}", i18n::t("Memoria casi llena").into(), false),
         Cpu(pc) => ("\u{E950}", i18n::tf("Procesador al {} %", &[&pc]), false),
+        Face(icons) => (if icons { "\u{E8B7}" } else { "\u{E8A9}" }, if icons { i18n::t("Iconos del escritorio").into() } else { i18n::t("Widgets").into() }, false),
         FileOp(k, ok) => match (k, ok) {
             (0, true) => ("\u{E7B8}", i18n::t("ZIP listo en la bandeja").into(), false),
             (1, true) => ("\u{E91B}", i18n::t("Convertida a PNG").into(), false),
@@ -178,6 +180,8 @@ pub const BAR_CARD_HOVER: u32 = 92;
 pub const BAR_CARD_GLANCE: u32 = 93;
 pub const BAR_SOLID: u32 = 94;
 pub const BAR_NOTE: u32 = 95;
+pub const BAR_FACE: u32 = 96;
+pub const BAR_FACE_DBL: u32 = 97;
 /// Posición: arriba 86, abajo 87
 pub const BAR_POS_TOP: u32 = 86;
 pub const BAR_POS_BOTTOM: u32 = 87;
@@ -205,6 +209,7 @@ const TIMER_HUD: usize = 9;
 /// Ratón quieto sobre la isla: abre la tarjeta (si está activado).
 const TIMER_CARD_HOVER: usize = 14;
 const WM_CARDTEST: u32 = WM_USER + 97;
+const WM_FACETEST: u32 = WM_USER + 98;
 /// Progreso de la canción (isla desplegada)
 const TIMER_PROG: usize = 10;
 /// Nueva petición del hueco tras volver de suspensión
@@ -1124,6 +1129,8 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_CARD_GLANCE => card::toggle_opt(card::OPT_GLANCE),
         BAR_SOLID => toggle_solid_bar(),
         BAR_NOTE => notes::toggle(),
+        BAR_FACE => faces::toggle(),
+        BAR_FACE_DBL => faces::toggle_dblclick(),
         BAR_POMODORO => if live::POMO.load(Ordering::Relaxed) != 0 { live::timer_stop() } else { live::pomodoro_start() },
         BAR_POS_TOP => set_bar_bottom(false),
         BAR_POS_BOTTOM => set_bar_bottom(true),
@@ -1871,7 +1878,7 @@ fn paint(hwnd: HWND) {
             let mode_size = |m: Mode| -> (f32, f32) {
                 match m { Mode::Idle => (0.0, 0.0), Mode::Shelf => (shelf_compact, shelf_full), Mode::Media => (media_compact, media_full), Mode::Timer => (timer_compact, timer_full), Mode::Hud(h) => {
                     let (_, l, bar) = hud_parts(h);
-                    let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Mem(_) | live::Hud::Cpu(_) => 26.0, _ => 0.0 };
+                    let dots = match h { live::Hud::Desk(_, t) => 14.0 + t as f32 * 12.0, live::Hud::Face(_) => 14.0 + 2.0 * 12.0, live::Hud::Mem(_) | live::Hud::Cpu(_) => 26.0, _ => 0.0 };
                     // Con barra: texto + hueco + barra (84) + hueco + porcentaje, para que nunca se pisen
                     let w = if bar { (38.0 + p.width(&g.f.title, &l) + 16.0 + 84.0 + 10.0 + p.width(&g.f.title, "100%") + 14.0).max(HUD_W) } else { (38.0 + p.width(&g.f.title, &l) + 18.0 + dots).max(170.0) }; (w, w) } }
             };
@@ -2211,6 +2218,16 @@ fn paint(hwnd: HWND) {
                                 rt.FillRoundedRectangle(&rrect(rect(sx - 6.0, cy - 2.5, sx + 6.0, cy + 2.5), 2.5), &sh2);
                                 rt.PopAxisAlignedClip();
                             }
+                        }
+                        // Caras del escritorio: dos puntos y la píldora se desliza a la nueva
+                        if let live::Hud::Face(icons) = hh {
+                            let x0 = ix + iw - 16.0 - 2.0 * 12.0 + 6.0;
+                            let faint = p.brush(rgba(1.0, 1.0, 1.0, 0.28));
+                            for j in 0..2 { rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x0 + j as f32 * 12.0, Y: cy }, radiusX: 3.0, radiusY: 3.0 }, &faint); }
+                            let k = if live { popup::ease_out(mode_k) } else { 1.0 };
+                            let (from, to) = if icons { (0.0, 12.0) } else { (12.0, 0.0) };
+                            let ax = x0 + from + (to - from) * k;
+                            rt.FillRoundedRectangle(&rrect(rect(ax - 6.0, cy - 3.0, ax + 6.0, cy + 3.0), 3.0), &white);
                         }
                         // Escritorios: un punto por escritorio y una píldora que se desliza hasta el actual
                         if let live::Hud::Desk(_, t) = hh {
@@ -2758,6 +2775,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
+            WM_FACETEST => { faces::set(wp.0 == 1); LRESULT(0) }
+            faces::WM_FACE => { if wp.0 == 2 { faces::on_dblclick(lp); } else { faces::on_face_msg(wp); } LRESULT(0) }
+            WM_HOTKEY if wp.0 as i32 == faces::HOTKEY_ID => { faces::toggle(); LRESULT(0) }
             WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), _ => card::close(card::Why::Toggle) } LRESULT(0) }
             WM_MEDIA => {
                 card::media_changed();
@@ -3226,6 +3246,8 @@ fn main() {
         DragAcceptFiles(hwnd, true);
         // Arrastrar con OLE: además de soltar, avisa al entrar (la tarjeta se abre en la bandeja)
         dnd::register(hwnd, false);
+        // Doble escritorio: cara guardada, atajo Win+Alt+W y doble clic en el escritorio
+        faces::start(hwnd);
         // Agitar el ratón mientras se arrastran archivos: aparece una cesta junto al cursor
         basket::start();
         let _ = windows::Win32::System::DataExchange::AddClipboardFormatListener(hwnd);
@@ -3252,6 +3274,12 @@ fn main() {
         bar_ink_thread();
         hang_watch();
         search_extra::clip_start();
+        if std::env::var_os("MACBAR_FACETEST").is_some() {
+            // Prueba visual del doble escritorio: a iconos a los 4 s y de vuelta a los 9 s
+            std::thread::spawn(|| {
+                for (ms, w) in [(4000u64, 1usize), (5000, 0)] { std::thread::sleep(Duration::from_millis(ms)); unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_FACETEST, WPARAM(w), LPARAM(0)); } }
+            });
+        }
         if std::env::var_os("MACBAR_BASKETTEST").is_some() {
             std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2500)); basket::test_show(1100, 500); });
         }

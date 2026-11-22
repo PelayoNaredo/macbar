@@ -21,7 +21,9 @@ pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(b
     /// Procesador por encima del umbral durante dos minutos seguidos
     Cpu(u8),
     /// Acción de la bandeja terminada: 0 = ZIP, 1 = PNG, 2 = JPG, 3 = OCR; y si salió bien
-    FileOp(u8, bool) }
+    FileOp(u8, bool),
+    /// Cara del escritorio: true = iconos, false = widgets
+    Face(bool) }
 
 /// Última notificación del móvil que se enseñó: (app, título)
 pub static PHONE_NOTE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));

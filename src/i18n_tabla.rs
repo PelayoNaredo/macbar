@@ -412,4 +412,10 @@ pub static EN: &[(&str, &str)] = &[
     ("Comprimir todo en ZIP", "Compress all to ZIP"),
     ("Archivos", "Files"),
     ("Suelta aquí", "Drop here"),
+    ("Iconos del escritorio", "Desktop icons"),
+    ("Widgets", "Widgets"),
+    ("Ver los widgets (Win+Alt+W)", "Show widgets (Win+Alt+W)"),
+    ("Ver los iconos del escritorio (Win+Alt+W)", "Show desktop icons (Win+Alt+W)"),
+    ("Doble clic en el escritorio para cambiar", "Double-click the desktop to switch"),
+    ("Cambiar entre widgets e iconos del escritorio", "Switch between widgets and desktop icons"),
 ];

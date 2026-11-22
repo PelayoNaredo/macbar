@@ -315,6 +315,12 @@ pub fn bar_menu() -> Menu {
     let on = sys::autostart_enabled();
     m.check(t("Iniciar con Windows"), on, A::Autostart(!on))
         .check(t("Widgets del escritorio"), crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
+    // Doble escritorio: cara de widgets o de iconos
+    if crate::desk::enabled() {
+        let away = crate::faces::AWAY.load(std::sync::atomic::Ordering::Relaxed);
+        m.item(format!("      {}", if away { t("Ver los widgets (Win+Alt+W)") } else { t("Ver los iconos del escritorio (Win+Alt+W)") }), A::Bar(crate::BAR_FACE))
+            .check(format!("      {}", t("Doble clic en el escritorio para cambiar")), crate::faces::dblclick_on(), A::Bar(crate::BAR_FACE_DBL));
+    }
     // Cada widget por separado (solo con los widgets encendidos)
     if crate::desk::enabled() {
         for (i, (label, on)) in crate::desk::menu_items().into_iter().enumerate() {
