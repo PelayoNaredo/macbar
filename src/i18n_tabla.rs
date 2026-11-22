@@ -571,4 +571,13 @@ pub static EN: &[(&str, &str)] = &[
     ("Editar símbolos…", "Edit symbols…"),
     ("notificación", "notification"),
     ("notificaciones", "notifications"),
+    // ---- tamaños de los widgets (desk.rs, settings.rs)
+    ("Tamaño", "Size"),
+    ("Pequeño", "Small"),
+    ("Mediano", "Medium"),
+    ("Banda", "Strip"),
+    ("Alto", "Tall"),
+    ("Grande", "Large"),
+    ("Columna", "Column"),
+    ("Extragrande", "Extra large"),
 ];

@@ -70,6 +70,9 @@ enum Row {
     City, Refresh,
     Version, Repo, Folder, Quit,
     Face, Caffeine, Pomodoro, Picker, Note,
+    // ---- tamaños de los widgets (PLAN_TAMANOS_WIDGETS, F0)
+    /// Tamaño de cada widget (debajo de su interruptor, encima de su diseño)
+    Size(usize),
 }
 
 /// Grupos de filas de cada sección (con su rótulo, en español: se traduce al pintarlo).
@@ -91,6 +94,8 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
             // Cada widget y, debajo, su diseño si tiene más de uno
             (Some("Widgets"), (0..n_widgets).flat_map(|i| {
                 let mut v = vec![Widget(i)];
+                // (tamaños de los widgets, F0)
+                if desk::size_items().get(i).is_some_and(|z| z.0.len() > 1) { v.push(Size(i)); }
                 if desk::variant_items().get(i).is_some_and(|d| d.0.len() > 1) { v.push(Design(i)); }
                 v
             }).collect()),
@@ -146,7 +151,10 @@ struct State {
     cpu: usize,
     widgets: bool,
     each: Vec<(&'static str, bool)>,
-    designs: Vec<(&'static [&'static str], usize)>,
+    /// Diseños que admiten el tamaño actual de cada widget y la posición del elegido
+    designs: Vec<(Vec<&'static str>, usize)>,
+    // ---- tamaños de los widgets (F0): rótulos cortos, elegido y su nombre
+    sizes: Vec<(Vec<&'static str>, usize, &'static str)>,
     floating: bool,
     ink: i8,
     face_dbl: bool,
@@ -173,6 +181,7 @@ fn read() -> State {
         widgets: desk::enabled(),
         each: desk::menu_items(),
         designs: desk::variant_items(),
+        sizes: desk::size_items(),
         floating: desk::floating(),
         ink: desk::ink_mode(),
         face_dbl: caras::on(),
@@ -207,6 +216,8 @@ enum Act {
     EditCity,
     SaveCity,
     Design(usize, usize),
+    // ---- tamaños de los widgets (F0): widget y posición del tamaño en su lista
+    Size(usize, usize),
     Nothing,
 }
 
@@ -231,6 +242,8 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
         Widgets if sub == 0 => Act::Bar(crate::BAR_WIDGETS),
         Widget(i) if sub == 0 && st.widgets && i < st.each.len() => Act::Bar(crate::BAR_WIDGET0 + i as u32),
         Design(i) => match (pick(st.designs.get(i).map(|d| d.0.len() as u32).unwrap_or(0)), st.designs.get(i)) { (Some(n), Some(d)) if n as usize != d.1 => Act::Design(i, n as usize), _ => Act::Nothing },
+        // (tamaños de los widgets, F0)
+        Size(i) => match (pick(st.sizes.get(i).map(|z| z.0.len() as u32).unwrap_or(0)), st.sizes.get(i)) { (Some(n), Some(z)) if n as usize != z.1 => Act::Size(i, n as usize), _ => Act::Nothing },
         Style => match pick(2) { Some(i) if (i == 0) != st.floating => Act::Style, _ => Act::Nothing },
         Ink => match pick(3) { Some(i) if INK_ORDER[i as usize] as i8 != st.ink => Act::Bar(crate::BAR_INK0 + INK_ORDER[i as usize]), _ => Act::Nothing },
         FaceDbl if sub == 0 => Act::FaceDbl,
@@ -300,9 +313,15 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
             (label.to_string(), String::new(), Ctl::Switch(on && st.widgets), st.widgets)
         }
         Design(i) => {
-            let (names, cur) = st.designs.get(i).copied().unwrap_or((&["Clásico"], 0));
+            let (names, cur) = st.designs.get(i).map(|d| (&d.0[..], d.1)).unwrap_or((&["Clásico"][..], 0));
             let on = st.widgets && st.each.get(i).is_some_and(|e| e.1);
             (format!("      {}", t("Diseño")), String::new(), seg(names, Some(cur)), on)
+        }
+        // (tamaños de los widgets, F0): celdas de la rejilla en el selector y el nombre del elegido debajo
+        Size(i) => {
+            let (names, cur, name) = st.sizes.get(i).map(|z| (&z.0[..], z.1, z.2)).unwrap_or((&["2×2"][..], 0, "Grande"));
+            let on = st.widgets && st.each.get(i).is_some_and(|e| e.1);
+            (format!("      {}", t("Tamaño")), t(name).to_string(), seg(names, Some(cur)), on)
         }
         Style => (t("Estilo"), t("Flotantes sin fondo o tarjetas de cristal"), seg(&["Flotante", "Tarjeta"], Some(!st.floating as usize)), true),
         Ink => {
@@ -444,6 +463,8 @@ impl Settings {
             Act::Autostart(on) => Re::Run(Box::new(move || sys::set_autostart(on))),
             Act::Style => Re::Run(Box::new(desk::toggle_style)),
             Act::Design(i, n) => Re::Run(Box::new(move || desk::set_variant_i(i, n))),
+            // (tamaños de los widgets, F0)
+            Act::Size(i, n) => Re::Run(Box::new(move || desk::set_size_i(i, n))),
             Act::FaceDbl => Re::Run(Box::new(caras::toggle)),
             Act::Cpu(i) => Re::Run(Box::new(move || sys::set_config_value("alerta_cpu", &cpu_value(i).to_string()))),
             Act::SaveProfile => Re::Run(Box::new(profiles::save_active)),

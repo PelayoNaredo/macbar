@@ -117,6 +117,42 @@ struct Dw {
     light: bool,
     ink: f32,
     lum_n: u32,
+    /// Medidas reales de la ventana (DIP, las de su `Sz` al crearla) y con las que maqueta el widget
+    /// (iguales si es responsive; si no, sus medidas de siempre, que se escalan para caber)
+    dims: (f32, f32),
+    ldims: (f32, f32),
+    /// Cambio de tamaño en curso (muelle del rectángulo viejo al nuevo)
+    morph: Option<Morph>,
+    /// Asa de la esquina: ratón encima y su brillo animado (0..1)
+    grip_on: bool,
+    grip: f32,
+    /// Arrastre del asa en curso
+    resize: Option<Resize>,
+}
+
+/// Arrastre del asa de redimensionar: esquina de la ventana, tamaño al que apunta el imán, ventana
+/// del contorno fantasma y si es de prueba (`MACBAR_SZ_GHOST`: sin ratón, se queda puesto).
+#[derive(Clone, Copy)]
+struct Resize { origin: POINT, target: Sz, ghost: HWND, fake: bool }
+
+/// Lado de la zona del asa en la esquina inferior derecha (DIP).
+const GRIP: f32 = 22.0;
+const TIMER_RESIZE: usize = 5;
+
+/// Escala y desplazamiento que encajan la maqueta `l` (centrada, sin deformar) en las medidas `d`.
+fn fit(d: (f32, f32), l: (f32, f32)) -> (f32, f32, f32) {
+    let k = (d.0 / l.0).min(d.1 / l.1);
+    if (k - 1.0).abs() < 1e-4 && (d.0 - l.0).abs() < 0.5 && (d.1 - l.1).abs() < 0.5 { return (1.0, 0.0, 0.0); }
+    (k, (d.0 - l.0 * k) / 2.0, (d.1 - l.1 * k) / 2.0)
+}
+
+impl Dw {
+    /// De DIP de la ventana a las de la maqueta del widget.
+    fn to_lay(&self, x: f32, y: f32) -> (f32, f32) {
+        if x < 0.0 && y < 0.0 { return (x, y); }
+        let (k, ox, oy) = fit(self.dims, self.ldims);
+        ((x - ox) / k, (y - oy) / k)
+    }
 }
 
 thread_local! {
@@ -166,14 +202,17 @@ fn save(enabled: bool) {
     out += &format!("ocultos = {}\n", hidden.join(","));
     out += &format!("estilo = {}\n", if floating() { "flotante" } else { "tarjeta" });
     for k in ALL {
-        let live = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k).map(|w| { let mut r = RECT::default(); unsafe { let _ = GetWindowRect(w.hwnd, &mut r); } (r.left, r.top) }));
+        // (el que se está yendo no cuenta: al cambiar de tamaño o de diseño conviven los dos)
+        let live = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| { let mut r = RECT::default(); unsafe { let _ = GetWindowRect(w.hwnd, &mut r); } (r.left, r.top) }));
         match live {
             Some((x, y)) => out += &format!("{} = {x},{y}\n", pos_key(k)),
             None => if let Some(v) = ini_get(&old, &pos_key(k)) { out += &format!("{} = {v}\n", pos_key(k)); },
         }
+        // El tamaño guardado (o el que le toca al venir de v0.5); nunca el forzado por MACBAR_SZ
+        out += &format!("tam_{} = {}\n", k.key(), sz_stored(k).key());
     }
     // El resto de claves (texto, fotos_carpeta, relojes, cuenta_atras, nuevos_v3…) se conservan tal cual
-    let ours: Vec<String> = ["activados", "ocultos", "estilo"].iter().map(|s| s.to_string()).chain(ALL.iter().map(|k| pos_key(*k))).collect();
+    let ours: Vec<String> = ["activados", "ocultos", "estilo"].iter().map(|s| s.to_string()).chain(ALL.iter().map(|k| pos_key(*k))).chain(ALL.iter().map(|k| format!("tam_{}", k.key()))).collect();
     for l in old.lines() {
         let key = l.split('=').next().unwrap_or("").trim();
         if l.trim().is_empty() || (l.contains('=') && ours.iter().any(|o| o == key)) { continue; }
@@ -400,6 +439,8 @@ pub fn start() {
     unsafe {
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: w!("MacBarDesk"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap(), ..Default::default() };
         RegisterClassW(&wc);
+        let gc = WNDCLASSW { lpfnWndProc: Some(ghost_proc), hInstance: hinst.into(), lpszClassName: w!("MacBarDeskGhost"), hCursor: LoadCursorW(None, IDC_SIZENWSE).unwrap_or_default(), ..Default::default() };
+        RegisterClassW(&gc);
     }
     // Primera vez con widgets nuevos: se apuntan como quitados (se ponen desde el menú o la configuración)
     if ini_get(&ini(), "nuevos_v4").is_none() {
@@ -424,6 +465,7 @@ pub fn start() {
         if let Some(o) = &only { if o.split(',').any(|x| x == k.key()) { place(*k, i); } continue; }
         if !is_hidden_in(&txt, *k) { place(*k, i); }
     }
+    ghost_test();
 }
 
 /// Crea un widget en su sitio guardado o, si nunca se movió, en el de por defecto: tres columnas
@@ -464,7 +506,11 @@ fn place(k: Kind, order: usize) {
         Kind::Photos | Kind::Visual | Kind::Clocks | Kind::Countdown | Kind::Todo | Kind::News | Kind::Stocks => left_col(k),
     };
     let (x, y) = ini_get(&ini(), &pos_key(k)).and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).unwrap_or(def);
-    create(k, x, y, w_of(k), h_of(k), order);
+    // Medidas con el DPI del monitor donde cae; dentro de su área de trabajo y sin pisar a nadie
+    let (_, ms) = monitor_at(x + 1, y + 1);
+    let (wpx, hpx) = ((size(k).0 * ms) as i32, (size(k).1 * ms) as i32);
+    let (x, y) = free_spot(None, x, y, wpx, hpx);
+    create(k, x, y, wpx, hpx, order);
 }
 
 // ---------------------------------------------------------------- diseños de cada widget
@@ -502,22 +548,382 @@ pub fn set_variant(k: Kind, n: usize) {
     if n >= variants(k).len() || n == variant(k) { return; }
     // Se guarda su sitio antes de quitarlo
     if shown(k) { save(true); }
+    // Si el nuevo diseño no admite el tamaño de ahora, pasa al suyo más parecido
+    let cur = sz(k);
     set_ini_value(&format!("diseno_{}", k.key()), &n.to_string());
     if let Some(m) = VARIANT.lock().unwrap().as_mut() { m.insert(k.key(), n); }
+    if !sizes(k, n).contains(&cur) {
+        let s = nearest(cur.dims(), sizes(k, n));
+        set_ini_value(&format!("tam_{}", k.key()), s.key());
+        if let Some(m) = SZ.lock().unwrap().as_mut() { m.insert(k.key(), s); }
+    }
     if let Some(h) = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| w.hwnd)) {
         retire(h);
         place(k, 0);
     }
 }
 
-/// Para la Configuración: diseños de cada widget (en el orden de `ALL`) y el elegido.
-pub fn variant_items() -> Vec<(&'static [&'static str], usize)> { ALL.iter().map(|k| (variants(*k), variant(*k))).collect() }
-pub fn set_variant_i(i: usize, n: usize) { if let Some(k) = ALL.get(i) { set_variant(*k, n); } }
+/// Para la Configuración: diseños de cada widget (en el orden de `ALL`) que admiten su tamaño actual y
+/// la posición del elegido en esa lista. `set_variant_i` recibe esa misma posición.
+pub fn variant_items() -> Vec<(Vec<&'static str>, usize)> {
+    ALL.iter().map(|k| {
+        let c = compatible_variants(*k, sz(*k));
+        (c.iter().map(|v| variants(*k)[*v]).collect(), c.iter().position(|v| *v == variant(*k)).unwrap_or(0))
+    }).collect()
+}
+pub fn set_variant_i(i: usize, n: usize) {
+    if let Some(k) = ALL.get(i) { if let Some(v) = compatible_variants(*k, sz(*k)).get(n) { set_variant(*k, *v); } }
+}
 
-/// Tamaño de cada widget (DIP): cada uno el que necesita su contenido.
-pub fn size(k: Kind) -> (f32, f32) {
+// ---------------------------------------------------------------- tamaños fijos (ver PLAN_TAMANOS_WIDGETS.md)
+/// Los siete tamaños fijos de los widgets, sobre una rejilla de celdas de 170 DIP con 20 de hueco.
+/// Se guardan en widgets.ini como `tam_<clave> = mediano`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Sz { Pequeno, Mediano, Banda, Alto, Grande, Columna, Extragrande }
+
+impl Sz {
+    pub const ALL: [Sz; 7] = [Sz::Pequeno, Sz::Mediano, Sz::Banda, Sz::Alto, Sz::Grande, Sz::Columna, Sz::Extragrande];
+    /// Medidas en DIP (las de dibujo; la ventana las multiplica por el DPI de su monitor y por `ZOOM`).
+    pub fn dims(self) -> (f32, f32) {
+        let (c, r) = self.cells();
+        (CELL * c as f32 + CELL_GAP * (c - 1) as f32, CELL * r as f32 + CELL_GAP * (r - 1) as f32)
+    }
+    /// Celdas de la rejilla que ocupa (columnas, filas).
+    pub fn cells(self) -> (u32, u32) {
+        match self { Sz::Pequeno => (1, 1), Sz::Mediano => (2, 1), Sz::Banda => (4, 1), Sz::Alto => (1, 2), Sz::Grande => (2, 2), Sz::Columna => (2, 3), Sz::Extragrande => (4, 2) }
+    }
+    /// Clave para widgets.ini.
+    pub fn key(self) -> &'static str {
+        match self { Sz::Pequeno => "pequeno", Sz::Mediano => "mediano", Sz::Banda => "banda", Sz::Alto => "alto", Sz::Grande => "grande", Sz::Columna => "columna", Sz::Extragrande => "extragrande" }
+    }
+    /// Nombre en español para la interfaz (pasa por `i18n::t` al enseñarlo).
+    pub fn name(self) -> &'static str {
+        match self { Sz::Pequeno => "Pequeño", Sz::Mediano => "Mediano", Sz::Banda => "Banda", Sz::Alto => "Alto", Sz::Grande => "Grande", Sz::Columna => "Columna", Sz::Extragrande => "Extragrande" }
+    }
+    /// Rótulo corto con las celdas («2×1»), para el selector de la Configuración.
+    pub fn short(self) -> &'static str {
+        match self { Sz::Pequeno => "1×1", Sz::Mediano => "2×1", Sz::Banda => "4×1", Sz::Alto => "1×2", Sz::Grande => "2×2", Sz::Columna => "2×3", Sz::Extragrande => "4×2" }
+    }
+    /// Desde la clave del ini (admite también «pequeño» con eñe y mayúsculas).
+    pub fn from_key(s: &str) -> Option<Sz> {
+        let s = s.trim().to_lowercase().replace('ñ', "n");
+        Sz::ALL.into_iter().find(|z| z.key() == s)
+    }
+}
+
+/// Lado de una celda de la rejilla y hueco entre celdas (DIP).
+pub const CELL: f32 = 170.0;
+pub const CELL_GAP: f32 = 20.0;
+
+/// Medidas con las que pinta un widget **responsive** (`Widget::layouts() == true`). Se piden con
+/// `desk::lay(Kind::X)` desde `paint`, `paint_live`, `click`… (hay un único widget de cada clase, así
+/// que el tamaño es de la clase). Reglas para maquetar (las mismas en todos los tamaños):
+/// - Margen interior `Lay::PAD` (20 DIP); la tipografía y los radios no cambian con el tamaño:
+///   se añaden o quitan bloques (ver la tabla §2 del plan), no se escala.
+/// - `match l.sz { … }` para decidir qué bloques caben; `is_wide`/`is_tall`/`cols`/`rows` para lo común.
+/// - `cell(c, r, nc, nr)` da el rectángulo de un trozo de la rejilla (útil para repartir bloques).
+/// - Los widgets aún no responsive siguen usando `size(Kind::X)` en sus ficheros, que allí es
+///   `layout_size` (sus medidas de siempre): `desk` los pinta escalados para caber en el tamaño real.
+#[allow(dead_code)] // API para los widgets responsive (F2-F5)
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Lay { pub w: f32, pub h: f32, pub sz: Sz }
+
+#[allow(dead_code)]
+impl Lay {
+    /// Margen interior común.
+    pub const PAD: f32 = 20.0;
+    /// Más del doble de ancho que de alto (Mediano, Banda, Extragrande).
+    pub fn is_wide(&self) -> bool { self.w >= 2.0 * self.h - 1.0 }
+    /// Más alto que ancho (Alto, Columna).
+    pub fn is_tall(&self) -> bool { self.h > self.w + 1.0 }
+    /// Cuadrado (Pequeño, Grande).
+    pub fn is_square(&self) -> bool { (self.w - self.h).abs() < 1.0 }
+    /// Columnas y filas de la rejilla que ocupa.
+    pub fn cols(&self) -> u32 { self.sz.cells().0 }
+    pub fn rows(&self) -> u32 { self.sz.cells().1 }
+    /// Zona útil (sin el margen `PAD`).
+    pub fn inner(&self) -> D2D_RECT_F { rect(Self::PAD, Self::PAD, self.w - Self::PAD, self.h - Self::PAD) }
+    /// Rectángulo de `nc`×`nr` celdas empezando en la celda (c, r), alineado a la rejilla de 170/20.
+    pub fn cell(&self, c: u32, r: u32, nc: u32, nr: u32) -> D2D_RECT_F {
+        let x = c as f32 * (CELL + CELL_GAP);
+        let y = r as f32 * (CELL + CELL_GAP);
+        rect(x, y, x + CELL * nc as f32 + CELL_GAP * nc.saturating_sub(1) as f32, y + CELL * nr as f32 + CELL_GAP * nr.saturating_sub(1) as f32)
+    }
+}
+
+/// Tamaños que admite cada widget con cada diseño (en el orden de `Sz::ALL`). Los clásicos admiten
+/// todos (Móvil sin Banda ni Extragrande); los diseños alternativos, de momento, solo el más cercano a
+/// su tamaño de siempre (la F5 del plan los ampliará).
+pub fn sizes(k: Kind, variant: usize) -> &'static [Sz] {
+    use Sz::*;
+    const ALL7: &[Sz] = &Sz::ALL;
+    match (k, variant) {
+        (Kind::Weather, 1 | 2) => &[Mediano],
+        (Kind::Calendar, 1) => &[Pequeno],
+        (Kind::Calendar, 2) => &[Mediano],
+        (Kind::System, 1) => &[Mediano],
+        (Kind::System, 2) => &[Extragrande],
+        (Kind::Music, 1) => &[Grande],
+        (Kind::Music, 2) => &[Mediano],
+        (Kind::Music, 3) => &[Banda],
+        (Kind::Photos, 1) => &[Alto],
+        (Kind::Visual, 1) => &[Pequeno],
+        (Kind::Visual, 2) => &[Mediano],
+        (Kind::Visual, 3) => &[Grande],
+        (Kind::Clocks, 1) => &[Pequeno],
+        (Kind::Storage, 1) => &[Mediano],
+        (Kind::Countdown, 1) => &[Mediano],
+        (Kind::Phone, _) => &[Pequeno, Mediano, Alto, Grande, Columna],
+        _ => ALL7,
+    }
+}
+
+/// Todos los tamaños que admite un widget con alguno de sus diseños (los que ofrecen el menú, la
+/// Configuración y el asa; si el diseño actual no admite el elegido, se cambia de diseño).
+pub fn all_sizes(k: Kind) -> Vec<Sz> {
+    Sz::ALL.into_iter().filter(|z| (0..variants(k).len()).any(|v| sizes(k, v).contains(z))).collect()
+}
+
+/// Diseños (índices de `variants`) que admiten el tamaño `s`.
+fn compatible_variants(k: Kind, s: Sz) -> Vec<usize> { (0..variants(k).len()).filter(|v| sizes(k, *v).contains(&s)).collect() }
+
+/// Distancia entre dos medidas en área y proporción (logarítmica: 2× más grande pesa igual que 2× más pequeño).
+fn dist_log(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let (dw, dh) = ((a.0 / b.0).ln(), (a.1 / b.1).ln());
+    dw * dw + dh * dh
+}
+
+/// El tamaño de la lista más parecido a unas medidas (migración desde v0.5 y cambios de diseño).
+pub fn nearest(d: (f32, f32), of: &[Sz]) -> Sz {
+    of.iter().copied().min_by(|a, b| dist_log(d, a.dims()).total_cmp(&dist_log(d, b.dims()))).unwrap_or(Sz::Grande)
+}
+
+/// El tamaño cuya esquina inferior derecha queda más cerca del cursor (asa de redimensionar: `d` son
+/// las medidas que marca el cursor desde la esquina superior izquierda).
+pub fn nearest_corner(d: (f32, f32), of: &[Sz]) -> Sz {
+    let e = |z: &Sz| { let (w, h) = z.dims(); (w - d.0).powi(2) + (h - d.1).powi(2) };
+    of.iter().copied().min_by(|a, b| e(a).total_cmp(&e(b))).unwrap_or(Sz::Grande)
+}
+
+/// Prueba visual: `MACBAR_SZ=grande` fuerza ese tamaño en todos los widgets (los que no lo admiten
+/// usan el más parecido que sí), y `MACBAR_SZ=tiempo:grande,musica:mediano` uno por widget (se pueden
+/// mezclar: `grande,tiempo:pequeno`). No toca widgets.ini.
+fn env_sz_in(spec: &str, key: &str) -> Option<Sz> {
+    let mut all = None;
+    for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        match part.split_once(':') {
+            Some((k, v)) if k.trim() == key => return Sz::from_key(v),
+            Some(_) => {}
+            None => all = all.or(Sz::from_key(part)),
+        }
+    }
+    all
+}
+
+/// Widgets a los que ya se les cambió el tamaño a mano en esta sesión: dejan de seguir `MACBAR_SZ`.
+static ENV_SZ_OFF: [std::sync::atomic::AtomicBool; ALL.len()] = [const { std::sync::atomic::AtomicBool::new(false) }; ALL.len()];
+
+fn env_sz(k: Kind) -> Option<Sz> {
+    if ENV_SZ_OFF[k as usize].load(Ordering::Relaxed) { return None; }
+    static SPEC: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SPEC.get_or_init(|| std::env::var("MACBAR_SZ").ok()).as_deref().and_then(|s| env_sz_in(s, k.key()))
+}
+
+/// Tamaños guardados (`tam_<clave>`), leídos una vez de widgets.ini.
+static SZ: Mutex<Option<HashMap<&'static str, Sz>>> = Mutex::new(None);
+
+/// Tamaño guardado o, si no hay (quien viene de v0.5), el admitido más parecido a su tamaño de siempre.
+fn sz_stored(k: Kind) -> Sz {
+    let saved = {
+        let mut m = SZ.lock().unwrap();
+        let m = m.get_or_insert_with(|| {
+            let txt = ini();
+            ALL.iter().filter_map(|k| Some((k.key(), Sz::from_key(&ini_get(&txt, &format!("tam_{}", k.key()))?)?))).collect()
+        });
+        m.get(k.key()).copied()
+    };
+    let adm = sizes(k, variant(k));
+    match saved {
+        Some(s) if adm.contains(&s) => s,
+        Some(s) => nearest(s.dims(), adm),
+        None => nearest(legacy_size(k, variant(k)), adm),
+    }
+}
+
+/// Tamaño actual del widget (el forzado por `MACBAR_SZ` si lo hay; siempre uno que admite su diseño).
+pub fn sz(k: Kind) -> Sz {
+    match env_sz(k) {
+        Some(s) => { let adm = sizes(k, variant(k)); if adm.contains(&s) { s } else { nearest(s.dims(), adm) } }
+        None => sz_stored(k),
+    }
+}
+
+/// Medidas para maquetar un widget responsive (ver `Lay`).
+#[allow(dead_code)]
+pub fn lay(k: Kind) -> Lay { let s = sz(k); let (w, h) = s.dims(); Lay { w, h, sz: s } }
+
+/// Tamaño de la ventana de cada widget (DIP): el de su `Sz`.
+pub fn size(k: Kind) -> (f32, f32) { sz(k).dims() }
+
+/// Widgets que ya maquetan con las medidas reales (`Widget::layouts`), por `Kind as usize`.
+static RESPONSIVE: [std::sync::atomic::AtomicBool; ALL.len()] = [const { std::sync::atomic::AtomicBool::new(false) }; ALL.len()];
+
+/// Medidas con las que maqueta el widget: las reales si es responsive y, si no, las de siempre (que
+/// `desk` escala para caber en el tamaño real). En los ficheros de widgets se importa como `size`.
+pub fn layout_size(k: Kind) -> (f32, f32) {
+    if RESPONSIVE[k as usize].load(Ordering::Relaxed) { size(k) } else { legacy_size(k, variant(k)) }
+}
+
+/// Cambia el tamaño de un widget: se guarda, se pasa a un diseño que lo admita si el actual no, y el
+/// widget se recoloca (misma esquina superior izquierda, dentro del área de trabajo y sin pisar a
+/// nadie) transformándose con un muelle desde el tamaño anterior (sin animación con «Reducir movimiento»).
+pub fn set_sz(k: Kind, s: Sz) {
+    if !all_sizes(k).contains(&s) || s == sz(k) { return; }
+    ENV_SZ_OFF[k as usize].store(true, Ordering::Relaxed);
+    let live =DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| w.hwnd));
+    if live.is_some() { save(true); }
+    let v = variant(k);
+    if !sizes(k, v).contains(&s) {
+        // El Clásico si lo admite; si no, el primero que lo admita
+        let c = compatible_variants(k, s);
+        let nv = if c.contains(&0) { 0 } else { c.first().copied().unwrap_or(0) };
+        set_ini_value(&format!("diseno_{}", k.key()), &nv.to_string());
+        if let Some(m) = VARIANT.lock().unwrap().as_mut() { m.insert(k.key(), nv); }
+    }
+    set_ini_value(&format!("tam_{}", k.key()), s.key());
+    if let Some(m) = SZ.lock().unwrap().as_mut() { m.insert(k.key(), s); }
+    let Some(old) = live else { return };
+    let r0 = win_rect(old);
+    let s0 = scale(old);
+    let reduced = crate::card::reduced_motion();
+    if reduced {
+        // Sin animación: el viejo se va en el próximo fotograma y el nuevo sale ya entero
+        with_dw(old, |w| w.dying = Some(Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now)));
+        unsafe { SetTimer(Some(old), TIMER_FADE, 15, None); }
+    } else {
+        retire(old);
+    }
+    place(k, 0);
+    let Some(new) = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| w.hwnd)) else { return };
+    let r1 = win_rect(new);
+    let s1 = scale(new);
+    if reduced {
+        with_dw(new, |w| w.born = Instant::now().checked_sub(Duration::from_secs(3)).unwrap_or_else(Instant::now));
+    } else {
+        let at = Instant::now();
+        let f = |r: RECT, s: f32| [r.left as f32 / s, r.top as f32 / s, (r.right - r.left) as f32 / s, (r.bottom - r.top) as f32 / s];
+        // Cada ventana anima, en sus propias coordenadas, del rectángulo viejo al nuevo
+        let (o0, o1) = (f(r0, s0), f(r1, s0));
+        with_dw(old, |w| w.morph = Some(Morph { from: [0.0, 0.0, o0[2], o0[3]], to: [o1[0] - o0[0], o1[1] - o0[1], o1[2], o1[3]], at }));
+        let (n0, n1) = (f(r0, s1), f(r1, s1));
+        with_dw(new, |w| w.morph = Some(Morph { from: [n0[0] - n1[0], n0[1] - n1[1], n0[2], n0[3]], to: [0.0, 0.0, n1[2], n1[3]], at }));
+    }
+    save(true);
+}
+
+/// Para la Configuración: tamaños que admite cada widget (rótulos cortos), el elegido y su nombre.
+pub fn size_items() -> Vec<(Vec<&'static str>, usize, &'static str)> {
+    ALL.iter().map(|k| {
+        let all = all_sizes(*k);
+        let cur = sz(*k);
+        (all.iter().map(|z| z.short()).collect(), all.iter().position(|z| *z == cur).unwrap_or(0), cur.name())
+    }).collect()
+}
+pub fn set_size_i(i: usize, n: usize) { if let Some(k) = ALL.get(i) { if let Some(s) = all_sizes(*k).get(n) { set_sz(*k, *s); } } }
+
+/// Transformación de cambio de tamaño: el contenido va de `from` a `to` (x, y, ancho, alto en DIP de
+/// la propia ventana) con un muelle.
+#[derive(Clone, Copy, Debug)]
+struct Morph { from: [f32; 4], to: [f32; 4], at: Instant }
+
+const MORPH_S: f32 = 0.65;
+
+/// Muelle amortiguado con un pelín de rebote (0 → 1), en forma cerrada.
+fn spring_k(t: f32) -> f32 {
+    if t >= MORPH_S { return 1.0; }
+    let (z, w) = (0.74_f32, 17.0_f32);
+    let wd = w * (1.0 - z * z).sqrt();
+    1.0 - (-z * w * t).exp() * ((wd * t).cos() + z * w / wd * (wd * t).sin())
+}
+
+impl Morph {
+    fn rect(&self) -> [f32; 4] {
+        let k = spring_k(self.at.elapsed().as_secs_f32());
+        std::array::from_fn(|i| self.from[i] + (self.to[i] - self.from[i]) * k)
+    }
+    fn done(&self) -> bool { self.at.elapsed().as_secs_f32() >= MORPH_S }
+}
+
+fn win_rect(h: HWND) -> RECT { let mut r = RECT::default(); unsafe { let _ = GetWindowRect(h, &mut r); } r }
+
+/// ¿Se solapan dos rectángulos (tocarse no cuenta)?
+fn overlaps(a: &RECT, b: &RECT) -> bool { a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom }
+
+/// Sitio para un widget de `want` (píxeles): lo más cerca posible de su esquina superior izquierda,
+/// dentro del área de trabajo `wa` y sin pisar ninguno de `others` (si se mueve, queda a `gap` del que
+/// pisaba). Si no cabe en ningún sitio, se queda dentro del área aunque pise.
+pub(crate) fn resolve(want: RECT, wa: RECT, others: &[RECT], gap: i32) -> (i32, i32) {
+    let (w, h) = (want.right - want.left, want.bottom - want.top);
+    let cx = |x: i32| x.min(wa.right - w).max(wa.left);
+    let cy = |y: i32| y.min(wa.bottom - h).max(wa.top);
+    let fits = |x: i32, y: i32| { let r = RECT { left: x, top: y, right: x + w, bottom: y + h }; !others.iter().any(|o| overlaps(&r, o)) };
+    let (x0, y0) = (cx(want.left), cy(want.top));
+    if fits(x0, y0) { return (x0, y0); }
+    let d2 = |x: i32, y: i32| { let (dx, dy) = ((x - x0) as i64, (y - y0) as i64); dx * dx + dy * dy };
+    // Candidatos: pegado a cada lado de cada widget, alineado con sus bordes y a los bordes del área
+    let mut xs = vec![x0, wa.left, wa.right - w];
+    let mut ys = vec![y0, wa.top, wa.bottom - h];
+    for o in others {
+        xs.extend([o.right + gap, o.left - w - gap, o.left, o.right - w]);
+        ys.extend([o.bottom + gap, o.top - h - gap, o.top, o.bottom - h]);
+    }
+    let mut best: Option<(i64, i32, i32)> = None;
+    for &x in &xs {
+        for &y in &ys {
+            let (x, y) = (cx(x), cy(y));
+            if fits(x, y) && best.is_none_or(|b| d2(x, y) < b.0) { best = Some((d2(x, y), x, y)); }
+        }
+    }
+    if let Some((_, x, y)) = best { return (x, y); }
+    // Último recurso: barrido del área entera
+    let step = gap.max(8) as usize;
+    for y in (wa.top..=(wa.bottom - h).max(wa.top)).step_by(step) {
+        for x in (wa.left..=(wa.right - w).max(wa.left)).step_by(step) {
+            if fits(x, y) && best.is_none_or(|b| d2(x, y) < b.0) { best = Some((d2(x, y), x, y)); }
+        }
+    }
+    best.map(|b| (b.1, b.2)).unwrap_or((x0, y0))
+}
+
+/// Área de trabajo y escala de píxeles de widget (DPI × `ZOOM`) del monitor que contiene ese punto.
+fn monitor_at(x: i32, y: i32) -> (RECT, f32) {
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    unsafe {
+        let hm = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(hm, &mut mi);
+        let (mut dx, mut dy) = (96u32, 96u32);
+        if GetDpiForMonitor(hm, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_err() { dx = 96; }
+        (mi.rcWork, dx as f32 / 96.0 * ZOOM)
+    }
+}
+
+/// Rectángulos de los widgets puestos (sin los que se están yendo), menos `except`.
+fn live_rects(except: Option<HWND>) -> Vec<RECT> {
+    DESKS.with(|d| d.borrow().iter().filter(|w| w.dying.is_none() && Some(w.hwnd) != except).map(|w| win_rect(w.hwnd)).collect())
+}
+
+/// Hueco libre más cercano para un widget de `wpx`×`hpx` cuya esquina quiere ir a (x, y).
+fn free_spot(me: Option<HWND>, x: i32, y: i32, wpx: i32, hpx: i32) -> (i32, i32) {
+    let (wa, s) = monitor_at(x + wpx / 2, y + hpx / 2);
+    resolve(RECT { left: x, top: y, right: x + wpx, bottom: y + hpx }, wa, &live_rects(me), (GAP * s) as i32)
+}
+
+/// Tamaño de siempre (v0.5) de cada widget y diseño, en DIP: de él sale el tamaño fijo de quien
+/// actualiza, y con él siguen maquetando los widgets que aún no son responsive.
+pub fn legacy_size(k: Kind, variant: usize) -> (f32, f32) {
     // Los diseños alternativos tienen su propio tamaño
-    match (k, variant(k)) {
+    match (k, variant) {
         (Kind::Weather, 1) => return (340.0, 170.0),
         (Kind::Weather, 2) => return (300.0, 150.0),
         (Kind::Calendar, 1) => return (180.0, 180.0),
@@ -590,13 +996,16 @@ fn create(kind: Kind, x: i32, y: i32, wpx: i32, hpx: i32, order: usize) {
             glyph_l: mk(ICONS, 24.0, DWRITE_FONT_WEIGHT_NORMAL),
         };
         let w = deskw::new(kind);
+        RESPONSIVE[kind as usize].store(w.layouts(), Ordering::Relaxed);
+        let (dims, ldims) = (size(kind), layout_size(kind));
         // Aparecen en cascada al arrancar
         let born = Instant::now() + Duration::from_millis(90 * order as u64);
         DESKS.with(|ds| ds.borrow_mut().push(Dw { hwnd, kind, target: None, dw, cache: RefCell::new(Caches::default()), f, d, hits: Vec::new(), hover: None,
             glow: HashMap::new(), last_paint: Instant::now(), born, w, drag: None, rdown: false,
             pressed: None, press: HashMap::new(), lift: 0.0, glide: None, dying: None,
             layer: None, lcache: RefCell::new(Caches::default()), layer_hits: Vec::new(), mouse: (-1.0, -1.0),
-            light: ink_mode() == 1, ink: if ink_mode() == 1 { 1.0 } else { 0.0 }, lum_n: 0 }));
+            light: ink_mode() == 1, ink: if ink_mode() == 1 { 1.0 } else { 0.0 }, lum_n: 0,
+            dims, ldims, morph: None, grip_on: false, grip: 0.0, resize: None }));
         // En la cara de iconos se crea escondido (aparecerá al volver a la de widgets)
         let show = if faces::AWAY.load(Ordering::Relaxed) { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
         let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | show);
@@ -878,7 +1287,19 @@ fn paint_real(hwnd: HWND) {
             let ink_to = if w.light { 1.0 } else { 0.0 };
             if (ink_to - w.ink).abs() > 0.004 { w.ink += (ink_to - w.ink) * (1.0 - (-dt / 0.18).exp()); moving = true; } else { w.ink = ink_to; }
             let ink = w.ink;
-            let (ww, wh) = size(w.kind);
+            // Medidas reales y de la maqueta: si el widget aún no es responsive, su dibujo de siempre
+            // se escala (sin deformar, centrado) para caber en su tamaño
+            let (ww, wh) = w.dims;
+            let (lw, lh) = w.ldims;
+            let (fk, fox, foy) = fit(w.dims, w.ldims);
+            // Asa de redimensionar: se enciende con el ratón en la esquina y mientras se arrastra
+            let grip_to = if (w.grip_on || w.resize.is_some()) && w.morph.is_none() && w.dying.is_none() { 1.0 } else { 0.0 };
+            if (grip_to - w.grip).abs() > 0.01 { w.grip += (grip_to - w.grip) * (1.0 - (-dt / 0.10).exp()); moving = true; } else { w.grip = grip_to; }
+            // Cambio de tamaño: rectángulo animado (en DIP de esta ventana)
+            if w.morph.is_some_and(|m| m.done()) { w.morph = None; }
+            let morphing = w.morph.is_some();
+            if morphing { moving = true; }
+            let mr = w.morph.map(|m| m.rect()).unwrap_or([0.0, 0.0, ww, wh]);
             let t = age(w.born).max(0.0);
             // Capa fija: lo que cambia como mucho una vez por segundo se pinta en una imagen y en cada
             // fotograma solo se pega; encima va lo que se mueve (`paint_live`)
@@ -886,7 +1307,7 @@ fn paint_real(hwnd: HWND) {
             if layered {
                 let rtk = { use windows::core::Interface; rt.cast::<windows::core::IUnknown>().ok() };
                 if w.layer.as_ref().is_none_or(|l| l.0 != rtk) {
-                    w.layer = rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: ww, height: wh }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok().map(|b| (rtk.clone(), b, false));
+                    w.layer = rt.CreateCompatibleRenderTarget(Some(&D2D_SIZE_F { width: lw, height: lh }), None, None, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE).ok().map(|b| (rtk.clone(), b, false));
                 }
                 let need = moving || t < 1.4 || w.dying.is_some() || w.w.layer_stale() || w.layer.as_ref().is_some_and(|l| !l.2);
                 if need {
@@ -895,7 +1316,7 @@ fn paint_real(hwnd: HWND) {
                         brt.BeginDraw();
                         brt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
                         let p2 = Painter { rt: brt, dw: &w.dw, cache: &w.lcache, h: 100.0, s };
-                        let mut ui2 = make_ui(p2, brt, &w.f, ww, s, w.glow.clone(), w.hover, fl, ink);
+                        let mut ui2 = make_ui(p2, brt, &w.f, lw, s, w.glow.clone(), w.hover, fl, ink);
                         w.w.paint(&mut ui2, &w.d, t, dt);
                         w.layer_hits = std::mem::take(&mut ui2.hits);
                         drop(ui2);
@@ -904,7 +1325,7 @@ fn paint_real(hwnd: HWND) {
                 }
             }
             let p = Painter { rt: &rt, dw: &w.dw, cache: &w.cache, h: 100.0, s };
-            let mut ui = make_ui(p, &rt, &w.f, ww, s, w.glow.clone(), w.hover, fl, ink);
+            let mut ui = make_ui(p, &rt, &w.f, lw, s, w.glow.clone(), w.hover, fl, ink);
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
             // En las capturas de prueba el widget sale encima de otras ventanas: se pinta debajo el trozo
@@ -920,22 +1341,30 @@ fn paint_real(hwnd: HWND) {
                 // Con tinta oscura, la tarjeta es clara (cristal blanco)
                 let mix = |a: f32, b: f32| a + (b - a) * ink;
                 let tint = ui.brush(rgba(mix(0.10, 0.96), mix(0.11, 0.96), mix(0.12, 0.97), mix(0.58, 0.62)));
-                rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, ww, wh), 16.0), &tint);
-                rt.DrawRoundedRectangle(&rrect(rect(0.5, 0.5, ww - 0.5, wh - 0.5), 15.5), &ui.wa(0.10), 1.0, None);
+                // (al cambiar de tamaño, la tarjeta sigue al rectángulo animado)
+                let (x0, y0, x1, y1) = (mr[0], mr[1], mr[0] + mr[2], mr[1] + mr[3]);
+                rt.FillRoundedRectangle(&rrect(rect(x0, y0, x1, y1), 16.0), &tint);
+                rt.DrawRoundedRectangle(&rrect(rect(x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5), 15.5), &ui.wa(0.10), 1.0, None);
             }
             // Entrada: sube 12 px mientras crece de 0,965 a 1 con un pelín de rebote (desde el centro)
-            let rise = 1.0 - popup::ease_out((t / 0.55).min(1.0));
-            let mut sc = 0.965 + 0.035 * crate::ease_back((t / 0.6).min(1.0));
+            // (al cambiar de tamaño no: ya lo anima el muelle)
+            let rise = if morphing { 0.0 } else { 1.0 - popup::ease_out((t / 0.55).min(1.0)) };
+            let mut sc = if morphing { 1.0 } else { 0.965 + 0.035 * crate::ease_back((t / 0.6).min(1.0)) };
             // Al arrastrar se "levanta" (crece un 2,5 %) y al quitarlo se encoge mientras se desvanece
             sc *= 1.0 + 0.025 * w.lift;
-            let die = w.dying.map(|d| popup::ease_out((d.elapsed().as_secs_f32() / DIE_S).min(1.0))).unwrap_or(0.0);
+            let die = if morphing { 0.0 } else { w.dying.map(|d| popup::ease_out((d.elapsed().as_secs_f32() / DIE_S).min(1.0))).unwrap_or(0.0) };
             sc *= 1.0 - 0.07 * die;
-            rt.SetTransform(&windows_numerics::Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: ww / 2.0 * (1.0 - sc), M32: wh / 2.0 * (1.0 - sc) + 12.0 * rise + 6.0 * die });
+            let entry = windows_numerics::Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: ww / 2.0 * (1.0 - sc), M32: wh / 2.0 * (1.0 - sc) + 12.0 * rise + 6.0 * die };
+            // Maqueta → medidas reales → entrada/arrastre → rectángulo del cambio de tamaño
+            let fit_m = windows_numerics::Matrix3x2 { M11: fk, M12: 0.0, M21: 0.0, M22: fk, M31: fox, M32: foy };
+            let mk = (mr[2] / ww).min(mr[3] / wh);
+            let morph_m = windows_numerics::Matrix3x2 { M11: mk, M12: 0.0, M21: 0.0, M22: mk, M31: mr[0] + (mr[2] - ww * mk) / 2.0, M32: mr[1] + (mr[3] - wh * mk) / 2.0 };
+            rt.SetTransform(&mat_mul(&mat_mul(&fit_m, &entry), &morph_m));
             if layered {
                 if let Some(bmp) = w.layer.as_ref().and_then(|l| l.1.GetBitmap().ok()) {
-                    // Sin escalar, píxel a píxel (nítida); escalada (entrada, arrastre) con suavizado
-                    let mode = if (sc - 1.0).abs() < 0.0005 { D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR } else { D2D1_BITMAP_INTERPOLATION_MODE_LINEAR };
-                    rt.DrawBitmap(&bmp, Some(&rect(0.0, 0.0, ww, wh)), 1.0, mode, None);
+                    // Sin escalar, píxel a píxel (nítida); escalada (entrada, arrastre, maqueta provisional) con suavizado
+                    let mode = if (sc - 1.0).abs() < 0.0005 && fk == 1.0 && !morphing { D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR } else { D2D1_BITMAP_INTERPOLATION_MODE_LINEAR };
+                    rt.DrawBitmap(&bmp, Some(&rect(0.0, 0.0, lw, lh)), 1.0, mode, None);
                 }
                 w.w.paint_live(&mut ui, &w.d, t, dt);
                 let mut h = w.layer_hits.clone();
@@ -945,6 +1374,7 @@ fn paint_real(hwnd: HWND) {
                 w.w.paint(&mut ui, &w.d, t, dt);
             }
             rt.SetTransform(&popup::IDENTITY);
+            if w.grip > 0.01 { draw_grip(&ui, ww, wh, w.grip); }
             let _ = s;
             rt.PopLayer();
             let anim = moving || w.w.animating(t) || w.dying.is_some();
@@ -969,8 +1399,178 @@ fn paint_real(hwnd: HWND) {
 fn hit_at(hwnd: HWND, x: i32, y: i32) -> Option<u32> {
     let s = scale(hwnd);
     let (x, y) = (x as f32 / s, y as f32 / s);
-    with_dw(hwnd, |w| w.hits.iter().rev().find(|(r, _)| x >= r.left && x <= r.right && y >= r.top && y <= r.bottom).map(|(_, i)| *i)).flatten()
+    with_dw(hwnd, |w| {
+        // El asa tapa lo que haya en la esquina
+        if in_grip(w, x, y) { return None; }
+        let (x, y) = w.to_lay(x, y);
+        w.hits.iter().rev().find(|(r, _)| x >= r.left && x <= r.right && y >= r.top && y <= r.bottom).map(|(_, i)| *i)
+    }).flatten()
 }
+
+/// a · b (primero a, luego b) para transformaciones 2D de Direct2D.
+fn mat_mul(a: &windows_numerics::Matrix3x2, b: &windows_numerics::Matrix3x2) -> windows_numerics::Matrix3x2 {
+    windows_numerics::Matrix3x2 {
+        M11: a.M11 * b.M11 + a.M12 * b.M21, M12: a.M11 * b.M12 + a.M12 * b.M22,
+        M21: a.M21 * b.M11 + a.M22 * b.M21, M22: a.M21 * b.M12 + a.M22 * b.M22,
+        M31: a.M31 * b.M11 + a.M32 * b.M21 + b.M31, M32: a.M31 * b.M12 + a.M32 * b.M22 + b.M32,
+    }
+}
+
+// ---------------------------------------------------------------- asa de redimensionar (F1)
+/// ¿El punto (DIP de la ventana) cae en el asa? Solo si el widget admite más de un tamaño.
+fn in_grip(w: &Dw, x: f32, y: f32) -> bool {
+    w.dying.is_none() && x >= w.dims.0 - GRIP && y >= w.dims.1 - GRIP && x <= w.dims.0 && y <= w.dims.1 && all_sizes(w.kind).len() > 1
+}
+
+/// Asa discreta de la esquina inferior derecha: una curva fina concéntrica con la esquina redondeada.
+fn draw_grip(ui: &Ui, w: f32, h: f32, a: f32) {
+    unsafe {
+        let Ok(fac) = ui.rt.GetFactory() else { return };
+        let Ok(geo) = fac.CreatePathGeometry() else { return };
+        let Ok(sk) = geo.Open() else { return };
+        // Centro de la esquina (radio 16) y radio del trazo, algo por dentro del borde
+        let (c, r) = (16.0f32, 11.0f32);
+        let (cx, cy) = (w - c, h - c);
+        let p = |deg: f32| { let t = deg.to_radians(); Vector2 { X: cx + r * t.cos(), Y: cy + r * t.sin() } };
+        sk.BeginFigure(p(10.0), D2D1_FIGURE_BEGIN_HOLLOW);
+        sk.AddArc(&D2D1_ARC_SEGMENT { point: p(80.0), size: D2D_SIZE_F { width: r, height: r }, rotationAngle: 0.0, sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE, arcSize: D2D1_ARC_SIZE_SMALL });
+        sk.EndFigure(D2D1_FIGURE_END_OPEN);
+        let _ = sk.Close();
+        let cap = fac.CreateStrokeStyle(&D2D1_STROKE_STYLE_PROPERTIES { startCap: D2D1_CAP_STYLE_ROUND, endCap: D2D1_CAP_STYLE_ROUND, ..Default::default() }, None).ok();
+        ui.rt.DrawGeometry(&geo, &ui.brush(popup::ink_color(ui.ink, 0.55 * a)), 2.2, cap.as_ref());
+    }
+}
+
+thread_local! {
+    /// Contornos fantasma abiertos (uno por arrastre) y su lienzo
+    static GHOSTS: RefCell<Vec<(HWND, Option<Gpu>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Ventana del contorno fantasma: capa transparente a los clics, justo encima del widget.
+fn ghost_new(over: HWND, r: RECT) -> HWND {
+    unsafe {
+        let hinst = GetModuleHandleW(None).unwrap();
+        let Ok(g) = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP | WS_EX_TRANSPARENT, w!("MacBarDeskGhost"), w!("macbar"), WS_POPUP,
+            r.left, r.top, r.right - r.left, r.bottom - r.top, None, None, Some(hinst.into()), None) else { return HWND::default() };
+        GHOSTS.with(|v| v.borrow_mut().push((g, None)));
+        // Justo por encima del widget (debajo de la ventana que tuviera encima)
+        let after = if std::env::var_os("MACBAR_WIDGETS").is_some() { HWND_TOPMOST } else {
+            let prev = GetWindow(over, GW_HWNDPREV).unwrap_or_default();
+            if prev.0.is_null() { HWND_TOP } else { prev }
+        };
+        let _ = SetWindowPos(g, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        g
+    }
+}
+
+fn ghost_paint(g: HWND) {
+    unsafe {
+        let mut ps = PAINTSTRUCT::default();
+        BeginPaint(g, &mut ps);
+        GHOSTS.with(|v| {
+            let mut v = v.borrow_mut();
+            let Some(e) = v.iter_mut().find(|e| e.0 == g) else { return };
+            if e.1.is_none() { e.1 = make_target(g); }
+            let Some(gpu) = e.1.as_ref() else { return };
+            let s = scale(g);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(g, &mut rc);
+            let (w, h) = (rc.right as f32 / s, rc.bottom as f32 / s);
+            let dc = &gpu.dc;
+            dc.BeginDraw();
+            dc.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
+            let fill = dc.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 0.04), None).ok();
+            let line = dc.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 0.62), None).ok();
+            let r = rrect(rect(1.0, 1.0, w - 1.0, h - 1.0), 16.0);
+            if let Some(b) = fill { dc.FillRoundedRectangle(&r, &b); }
+            if let Some(b) = line { dc.DrawRoundedRectangle(&r, &b, 1.5, None); }
+            if dc.EndDraw(None, None).is_err() || gpu.swap.Present(0, DXGI_PRESENT(0)).is_err() { e.1 = None; }
+        });
+        let _ = EndPaint(g, &ps);
+    }
+}
+
+unsafe extern "system" fn ghost_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_PAINT => { ghost_paint(hwnd); LRESULT(0) }
+            WM_ERASEBKGND => LRESULT(1),
+            WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            // Otro tamaño: el lienzo se rehace con las medidas nuevas
+            WM_SIZE => { GHOSTS.with(|v| { if let Some(e) = v.borrow_mut().iter_mut().find(|e| e.0 == hwnd) { e.1 = None; } }); let _ = InvalidateRect(Some(hwnd), None, false); LRESULT(0) }
+            WM_DESTROY => { GHOSTS.with(|v| v.borrow_mut().retain(|e| e.0 != hwnd)); LRESULT(0) }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// Empieza a arrastrar el asa (o, de prueba, deja puesto el contorno apuntando a `fake`).
+fn resize_begin(hwnd: HWND, fake: Option<Sz>) {
+    let Some(k) = with_dw(hwnd, |w| w.kind) else { return };
+    let r = win_rect(hwnd);
+    let ghost = ghost_new(hwnd, r);
+    let cur = sz(k);
+    with_dw(hwnd, |w| { w.resize = Some(Resize { origin: POINT { x: r.left, y: r.top }, target: cur, ghost, fake: fake.is_some() }); w.pressed = None; w.hover = None; });
+    unsafe {
+        if let Some(t) = fake { resize_target(hwnd, t); }
+        else { SetCapture(hwnd); SetTimer(Some(hwnd), TIMER_RESIZE, 30, None); }
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+}
+
+/// El imán: el contorno salta al tamaño admitido cuya esquina queda más cerca del cursor.
+fn resize_move(hwnd: HWND) {
+    let Some((rs, k)) = with_dw(hwnd, |w| w.resize.map(|r| (r, w.kind))).flatten() else { return };
+    if rs.fake { return; }
+    let mut c = POINT::default();
+    unsafe { let _ = GetCursorPos(&mut c); }
+    let s = scale(hwnd);
+    let d = ((c.x - rs.origin.x) as f32 / s, (c.y - rs.origin.y) as f32 / s);
+    let t = nearest_corner(d, &all_sizes(k));
+    if t != rs.target { resize_target(hwnd, t); }
+}
+
+fn resize_target(hwnd: HWND, t: Sz) {
+    let Some(rs) = with_dw(hwnd, |w| { if let Some(r) = w.resize.as_mut() { r.target = t; } w.resize }).flatten() else { return };
+    let s = scale(hwnd);
+    let (w, h) = t.dims();
+    unsafe {
+        let _ = SetWindowPos(rs.ghost, None, rs.origin.x, rs.origin.y, (w * s) as i32, (h * s) as i32, SWP_NOZORDER | SWP_NOACTIVATE);
+        let _ = InvalidateRect(Some(rs.ghost), None, false);
+    }
+}
+
+/// Fin del arrastre del asa: al soltar (`commit`) pasa al tamaño del contorno; con Esc, nada.
+fn resize_end(hwnd: HWND, commit: bool) {
+    let Some((rs, k)) = with_dw(hwnd, |w| w.resize.take().map(|r| (r, w.kind))).flatten() else { return };
+    unsafe {
+        let _ = KillTimer(Some(hwnd), TIMER_RESIZE);
+        let _ = DestroyWindow(rs.ghost);
+        if !rs.fake && GetCapture() == hwnd { let _ = ReleaseCapture(); }
+        let _ = InvalidateRect(Some(hwnd), None, false);
+    }
+    if commit && rs.target != sz(k) { set_sz(k, rs.target); }
+}
+
+/// Prueba visual: `MACBAR_SZ_GHOST=tiempo:grande` deja el asa encendida y el contorno fantasma de ese
+/// tamaño sobre el widget, como a mitad de un arrastre (sin tocar el ratón). Con `!` al final
+/// (`tiempo:grande!`) además «suelta» a los 3 s: cambia de tamaño de verdad (guarda en widgets.ini).
+fn ghost_test() {
+    let Ok(spec) = std::env::var("MACBAR_SZ_GHOST") else { return };
+    let commit = spec.contains('!');
+    let spec = spec.replace('!', "");
+    for k in ALL {
+        let Some(t) = env_sz_in(&spec, k.key()) else { continue };
+        if !spec.split(',').any(|p| p.split_once(':').is_some_and(|(a, _)| a.trim() == k.key())) { continue; }
+        let Some(h) = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| w.hwnd)) else { continue };
+        with_dw(h, |w| w.grip_on = true);
+        resize_begin(h, Some(t));
+        if commit { unsafe { SetTimer(Some(h), TIMER_GHOST_DROP, 3000, None); } }
+    }
+}
+
+const TIMER_GHOST_DROP: usize = 6;
 
 fn lp_xy(lp: LPARAM) -> (i32, i32) { ((lp.0 & 0xFFFF) as i16 as i32, ((lp.0 >> 16) & 0xFFFF) as i16 as i32) }
 
@@ -1003,7 +1603,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 // Siempre justo encima del fondo: nunca por delante de una ventana normal
                 let pos = &mut *(lp.0 as *mut WINDOWPOS);
                 if std::env::var_os("MACBAR_WIDGETS").is_some() { pos.hwndInsertAfter = HWND_TOPMOST; pos.flags &= !SWP_NOZORDER; return LRESULT(0); }
-                let dragging = with_dw(hwnd, |w| w.drag.is_some()).unwrap_or(false);
+                let dragging = with_dw(hwnd, |w| w.drag.is_some() || w.resize.is_some()).unwrap_or(false);
                 if !dragging {
                     // Los widgets forman un bloque justo encima del escritorio. Si este ya está en el
                     // bloque no se mueve; si no, se mete debajo de la primera ventana que no sea widget.
@@ -1025,6 +1625,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_TIMER => {
                 match wp.0 {
                     TIMER_FRAME => { let _ = KillTimer(Some(hwnd), TIMER_FRAME); let _ = InvalidateRect(Some(hwnd), None, false); }
+                    // Arrastrando el asa: Esc lo cancela (el widget no tiene el foco del teclado)
+                    TIMER_RESIZE => { if GetAsyncKeyState(VK_ESCAPE.0 as i32) < 0 { resize_end(hwnd, false); } }
+                    // Prueba (`MACBAR_SZ_GHOST=…!`): suelta el asa de mentira
+                    TIMER_GHOST_DROP => { let _ = KillTimer(Some(hwnd), TIMER_GHOST_DROP); with_dw(hwnd, |w| w.grip_on = false); resize_end(hwnd, true); }
                     TIMER_SEC => {
                         let r = with_dw(hwnd, |w| w.w.tick()).unwrap_or(false);
                         let hidden = covered_w(hwnd);
@@ -1080,6 +1684,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let mut r = RECT::default();
                 let _ = GetWindowRect(hwnd, &mut r);
                 let (x, y) = lp_xy(lp);
+                // En el asa de la esquina: redimensionar en vez de mover
+                let s = scale(hwnd);
+                if with_dw(hwnd, |w| w.resize.is_none() && w.morph.is_none() && in_grip(w, x as f32 / s, y as f32 / s)).unwrap_or(false) {
+                    resize_begin(hwnd, None);
+                    return LRESULT(0);
+                }
                 let id = hit_at(hwnd, x, y);
                 with_dw(hwnd, |w| { w.drag = Some((c, POINT { x: r.left, y: r.top }, false)); w.pressed = id; w.glide = None; });
                 SetCapture(hwnd);
@@ -1087,6 +1697,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             WM_MOUSEMOVE => {
+                if with_dw(hwnd, |w| w.resize.is_some_and(|r| !r.fake)).unwrap_or(false) { resize_move(hwnd); return LRESULT(0); }
                 let drag = with_dw(hwnd, |w| w.drag).flatten();
                 if let Some((c0, w0, moved)) = drag {
                     let mut c = POINT::default();
@@ -1104,14 +1715,38 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let (x, y) = lp_xy(lp);
                 let h = hit_at(hwnd, x, y);
                 let s = scale(hwnd);
-                let ch = with_dw(hwnd, |w| { let c = w.hover != h; w.hover = h; w.mouse = (x as f32 / s, y as f32 / s); c || w.w.follows_mouse() }).unwrap_or(false);
+                let ch = with_dw(hwnd, |w| {
+                    let g = in_grip(w, x as f32 / s, y as f32 / s) || w.resize.is_some();
+                    let c = w.hover != h || w.grip_on != g;
+                    w.hover = h;
+                    w.grip_on = g;
+                    w.mouse = w.to_lay(x as f32 / s, y as f32 / s);
+                    c || w.w.follows_mouse()
+                }).unwrap_or(false);
                 if ch { let _ = InvalidateRect(Some(hwnd), None, false); }
                 let mut tme = TRACKMOUSEEVENT { cbSize: size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
                 let _ = TrackMouseEvent(&mut tme);
                 LRESULT(0)
             }
-            WM_MOUSELEAVE => { with_dw(hwnd, |w| { w.hover = None; w.mouse = (-1.0, -1.0); }); let _ = InvalidateRect(Some(hwnd), None, false); LRESULT(0) }
+            WM_MOUSELEAVE => { with_dw(hwnd, |w| { w.hover = None; w.mouse = (-1.0, -1.0); if w.resize.is_none() { w.grip_on = false; } }); let _ = InvalidateRect(Some(hwnd), None, false); LRESULT(0) }
+            WM_SETCURSOR => {
+                // Cursor de redimensionar sobre el asa y mientras se arrastra
+                let mut c = POINT::default();
+                let _ = GetCursorPos(&mut c);
+                let r = win_rect(hwnd);
+                let s = scale(hwnd);
+                let on = with_dw(hwnd, |w| w.resize.is_some_and(|r| !r.fake) || in_grip(w, (c.x - r.left) as f32 / s, (c.y - r.top) as f32 / s)).unwrap_or(false);
+                if on { if let Ok(cur) = LoadCursorW(None, IDC_SIZENWSE) { SetCursor(Some(cur)); return LRESULT(1); } }
+                DefWindowProcW(hwnd, msg, wp, lp)
+            }
+            WM_CAPTURECHANGED => {
+                // Otra ventana se llevó el ratón a mitad del arrastre del asa: se cancela
+                if HWND(lp.0 as _) != hwnd && with_dw(hwnd, |w| w.resize.is_some_and(|r| !r.fake)).unwrap_or(false) { resize_end(hwnd, false); }
+                LRESULT(0)
+            }
+            WM_KEYDOWN if wp.0 == VK_ESCAPE.0 as usize => { resize_end(hwnd, false); LRESULT(0) }
             WM_LBUTTONUP => {
+                if with_dw(hwnd, |w| w.resize.is_some_and(|r| !r.fake)).unwrap_or(false) { resize_end(hwnd, true); return LRESULT(0); }
                 let _ = ReleaseCapture();
                 let drag = with_dw(hwnd, |w| { w.pressed = None; w.drag.take() }).flatten();
                 let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1119,6 +1754,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     let mut r = RECT::default();
                     let _ = GetWindowRect(hwnd, &mut r);
                     let (x, y) = snapped(hwnd, r.left, r.top);
+                    // Nunca encima de otro widget ni fuera del área de trabajo
+                    let (x, y) = free_spot(Some(hwnd), x, y, r.right - r.left, r.bottom - r.top);
                     let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                     // En vez de saltar al imán, se desliza hasta él (y se guarda al llegar)
                     with_dw(hwnd, |w| w.glide = Some((POINT { x: r.left, y: r.top }, POINT { x, y }, Instant::now())));
@@ -1157,7 +1794,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
 fn click(hwnd: HWND, x: i32, y: i32, right: bool) {
     let id = hit_at(hwnd, x, y);
     let s = scale(hwnd);
-    CLICK_AT.with(|c| c.set((x as f32 / s, y as f32 / s)));
+    let at = with_dw(hwnd, |w| w.to_lay(x as f32 / s, y as f32 / s)).unwrap_or((x as f32 / s, y as f32 / s));
+    CLICK_AT.with(|c| c.set(at));
     let mut pt = POINT { x, y };
     unsafe { let _ = ClientToScreen(hwnd, &mut pt); }
     let act = with_dw(hwnd, |w| w.w.click(id, right, pt)).flatten();
@@ -1168,27 +1806,61 @@ fn click(hwnd: HWND, x: i32, y: i32, right: bool) {
             let Some(kind) = with_dw(hwnd, |w| w.kind) else { return };
             let others: Vec<(usize, &str)> = ALL.iter().enumerate().filter(|(_, k)| !shown(**k)).map(|(i, k)| (i, k.label())).collect();
             // Cada entrada con lo que hace: quitar, estilo, diseños de este widget y añadir otros
-            enum Do { Remove, Style, Design(usize), Add(usize), Nothing }
+            enum Do { Remove, Style, Size, Design(usize), Add(usize), Nothing }
             let mut items: Vec<(String, Do)> = vec![(i18n::tf("Quitar «{}»", &[&kind.label()]), Do::Remove), (if floating() { i18n::t("Con fondo").into() } else { i18n::t("Sin fondo (flotantes)").into() }, Do::Style)];
+            // Submenú «Tamaño» con los tamaños que admite (marcado el actual)
+            let szs = all_sizes(kind);
+            let cur_sz = sz(kind);
+            let sub: Vec<String> = szs.iter().map(|z| format!("{}{}", if *z == cur_sz { "✓  " } else { "      " }, i18n::t(z.name()))).collect();
+            if szs.len() > 1 { items.push((String::new(), Do::Nothing)); items.push((i18n::t("Tamaño").into(), Do::Size)); }
+            // Solo los diseños que admiten el tamaño actual
             let vs = variants(kind);
-            if vs.len() > 1 {
+            let comp = compatible_variants(kind, cur_sz);
+            if comp.len() > 1 {
                 items.push((String::new(), Do::Nothing));
                 let cur = variant(kind);
-                for (n, v) in vs.iter().enumerate() { items.push((format!("{}{}", if n == cur { "✓  " } else { "      " }, i18n::tf("Diseño «{}»", &[&i18n::t(v)])), Do::Design(n))); }
+                for n in comp { items.push((format!("{}{}", if n == cur { "✓  " } else { "      " }, i18n::tf("Diseño «{}»", &[&i18n::t(vs[n])])), Do::Design(n))); }
             }
             if !others.is_empty() { items.push((String::new(), Do::Nothing)); for (i, l) in &others { items.push((i18n::tf("Añadir «{}»", &[l]), Do::Add(*i))); } }
-            let refs: Vec<&str> = items.iter().map(|s| s.0.as_str()).collect();
-            match context_menu(&refs, pt).and_then(|n| items.get(n)).map(|x| &x.1) {
-                Some(Do::Remove) => { if let Some(i) = ALL.iter().position(|k| *k == kind) { toggle_kind(i); } return; }
-                Some(Do::Style) => toggle_style(),
-                Some(Do::Design(n)) => { set_variant(kind, *n); return; }
-                Some(Do::Add(i)) => toggle_kind(*i),
+            let tree: Vec<(&str, &[String])> = items.iter().map(|s| (s.0.as_str(), if matches!(s.1, Do::Size) { &sub[..] } else { &[][..] })).collect();
+            match context_menu_tree(&tree, pt).and_then(|(n, j)| items.get(n).map(|x| (&x.1, j))) {
+                Some((Do::Remove, _)) => { if let Some(i) = ALL.iter().position(|k| *k == kind) { toggle_kind(i); } return; }
+                Some((Do::Style, _)) => toggle_style(),
+                Some((Do::Size, Some(j))) => { if let Some(z) = szs.get(j) { set_sz(kind, *z); } return; }
+                Some((Do::Design(n), _)) => { set_variant(kind, *n); return; }
+                Some((Do::Add(i), _)) => toggle_kind(*i),
                 _ => {}
             }
         }
         None => {}
     }
     unsafe { let _ = InvalidateRect(Some(hwnd), None, false); }
+}
+
+/// Menú contextual nativo con submenús: cada entrada es (texto, hijos); con hijos es un submenú.
+/// Texto vacío = separador. Devuelve (índice de la entrada, índice del hijo si era un submenú).
+pub fn context_menu_tree(items: &[(&str, &[String])], pt: POINT) -> Option<(usize, Option<usize>)> {
+    unsafe {
+        let h = CreatePopupMenu().ok()?;
+        for (i, (it, kids)) in items.iter().enumerate() {
+            if it.is_empty() { let _ = AppendMenuW(h, MF_SEPARATOR, 0, None); continue; }
+            let label = HSTRING::from(it.replace('&', "&&"));
+            if kids.is_empty() { let _ = AppendMenuW(h, MF_STRING, (i + 1) << 8, &label); continue; }
+            let Ok(sub) = CreatePopupMenu() else { continue };
+            for (j, k) in kids.iter().enumerate() { let _ = AppendMenuW(sub, MF_STRING, ((i + 1) << 8) | (j + 1), &HSTRING::from(k.replace('&', "&&"))); }
+            let _ = AppendMenuW(h, MF_POPUP, sub.0 as usize, &label);
+        }
+        let owner = bar_hwnd();
+        let _ = SetForegroundWindow(owner);
+        let cmd = TrackPopupMenu(h, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, Some(0), owner, None);
+        let _ = PostMessageW(Some(owner), WM_NULL, WPARAM(0), LPARAM(0));
+        // (destruye también los submenús)
+        let _ = DestroyMenu(h);
+        let c = cmd.0 as usize;
+        if c == 0 { return None; }
+        let (i, j) = ((c >> 8).checked_sub(1)?, c & 0xFF);
+        Some((i, j.checked_sub(1)))
+    }
 }
 
 /// Menú contextual nativo (oscuro). Devuelve el índice elegido.
@@ -1206,6 +1878,118 @@ pub fn context_menu(items: &[&str], pt: POINT) -> Option<usize> {
         let _ = DestroyMenu(h);
         let i = cmd.0 as usize;
         (i > 0).then(|| i - 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn r(l: i32, t: i32, w: i32, h: i32) -> RECT { RECT { left: l, top: t, right: l + w, bottom: t + h } }
+
+    #[test]
+    fn medidas_de_la_rejilla() {
+        let d: Vec<(f32, f32)> = Sz::ALL.iter().map(|z| z.dims()).collect();
+        assert_eq!(d, vec![(170.0, 170.0), (360.0, 170.0), (740.0, 170.0), (170.0, 360.0), (360.0, 360.0), (360.0, 550.0), (740.0, 360.0)]);
+        // Las claves del ini van y vuelven, y se admite la eñe y mayúsculas
+        for z in Sz::ALL { assert_eq!(Sz::from_key(z.key()), Some(z)); }
+        assert_eq!(Sz::from_key(" Pequeño "), Some(Sz::Pequeno));
+        assert_eq!(Sz::from_key("gigante"), None);
+    }
+
+    #[test]
+    fn migracion_al_tamano_mas_cercano() {
+        let m = |k: Kind| nearest(legacy_size(k, 0), sizes(k, 0));
+        assert_eq!(m(Kind::Weather), Sz::Extragrande); // 640×344
+        assert_eq!(m(Kind::Music), Sz::Extragrande); // 640×340
+        assert_eq!(m(Kind::Calendar), Sz::Grande); // 380×350
+        assert_eq!(m(Kind::Phone), Sz::Grande); // 330×380
+        assert_eq!(m(Kind::Clocks), Sz::Mediano); // 380×170
+        assert_eq!(m(Kind::Countdown), Sz::Mediano); // 300×170
+        assert_eq!(m(Kind::Photos), Sz::Grande); // 380×260
+        // La tabla de los diseños alternativos es justo el más cercano de los siete a su tamaño de siempre
+        for k in ALL {
+            for v in 1..variants(k).len() {
+                assert_eq!(sizes(k, v), &[nearest(legacy_size(k, v), &Sz::ALL)], "{k:?} diseño {v}");
+            }
+        }
+        // El Móvil no admite Banda ni Extragrande; los clásicos, todo lo demás
+        assert!(!sizes(Kind::Phone, 0).contains(&Sz::Banda) && !all_sizes(Kind::Phone).contains(&Sz::Extragrande));
+        assert_eq!(all_sizes(Kind::Weather).len(), 7);
+        // Un tamaño guardado que el diseño no admite se cambia por el más parecido que sí
+        assert_eq!(nearest(Sz::Grande.dims(), sizes(Kind::Weather, 1)), Sz::Mediano);
+    }
+
+    #[test]
+    fn lectura_del_ini_y_del_entorno() {
+        let txt = "activados = 1\ntam_tiempo = mediano\ntam_musica=Pequeño\ntam_bolsa = nada\n";
+        let get = |k: &str| ini_get(txt, &format!("tam_{k}")).and_then(|v| Sz::from_key(&v));
+        assert_eq!(get("tiempo"), Some(Sz::Mediano));
+        assert_eq!(get("musica"), Some(Sz::Pequeno));
+        assert_eq!(get("bolsa"), None);
+        assert_eq!(get("sistema"), None);
+        assert_eq!(env_sz_in("grande", "tiempo"), Some(Sz::Grande));
+        assert_eq!(env_sz_in("tiempo:pequeno,musica:mediano", "musica"), Some(Sz::Mediano));
+        assert_eq!(env_sz_in("tiempo:pequeno,musica:mediano", "sistema"), None);
+        // Uno general y otro concreto: manda el concreto
+        assert_eq!(env_sz_in("grande, tiempo:pequeno", "tiempo"), Some(Sz::Pequeno));
+        assert_eq!(env_sz_in("grande, tiempo:pequeno", "sistema"), Some(Sz::Grande));
+    }
+
+    #[test]
+    fn iman_del_asa() {
+        let all = Sz::ALL;
+        assert_eq!(nearest_corner((180.0, 160.0), &all), Sz::Pequeno);
+        assert_eq!(nearest_corner((700.0, 150.0), &all), Sz::Banda);
+        assert_eq!(nearest_corner((380.0, 600.0), &all), Sz::Columna);
+        // Solo entre los admitidos
+        assert_eq!(nearest_corner((740.0, 360.0), sizes(Kind::Phone, 0)), Sz::Grande);
+    }
+
+    #[test]
+    fn colocacion_sin_solapes() {
+        let wa = r(0, 0, 1000, 800);
+        // Libre: se queda donde quiere
+        assert_eq!(resolve(r(100, 100, 200, 200), wa, &[r(400, 100, 100, 100)], 16), (100, 100));
+        // Tocarse no es pisarse
+        assert_eq!(resolve(r(100, 100, 200, 200), wa, &[r(300, 100, 100, 100)], 16), (100, 100));
+        // Pisa a otro: va al hueco libre más cercano, a `gap` de él
+        let o = [r(250, 100, 300, 300)];
+        let (x, y) = resolve(r(100, 100, 200, 200), wa, &o, 16);
+        assert!(!overlaps(&r(x, y, 200, 200), &o[0]));
+        assert_eq!((x, y), (34, 100));
+        // Rodeado por varios: ninguno se pisa y sigue dentro del área
+        let os = [r(0, 0, 400, 400), r(420, 0, 400, 400), r(0, 420, 400, 380)];
+        let (x, y) = resolve(r(50, 50, 300, 300), wa, &os, 16);
+        assert!(os.iter().all(|o| !overlaps(&r(x, y, 300, 300), o)));
+        assert!(x >= wa.left && y >= wa.top && x + 300 <= wa.right && y + 300 <= wa.bottom);
+        // Sin sitio en ningún lado: dentro del área aunque pise
+        assert_eq!(resolve(r(500, 500, 300, 300), wa, &[r(0, 0, 1000, 800)], 16), (500, 500));
+    }
+
+    #[test]
+    fn se_mete_dentro_del_area_de_trabajo() {
+        let wa = r(0, 40, 1920, 1000); // la barra arriba
+        assert_eq!(resolve(r(1800, 900, 360, 360), wa, &[], 16), (1560, 680));
+        assert_eq!(resolve(r(-50, 0, 170, 170), wa, &[], 16), (0, 40));
+        // Segundo monitor a la izquierda (coordenadas negativas)
+        let wa2 = r(-1280, 0, 1280, 1024);
+        assert_eq!(resolve(r(-100, 900, 360, 360), wa2, &[], 16), (-360, 664));
+        // Más grande que el área: pegado arriba a la izquierda
+        assert_eq!(resolve(r(10, 10, 2000, 200), wa, &[], 16), (0, 40));
+    }
+
+    #[test]
+    fn escala_provisional_y_muelle() {
+        // Maqueta de 640×344 en un Pequeño: escala uniforme y centrada en vertical
+        let (k, ox, oy) = fit((170.0, 170.0), (640.0, 344.0));
+        assert!((k - 170.0 / 640.0).abs() < 1e-5 && ox.abs() < 1e-3 && (oy - (170.0 - 344.0 * k) / 2.0).abs() < 1e-3);
+        assert_eq!(fit((360.0, 360.0), (360.0, 360.0)), (1.0, 0.0, 0.0));
+        assert_eq!(spring_k(0.0), 0.0);
+        assert_eq!(spring_k(MORPH_S), 1.0);
+        let peak = (0..65).map(|i| spring_k(i as f32 * 0.01)).fold(0.0f32, f32::max);
+        assert!(peak > 1.0 && peak < 1.08, "rebote {peak}");
+        assert!((spring_k(MORPH_S - 0.001) - 1.0).abs() < 0.01);
     }
 }
 

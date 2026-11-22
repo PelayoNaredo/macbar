@@ -2,7 +2,7 @@
 //! y cuenta atrás de paletas. Como los de `deskv`, cada uno es otro `Widget` con su tamaño (`desk::size`).
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
 use deskw::Widget;
 use popup::Ui;
 use std::f32::consts::TAU;

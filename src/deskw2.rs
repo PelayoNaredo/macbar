@@ -1,7 +1,7 @@
 //! Widgets nuevos del escritorio: visualizador de audio y marco de fotos.
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
 use deskw::{header, Widget};
 use popup::Ui;
 

@@ -217,7 +217,7 @@ struct CardFonts { clock: IDWriteTextFormat, icon_s: IDWriteTextFormat, big: IDW
     i_title: IDWriteTextFormat, i_small: IDWriteTextFormat, i_icon: IDWriteTextFormat }
 
 /// ¿Windows tiene desactivadas las animaciones? (Accesibilidad > Efectos visuales; MACBAR_REDUCED=1 lo simula)
-fn reduced_motion() -> bool {
+pub(crate) fn reduced_motion() -> bool {
     if std::env::var_os("MACBAR_REDUCED").is_some() { return true; }
     let mut on = windows::core::BOOL(1);
     unsafe { let _ = SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, Some(&mut on as *mut _ as _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }

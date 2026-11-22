@@ -1,10 +1,11 @@
 //! Los seis widgets grandes del escritorio: calendario, tiempo, música con letra en vivo, sistema,
 //! almacenamiento con papelera y proyectos (en local y en GitHub).
-//! Cada uno tiene su propio tamaño (`desk::size`); dentro de cada widget, `W` y `H` son los suyos.
+//! Cada uno maqueta con sus medidas (`size`, que aquí es `desk::layout_size`); dentro de cada widget,
+//! `W` y `H` son las suyas. Para que un widget cambie su contenido según el tamaño, ver `Widget::layouts`.
 #![allow(non_snake_case)]
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
 use deskdata::*;
 use popup::Ui;
 use std::os::windows::process::CommandExt;
@@ -54,6 +55,18 @@ pub trait Widget {
     fn paint_live(&mut self, _ui: &mut Ui, _d: &DFonts, _t: f32, _dt: f32) {}
     /// true si hay que repintar con cada movimiento del ratón (sondas que siguen al cursor).
     fn follows_mouse(&self) -> bool { false }
+    /// true si el widget ya maqueta con su tamaño real (`desk::Sz`), es decir, es **responsive**.
+    ///
+    /// - false (por defecto): sigue pintando con sus medidas de siempre (`size(Kind::X)` en estos
+    ///   ficheros es `desk::layout_size`, que entonces devuelve `desk::legacy_size`) y `desk` lo escala
+    ///   sin deformar y centrado para caber en el tamaño elegido. Provisional hasta F2-F5.
+    /// - true: `size(Kind::X)` pasa a devolver las medidas reales del tamaño elegido y no se escala
+    ///   nada. El widget decide qué bloques caben con `let l = desk::lay(Kind::X);` y
+    ///   `match l.sz { Sz::Pequeno => …, Sz::Mediano => …, … }`, con los ayudantes de `desk::Lay`
+    ///   (`PAD` = 20, `inner()`, `is_wide()`, `is_tall()`, `cols()`, `rows()`, `cell(c, r, nc, nr)`).
+    ///   Al cambiar de tamaño se crea un widget nuevo (`deskw::new`), así que el estado que dependa
+    ///   del tamaño puede calcularse al construirlo o en cada `paint`.
+    fn layouts(&self) -> bool { false }
 }
 
 // ---------------------------------------------------------------- piezas animadas comunes

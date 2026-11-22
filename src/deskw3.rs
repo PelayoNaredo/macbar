@@ -1,7 +1,7 @@
 //! Más widgets del escritorio: relojes del mundo, tareas y cuenta atrás.
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
 use deskw::{header, Widget};
 use popup::Ui;
 use std::f32::consts::{PI, TAU};
