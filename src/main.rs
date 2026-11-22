@@ -46,6 +46,7 @@ mod deskdata;
 mod deskw;
 mod deskw2;
 mod deskw3;
+mod deskv;
 mod audioviz;
 mod audioout;
 mod dnd;

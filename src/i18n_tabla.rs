@@ -524,4 +524,11 @@ pub static EN: &[(&str, &str)] = &[
     ("No sale en capturas ni al compartir pantalla", "Hidden from screenshots and screen sharing"),
     ("Cierra la barra, la isla y los widgets", "Closes the bar, the island and the widgets"),
     ("Salir", "Quit"),
+    ("Diseño", "Design"),
+    ("Diseño «{}»", "«{}» design"),
+    ("Clásico", "Classic"),
+    ("Cielo", "Sky"),
+    ("Mínimo", "Minimal"),
+    ("Anillos", "Rings"),
+    ("Carátula", "Cover"),
 ];

@@ -65,7 +65,7 @@ impl Sec {
 enum Row {
     Autostart, Lang, Position, Solid, Accent, Present,
     CardClick, CardHover, CardGlance, Cpu,
-    Widgets, Widget(usize), Style, Ink, FaceDbl,
+    Widgets, Widget(usize), Design(usize), Style, Ink, FaceDbl,
     Profile, ProfileSave, ProfileDir, Theme,
     City, Refresh,
     Version, Repo, Folder, Quit,
@@ -88,7 +88,12 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
         ],
         Sec::Desk => vec![
             (None, vec![Widgets]),
-            (Some("Widgets"), (0..n_widgets).map(Widget).collect()),
+            // Cada widget y, debajo, su diseño si tiene más de uno
+            (Some("Widgets"), (0..n_widgets).flat_map(|i| {
+                let mut v = vec![Widget(i)];
+                if desk::variant_items().get(i).is_some_and(|d| d.0.len() > 1) { v.push(Design(i)); }
+                v
+            }).collect()),
             (Some("Aspecto"), vec![Style, Ink]),
             (Some("Doble escritorio"), vec![Face, FaceDbl]),
         ],
@@ -140,6 +145,7 @@ struct State {
     cpu: usize,
     widgets: bool,
     each: Vec<(&'static str, bool)>,
+    designs: Vec<(&'static [&'static str], usize)>,
     floating: bool,
     ink: i8,
     face_dbl: bool,
@@ -165,6 +171,7 @@ fn read() -> State {
         cpu: cpu_index(sys::config_value("alerta_cpu").as_deref()),
         widgets: desk::enabled(),
         each: desk::menu_items(),
+        designs: desk::variant_items(),
         floating: desk::floating(),
         ink: desk::ink_mode(),
         face_dbl: caras::on(),
@@ -196,6 +203,7 @@ enum Act {
     EditConfig,
     EditCity,
     SaveCity,
+    Design(usize, usize),
     Nothing,
 }
 
@@ -219,6 +227,7 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
         Cpu => match pick(4) { Some(i) if i as usize != st.cpu => Act::Cpu(i as usize), _ => Act::Nothing },
         Widgets if sub == 0 => Act::Bar(crate::BAR_WIDGETS),
         Widget(i) if sub == 0 && st.widgets && i < st.each.len() => Act::Bar(crate::BAR_WIDGET0 + i as u32),
+        Design(i) => match (pick(st.designs.get(i).map(|d| d.0.len() as u32).unwrap_or(0)), st.designs.get(i)) { (Some(n), Some(d)) if n as usize != d.1 => Act::Design(i, n as usize), _ => Act::Nothing },
         Style => match pick(2) { Some(i) if (i == 0) != st.floating => Act::Style, _ => Act::Nothing },
         Ink => match pick(3) { Some(i) if INK_ORDER[i as usize] as i8 != st.ink => Act::Bar(crate::BAR_INK0 + INK_ORDER[i as usize]), _ => Act::Nothing },
         FaceDbl if sub == 0 => Act::FaceDbl,
@@ -284,6 +293,11 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
         Widget(i) => {
             let (label, on) = st.each.get(i).copied().unwrap_or(("", false));
             (label.to_string(), String::new(), Ctl::Switch(on && st.widgets), st.widgets)
+        }
+        Design(i) => {
+            let (names, cur) = st.designs.get(i).copied().unwrap_or((&["Clásico"], 0));
+            let on = st.widgets && st.each.get(i).is_some_and(|e| e.1);
+            (format!("      {}", t("Diseño")), String::new(), seg(names, Some(cur)), on)
         }
         Style => (t("Estilo"), t("Flotantes sin fondo o tarjetas de cristal"), seg(&["Flotante", "Tarjeta"], Some(!st.floating as usize)), true),
         Ink => {
@@ -422,6 +436,7 @@ impl Settings {
             // Lo mismo que la opción del menú (menus::A::Autostart)
             Act::Autostart(on) => Re::Run(Box::new(move || sys::set_autostart(on))),
             Act::Style => Re::Run(Box::new(desk::toggle_style)),
+            Act::Design(i, n) => Re::Run(Box::new(move || desk::set_variant_i(i, n))),
             Act::FaceDbl => Re::Run(Box::new(caras::toggle)),
             Act::Cpu(i) => Re::Run(Box::new(move || sys::set_config_value("alerta_cpu", &cpu_value(i).to_string()))),
             Act::SaveProfile => Re::Run(Box::new(profiles::save_active)),

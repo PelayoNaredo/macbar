@@ -59,7 +59,7 @@ pub trait Widget {
 // ---------------------------------------------------------------- piezas animadas comunes
 /// Texto que "rueda" al cambiar: el viejo sube y se desvanece mientras el nuevo entra desde abajo.
 #[derive(Default)]
-struct Roll { cur: String, prev: String, at: Option<Instant> }
+pub(crate) struct Roll { cur: String, prev: String, at: Option<Instant> }
 
 const ROLL_S: f32 = 0.42;
 
@@ -71,9 +71,9 @@ impl Roll {
         }
     }
     fn k(&self) -> f32 { self.at.map(|a| (a.elapsed().as_secs_f32() / ROLL_S).min(1.0)).unwrap_or(1.0) }
-    fn busy(&self) -> bool { self.k() < 1.0 }
+    pub(crate) fn busy(&self) -> bool { self.k() < 1.0 }
     /// Dibuja alineado a la izquierda (`right` = false) o a la derecha.
-    fn draw(&mut self, ui: &Ui, f: &IDWriteTextFormat, s: &str, x: f32, top: f32, bh: f32, b: &ID2D1Brush, right: bool) {
+    pub(crate) fn draw(&mut self, ui: &Ui, f: &IDWriteTextFormat, s: &str, x: f32, top: f32, bh: f32, b: &ID2D1Brush, right: bool) {
         self.set(s);
         let k = self.k();
         let e = popup::ease_out(k);
@@ -103,9 +103,10 @@ fn pbutton(ui: &mut Ui, r: D2D_RECT_F, glyph: Option<&str>, label: &str, id: u32
 
 pub fn new(k: Kind) -> Box<dyn Widget> {
     match k {
-        Kind::Calendar => Box::new(CalendarW::default()),
-        Kind::Weather => Box::new(WeatherW::default()),
-        Kind::Music => Box::new(MusicW::default()),
+        Kind::Calendar => if desk::variant(k) == 1 { Box::new(crate::deskv::TodayW) } else { Box::new(CalendarW::default()) },
+        Kind::Weather => match desk::variant(k) { 1 => Box::new(crate::deskv::SkyW), 2 => Box::new(crate::deskv::MinWeatherW::default()), _ => Box::new(WeatherW::default()) },
+        Kind::Music => if desk::variant(k) == 1 { Box::new(crate::deskv::CoverW::default()) } else { Box::new(MusicW::default()) },
+        Kind::System if desk::variant(k) == 1 => Box::new(crate::deskv::RingsW::default()),
         Kind::System => Box::new(SystemW { bars: [0.0; 3], disp: [0.0; 4], apps: HashMap::new(), moving: false, graph: None, live: None, layer_at: None, probe_a: 0.0, probe_x: 0.0, probe_on: false }),
         Kind::Storage => Box::new(StorageW::default()),
         Kind::Projects => Box::new(ProjectsW { tab: 0, scroll: 0, tab_at: None, pill: 0.0 }),

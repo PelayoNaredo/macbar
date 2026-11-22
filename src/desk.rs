@@ -463,8 +463,59 @@ fn place(k: Kind, order: usize) {
     create(k, x, y, w_of(k), h_of(k), order);
 }
 
+// ---------------------------------------------------------------- diseños de cada widget
+/// Diseños que tiene cada widget (el primero es el de siempre). Se elige por widget, desde su clic
+/// derecho o desde la Configuración, y se guarda en widgets.ini como `diseno_<clave> = n`.
+pub fn variants(k: Kind) -> &'static [&'static str] {
+    match k {
+        Kind::Weather => &["Clásico", "Cielo", "Mínimo"],
+        Kind::Calendar => &["Clásico", "Hoy"],
+        Kind::System => &["Clásico", "Anillos"],
+        Kind::Music => &["Clásico", "Carátula"],
+        _ => &["Clásico"],
+    }
+}
+
+static VARIANT: Mutex<Option<HashMap<&'static str, usize>>> = Mutex::new(None);
+
+/// Diseño elegido para el widget (0 = el de siempre).
+pub fn variant(k: Kind) -> usize {
+    let mut v = VARIANT.lock().unwrap();
+    let m = v.get_or_insert_with(|| {
+        let txt = ini();
+        ALL.iter().map(|k| (k.key(), ini_get(&txt, &format!("diseno_{}", k.key())).and_then(|x| x.trim().parse().ok()).unwrap_or(0))).collect()
+    });
+    m.get(k.key()).copied().unwrap_or(0).min(variants(k).len().saturating_sub(1))
+}
+
+/// Cambia el diseño de un widget: el viejo se va con su animación y entra el nuevo en el mismo sitio.
+pub fn set_variant(k: Kind, n: usize) {
+    if n >= variants(k).len() || n == variant(k) { return; }
+    // Se guarda su sitio antes de quitarlo
+    if shown(k) { save(true); }
+    set_ini_value(&format!("diseno_{}", k.key()), &n.to_string());
+    if let Some(m) = VARIANT.lock().unwrap().as_mut() { m.insert(k.key(), n); }
+    if let Some(h) = DESKS.with(|d| d.borrow().iter().find(|w| w.kind == k && w.dying.is_none()).map(|w| w.hwnd)) {
+        retire(h);
+        place(k, 0);
+    }
+}
+
+/// Para la Configuración: diseños de cada widget (en el orden de `ALL`) y el elegido.
+pub fn variant_items() -> Vec<(&'static [&'static str], usize)> { ALL.iter().map(|k| (variants(*k), variant(*k))).collect() }
+pub fn set_variant_i(i: usize, n: usize) { if let Some(k) = ALL.get(i) { set_variant(*k, n); } }
+
 /// Tamaño de cada widget (DIP): cada uno el que necesita su contenido.
 pub fn size(k: Kind) -> (f32, f32) {
+    // Los diseños alternativos tienen su propio tamaño
+    match (k, variant(k)) {
+        (Kind::Weather, 1) => return (340.0, 170.0),
+        (Kind::Weather, 2) => return (300.0, 150.0),
+        (Kind::Calendar, 1) => return (180.0, 180.0),
+        (Kind::System, 1) => return (380.0, 170.0),
+        (Kind::Music, 1) => return (300.0, 300.0),
+        _ => {}
+    }
     match k {
         Kind::Calendar => (380.0, 350.0),
         Kind::Storage => (380.0, 300.0),
@@ -1078,13 +1129,22 @@ fn click(hwnd: HWND, x: i32, y: i32, right: bool) {
         None if right => {
             let Some(kind) = with_dw(hwnd, |w| w.kind) else { return };
             let others: Vec<(usize, &str)> = ALL.iter().enumerate().filter(|(_, k)| !shown(**k)).map(|(i, k)| (i, k.label())).collect();
-            let mut items: Vec<String> = vec![i18n::tf("Quitar «{}»", &[&kind.label()]), if floating() { i18n::t("Con fondo").into() } else { i18n::t("Sin fondo (flotantes)").into() }];
-            if !others.is_empty() { items.push(String::new()); for (_, l) in &others { items.push(i18n::tf("Añadir «{}»", &[l])); } }
-            let refs: Vec<&str> = items.iter().map(|s| s.as_str()).collect();
-            match context_menu(&refs, pt) {
-                Some(0) => { if let Some(i) = ALL.iter().position(|k| *k == kind) { toggle_kind(i); } return; }
-                Some(1) => toggle_style(),
-                Some(n) if n >= 3 => { if let Some((i, _)) = others.get(n - 3) { toggle_kind(*i); } }
+            // Cada entrada con lo que hace: quitar, estilo, diseños de este widget y añadir otros
+            enum Do { Remove, Style, Design(usize), Add(usize), Nothing }
+            let mut items: Vec<(String, Do)> = vec![(i18n::tf("Quitar «{}»", &[&kind.label()]), Do::Remove), (if floating() { i18n::t("Con fondo").into() } else { i18n::t("Sin fondo (flotantes)").into() }, Do::Style)];
+            let vs = variants(kind);
+            if vs.len() > 1 {
+                items.push((String::new(), Do::Nothing));
+                let cur = variant(kind);
+                for (n, v) in vs.iter().enumerate() { items.push((format!("{}{}", if n == cur { "✓  " } else { "      " }, i18n::tf("Diseño «{}»", &[&i18n::t(v)])), Do::Design(n))); }
+            }
+            if !others.is_empty() { items.push((String::new(), Do::Nothing)); for (i, l) in &others { items.push((i18n::tf("Añadir «{}»", &[l]), Do::Add(*i))); } }
+            let refs: Vec<&str> = items.iter().map(|s| s.0.as_str()).collect();
+            match context_menu(&refs, pt).and_then(|n| items.get(n)).map(|x| &x.1) {
+                Some(Do::Remove) => { if let Some(i) = ALL.iter().position(|k| *k == kind) { toggle_kind(i); } return; }
+                Some(Do::Style) => toggle_style(),
+                Some(Do::Design(n)) => { set_variant(kind, *n); return; }
+                Some(Do::Add(i)) => toggle_kind(*i),
                 _ => {}
             }
         }
