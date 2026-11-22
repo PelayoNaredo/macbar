@@ -496,7 +496,7 @@ fn url_encode(s: &str) -> String {
     }).collect()
 }
 
-fn read_clipboard() -> Option<String> {
+pub(crate) fn read_clipboard() -> Option<String> {
     use windows::Win32::System::DataExchange::*;
     use windows::Win32::System::Memory::*;
     unsafe {

@@ -60,6 +60,7 @@ mod picker;
 mod popup;
 mod search;
 mod search_extra;
+mod settings;
 mod share;
 mod profiles;
 mod sys;
@@ -2813,7 +2814,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_FACETEST => { faces::set(wp.0 == 1); LRESULT(0) }
+            WM_FACETEST => { if wp.0 == 7 { settings::open(); } else { faces::set(wp.0 == 1); } LRESULT(0) }
             faces::WM_FACE => { if wp.0 == 2 { faces::on_dblclick(lp); } else { faces::on_face_msg(wp); } LRESULT(0) }
             WM_HOTKEY if wp.0 as i32 == faces::HOTKEY_ID => { faces::toggle(); LRESULT(0) }
             WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), 9 => card::open_tab(card::Origin::Click, Some(card::Tab::Call)), 10 => card::test_switch(card::Tab::Audio), _ => card::close(card::Why::Toggle) } LRESULT(0) }
@@ -3312,6 +3313,10 @@ fn main() {
         bar_ink_thread();
         hang_watch();
         search_extra::clip_start();
+        if std::env::var_os("MACBAR_SETTINGSTEST").is_some() {
+            // Prueba visual de la configuración: se abre a los 2 s
+            std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2000)); unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_FACETEST, WPARAM(7), LPARAM(0)); } });
+        }
         if std::env::var_os("MACBAR_FACETEST").is_some() {
             // Prueba visual del doble escritorio: a iconos a los 4 s y de vuelta a los 9 s
             std::thread::spawn(|| {

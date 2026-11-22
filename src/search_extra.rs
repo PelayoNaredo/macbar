@@ -449,6 +449,7 @@ pub const CMDS: &[(&str, &str, &str, &str, &str)] = &[
     ("taskmgr", "Administrador de tareas", "administrador tareas procesos", "task manager processes", "\u{E9D9}"),
     ("restart", "Reiniciar el equipo…", "reiniciar", "restart reboot", "\u{E72C}"),
     ("shutdown", "Apagar el equipo…", "apagar", "shut down power off", "\u{E7E8}"),
+    ("settings", "Configuración de macbar", "configuracion ajustes opciones preferencias settings", "settings preferences options configuration", "\u{E713}"),
 ];
 
 pub fn run_cmd(code: &str) {
@@ -471,6 +472,7 @@ pub fn run_cmd(code: &str) {
         "note" => crate::notes::toggle(),
         "face" => crate::faces::toggle(),
         "taskmgr" => sys::open_args("taskmgr.exe", ""),
+        "settings" => crate::settings::open(),
         "restart" => if sys::ask(bar_hwnd(), i18n::t("¿Reiniciar el equipo ahora?")) { sys::restart(); },
         "shutdown" => if sys::ask(bar_hwnd(), i18n::t("¿Apagar el equipo ahora?")) { sys::shutdown(); },
         _ => {}

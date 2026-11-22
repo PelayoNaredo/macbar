@@ -255,6 +255,14 @@ pub fn set_config_value(k: &str, v: &str) {
     let _ = std::fs::write(&p, lines.join("\n") + "\n");
 }
 
+/// Quita `k` de config.ini (vuelve a su valor por defecto).
+pub fn remove_config_value(k: &str) {
+    let p = config_path();
+    let Ok(old) = std::fs::read_to_string(&p) else { return };
+    let lines: Vec<&str> = old.lines().filter(|l| l.trim().strip_prefix(k).is_none_or(|r| !r.trim_start().starts_with('='))).collect();
+    let _ = std::fs::write(&p, lines.join("\n") + "\n");
+}
+
 pub fn edit_config() {
     let p = config_path();
     if !std::path::Path::new(&p).exists() {

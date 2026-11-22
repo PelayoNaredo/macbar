@@ -48,8 +48,8 @@ fn apply_style(hwnd: HWND) {
     }
 }
 
-/// Cambia entre flotantes y tarjetas (clic derecho en un widget).
-fn toggle_style() {
+/// Cambia entre flotantes y tarjetas (clic derecho en un widget o ventana de Configuración).
+pub fn toggle_style() {
     let fl = !floating();
     FLOAT.store(fl as i8, Ordering::Relaxed);
     let txt = ini();

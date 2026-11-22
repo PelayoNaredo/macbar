@@ -290,8 +290,9 @@ pub fn ink_color(ink: f32, a: f32) -> D2D1_COLOR_F {
     rgba(c, c, c, if ink > 0.0 { a.powf(1.0 - 0.38 * ink) } else { a })
 }
 
-/// Lo que cada panel puede pedir al pulsar algo.
-pub enum Re { Stay, Close, CloseRun(Box<dyn FnOnce()>) }
+/// Lo que cada panel puede pedir al pulsar algo. `Run`: ejecuta algo fuera del préstamo del panel y lo
+/// deja abierto (después repinta).
+pub enum Re { Stay, Close, CloseRun(Box<dyn FnOnce()>), Run(Box<dyn FnOnce()>) }
 
 pub trait Content {
     fn size(&self) -> (f32, f32);
@@ -404,7 +405,7 @@ impl Ui<'_> {
 
 // ---------------------------------------------------------------- ventanas de los paneles
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Kind { Calendar, Weather, Wifi, Search }
+pub enum Kind { Calendar, Weather, Wifi, Search, Settings }
 
 struct Pw {
     hwnd: HWND,
@@ -443,6 +444,7 @@ fn new_content(k: Kind) -> Box<dyn Content> {
         Kind::Weather => Box::new(weather::WeatherPanel::new()),
         Kind::Wifi => Box::new(wifi::WifiPanel::new()),
         Kind::Search => Box::new(search::SearchPanel::new()),
+        Kind::Settings => Box::new(settings::Settings::new()),
     }
 }
 
@@ -633,6 +635,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 match re {
                     Some(Re::Close) => hide(hwnd, true),
                     Some(Re::CloseRun(f)) => { hide(hwnd, false); f(); }
+                    Some(Re::Run(f)) => { f(); resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
                     Some(Re::Stay) => { resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
                     None => if k == VK_ESCAPE.0 { hide(hwnd, true); },
                 }
@@ -682,6 +685,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     match re {
                         Some(Re::Close) => hide(hwnd, true),
                         Some(Re::CloseRun(f)) => { hide(hwnd, false); f(); }
+                        Some(Re::Run(f)) => { f(); resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
                         _ => { resize_if_needed(hwnd); let _ = InvalidateRect(Some(hwnd), None, false); }
                     }
                 }

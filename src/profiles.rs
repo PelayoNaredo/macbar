@@ -56,6 +56,13 @@ pub fn open_folder() {
     sys::open(&root());
 }
 
+/// Guarda lo de ahora en el perfil activo (ventana de Configuración), sin cambiar de perfil.
+pub fn save_active() {
+    let Some(a) = active() else { return };
+    copy_set(&sys::config_dir(), &pdir(a));
+    live::show(live::Hud::Profile(a as u8), 1800);
+}
+
 /// Cierra esta instancia y abre otra (que espera a que esta suelte el sitio).
 pub fn relaunch() {
     if let Ok(exe) = std::env::current_exe() {

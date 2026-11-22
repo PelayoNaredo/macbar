@@ -654,7 +654,8 @@ fn context_thread() {
     let mut last_desk: Option<u8> = None;
     let mut mem_warned = false;
     // Procesador: muestras cada 5 s; si pasa del umbral 2 min seguidos, avisa (y se rearma por debajo del 70 %)
-    let cpu_limit = sys::config_value("alerta_cpu").and_then(|v| v.parse::<u32>().ok()).unwrap_or(90);
+    let cpu_cfg = || sys::config_value("alerta_cpu").and_then(|v| v.parse::<u32>().ok()).unwrap_or(90);
+    let mut cpu_limit = cpu_cfg();
     let mut cpu_prev: Option<(u64, u64)> = None;
     let mut cpu_high = 0u32;
     let mut cpu_warned = false;
@@ -686,6 +687,8 @@ fn context_thread() {
             }
         }
         last_desk = idx;
+        // Se relee: la ventana de Configuración puede cambiar el umbral sin reiniciar
+        if n % 20 == 0 { cpu_limit = cpu_cfg(); }
         if n % 20 == 0 && cpu_limit > 0 {
             if let Some(pct) = cpu_sample(&mut cpu_prev) {
                 if pct >= cpu_limit { cpu_high += 1; } else { cpu_high = 0; }

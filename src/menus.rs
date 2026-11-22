@@ -29,6 +29,8 @@ pub enum A {
     Shutdown,
     Autostart(bool),
     EditConfig,
+    /// Ventana de Configuración de macbar.
+    Settings,
     /// Acciones que resuelve la barra (tiempo, salir…): se devuelven a main.
     Bar(u32),
 }
@@ -197,6 +199,7 @@ pub fn perform(owner: HWND, target: HWND, a: A) -> Option<u32> {
         A::Shutdown => { if sys::ask(owner, t("¿Apagar el equipo ahora?")) { sys::shutdown(); } }
         A::Autostart(on) => sys::set_autostart(on),
         A::EditConfig => sys::edit_config(),
+        A::Settings => crate::settings::open(),
         A::Bar(id) => return Some(id),
     }
     None
@@ -313,6 +316,8 @@ pub fn user_menu() -> Menu {
 pub fn bar_menu() -> Menu {
     let mut m = Menu::default();
     let on = sys::autostart_enabled();
+    // Todas las opciones de abajo (y las de config.ini) en una ventana
+    m.item(t("Configuración…"), A::Settings).sep();
     m.check(t("Iniciar con Windows"), on, A::Autostart(!on))
         .check(t("Widgets del escritorio"), crate::desk::enabled(), A::Bar(crate::BAR_WIDGETS));
     // Doble escritorio: cara de widgets o de iconos
