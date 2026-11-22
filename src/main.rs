@@ -54,6 +54,7 @@ mod audioout;
 mod dnd;
 mod faces;
 mod fileops;
+mod fondo;
 mod i18n;
 mod i18n_tabla;
 mod live;

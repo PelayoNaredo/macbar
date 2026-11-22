@@ -824,7 +824,19 @@ fn refresh_ink(hwnd: HWND, force: bool) {
     if ch || force { unsafe { let _ = InvalidateRect(Some(hwnd), None, false); } }
 }
 
+thread_local! {
+    /// Ventana del widget que se está pintando (para saber qué trozo de fondo de pantalla tiene detrás)
+    static CUR_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Ventana del widget que se está pintando ahora mismo.
+pub fn current_hwnd() -> Option<HWND> {
+    let h = CUR_HWND.with(|c| c.get());
+    (h != 0).then_some(HWND(h as _))
+}
+
 fn paint_real(hwnd: HWND) {
+    CUR_HWND.with(|c| c.set(hwnd.0 as isize));
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         BeginPaint(hwnd, &mut ps);
@@ -895,6 +907,9 @@ fn paint_real(hwnd: HWND) {
             let mut ui = make_ui(p, &rt, &w.f, ww, s, w.glow.clone(), w.hover, fl, ink);
             rt.BeginDraw();
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
+            // En las capturas de prueba el widget sale encima de otras ventanas: se pinta debajo el trozo
+            // de fondo de pantalla que tendría detrás en el escritorio
+            fondo::paint_test_backdrop(&ui, ww, wh);
             // Fundido de entrada y de salida dentro del propio dibujo (sin ventanas "layered", que
             // obligaban a Windows a copiar cada fotograma por la CPU)
             // Cara de iconos: el widget se aparta hacia su lado de la pantalla y se desvanece
