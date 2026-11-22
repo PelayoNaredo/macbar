@@ -112,6 +112,9 @@ pub fn new(k: Kind) -> Box<dyn Widget> {
         Kind::Phone => { crate::phone::start(); Box::new(PhoneW::default()) }
         Kind::Visual => Box::new(crate::deskw2::VisualW::default()),
         Kind::Photos => Box::new(crate::deskw2::PhotosW::default()),
+        Kind::Clocks => Box::new(crate::deskw3::ClocksW::default()),
+        Kind::Todo => Box::new(crate::deskw3::TodoW::default()),
+        Kind::Countdown => Box::new(crate::deskw3::CountdownW::default()),
     }
 }
 

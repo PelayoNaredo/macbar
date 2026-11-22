@@ -13,17 +13,19 @@ const TIMER_FRAME: usize = 2;
 const TIMER_FADE: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone, Visual, Photos }
-const ALL: [Kind; 9] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone, Kind::Visual, Kind::Photos];
+pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone, Visual, Photos, Clocks, Todo, Countdown }
+const ALL: [Kind; 12] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone, Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown];
 /// Widgets que llegaron después: empiezan quitados (no aparecen de golpe al actualizar).
-const NEW_OFF: [Kind; 2] = [Kind::Visual, Kind::Photos];
+const NEW_OFF: [Kind; 5] = [Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown];
+/// Los de `NEW_OFF` que ya traía la marca `nuevos_v2` (quien la tenga ya decidió sobre ellos).
+const NEW_OFF_V2: [Kind; 2] = [Kind::Visual, Kind::Photos];
 
 impl Kind {
     fn key(self) -> &'static str {
-        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil", Kind::Visual => "visualizador", Kind::Photos => "fotos" }
+        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil", Kind::Visual => "visualizador", Kind::Photos => "fotos", Kind::Clocks => "relojes", Kind::Todo => "tareas", Kind::Countdown => "cuentaatras" }
     }
     fn label(self) -> &'static str {
-        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)", Kind::Visual => "Visualizador de audio", Kind::Photos => "Marco de fotos" })
+        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)", Kind::Visual => "Visualizador de audio", Kind::Photos => "Marco de fotos", Kind::Clocks => "Relojes del mundo", Kind::Todo => "Tareas", Kind::Countdown => "Cuenta atrás" })
     }
 }
 
@@ -167,6 +169,14 @@ fn save(enabled: bool) {
             Some((x, y)) => out += &format!("{} = {x},{y}\n", pos_key(k)),
             None => if let Some(v) = ini_get(&old, &pos_key(k)) { out += &format!("{} = {v}\n", pos_key(k)); },
         }
+    }
+    // El resto de claves (texto, fotos_carpeta, relojes, cuenta_atras, nuevos_v3…) se conservan tal cual
+    let ours: Vec<String> = ["activados", "ocultos", "estilo"].iter().map(|s| s.to_string()).chain(ALL.iter().map(|k| pos_key(*k))).collect();
+    for l in old.lines() {
+        let key = l.split('=').next().unwrap_or("").trim();
+        if l.trim().is_empty() || (l.contains('=') && ours.iter().any(|o| o == key)) { continue; }
+        out += l;
+        out.push('\n');
     }
     let _ = std::fs::create_dir_all(sys::config_dir());
     let _ = std::fs::write(ini_path(), out);
@@ -390,13 +400,18 @@ pub fn start() {
         RegisterClassW(&wc);
     }
     // Primera vez con widgets nuevos: se apuntan como quitados (se ponen desde el menú o la configuración)
-    if ini_get(&ini(), "nuevos_v2").is_none() {
+    if ini_get(&ini(), "nuevos_v3").is_none() {
         let txt = ini();
+        // Quien ya tenía la marca anterior decidió sobre los de entonces: solo se quitan los nuevos
+        let had_v2 = ini_get(&txt, "nuevos_v2").is_some();
         let mut hidden: Vec<String> = ini_get(&txt, "ocultos").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
-        for k in NEW_OFF { if !hidden.iter().any(|h| h == k.key()) { hidden.push(k.key().to_string()); } }
-        let new = txt.lines().map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        for k in NEW_OFF {
+            if had_v2 && NEW_OFF_V2.contains(&k) { continue; }
+            if !hidden.iter().any(|h| h == k.key()) { hidden.push(k.key().to_string()); }
+        }
+        let new = txt.lines().filter(|l| ini_get(l, "nuevos_v2").is_none()).map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
         let new = if txt.lines().any(|l| l.trim_start().starts_with("ocultos")) { new } else { format!("{new}\nocultos = {}", hidden.join(",")) };
-        let _ = std::fs::write(ini_path(), new + "\nnuevos_v2 = 1\n");
+        let _ = std::fs::write(ini_path(), new + "\nnuevos_v3 = 1\n");
     }
     let txt = ini();
     // Prueba visual: MACBAR_WIDGETS=clave,clave enseña solo esos (por encima de todo, ver WM_WINDOWPOSCHANGING)
@@ -422,6 +437,18 @@ fn place(k: Kind, order: usize) {
     let x2 = x3 - gap - w_of(Kind::Music);
     let x1 = x2 - gap - w_of(Kind::System);
     let y0 = wa.top + m;
+    // Columna izquierda, de arriba abajo: fotos, visualizador, relojes, cuenta atrás y tareas. Lo que
+    // no quepa hasta abajo empieza otra columna a su derecha (nada se sale del área de trabajo)
+    let left_col = |k: Kind| -> (i32, i32) {
+        let (mut x, mut y, mut col_w) = (wa.left + m, y0, 0);
+        for c in [Kind::Photos, Kind::Visual, Kind::Clocks, Kind::Countdown, Kind::Todo] {
+            if y > y0 && y + h_of(c) > wa.bottom - m { x += col_w + gap; y = y0; col_w = 0; }
+            if c == k { return ((x).min(wa.right - w_of(c)).max(wa.left), y.min(wa.bottom - h_of(c)).max(wa.top)); }
+            col_w = col_w.max(w_of(c));
+            y += h_of(c) + gap;
+        }
+        (wa.left + m, y0)
+    };
     let def = match k {
         Kind::Calendar => (x3, y0), Kind::Storage => (x3, y0 + h_of(Kind::Calendar) + gap),
         Kind::Music => (x2, y0), Kind::Weather => (x2, y0 + h_of(Kind::Music) + gap),
@@ -430,8 +457,7 @@ fn place(k: Kind, order: usize) {
         Kind::Phone => (x1 - gap - w_of(Kind::Phone), y0),
         // Los nuevos, a la izquierda de la pantalla (en la cara de widgets los iconos no están): fotos arriba
         // y el visualizador debajo
-        Kind::Photos => (wa.left + m, y0),
-        Kind::Visual => (wa.left + m, y0 + h_of(Kind::Photos) + gap),
+        Kind::Photos | Kind::Visual | Kind::Clocks | Kind::Countdown | Kind::Todo => left_col(k),
     };
     let (x, y) = ini_get(&ini(), &pos_key(k)).and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).unwrap_or(def);
     create(k, x, y, w_of(k), h_of(k), order);
@@ -449,6 +475,9 @@ pub fn size(k: Kind) -> (f32, f32) {
         Kind::Phone => (330.0, 780.0),
         Kind::Visual => (380.0, 200.0),
         Kind::Photos => (380.0, 260.0),
+        Kind::Clocks => (380.0, 170.0),
+        Kind::Todo => (320.0, 300.0),
+        Kind::Countdown => (300.0, 170.0),
     }
 }
 
@@ -513,7 +542,7 @@ fn age(born: Instant) -> f32 {
 }
 
 /// Medición opcional del coste de pintar (con MACBAR_PROF=1): pintados y milisegundos por widget cada 10 s.
-static PROF: Mutex<([u32; 9], [f32; 9], Option<Instant>)> = Mutex::new(([0; 9], [0.0; 9], None));
+static PROF: Mutex<([u32; ALL.len()], [f32; ALL.len()], Option<Instant>)> = Mutex::new(([0; ALL.len()], [0.0; ALL.len()], None));
 thread_local! {
 }
 
@@ -527,10 +556,10 @@ fn paint(hwnd: HWND) {
         p.0[k] += 1; p.1[k] += t0.elapsed().as_secs_f32() * 1000.0;
         let st = *p.2.get_or_insert_with(Instant::now);
         if st.elapsed().as_secs() >= 10 {
-            let per: Vec<String> = (0..9).map(|i| if p.0[i] > 0 { format!("{:.2}", p.1[i] / p.0[i] as f32) } else { "-".into() }).collect();
+            let per: Vec<String> = (0..ALL.len()).map(|i| if p.0[i] > 0 { format!("{:.2}", p.1[i] / p.0[i] as f32) } else { "-".into() }).collect();
             let ed = ENDDRAW_MS.with(|e| e.replace(0.0));
             let _ = std::fs::write(std::env::temp_dir().join("macbar_prof.txt"), format!("pintados={:?}\nms_por_pintado={:?}\nms_total={:?}\nms_en_EndDraw={:.0}", p.0, per, p.1.map(|v| v.round()), ed));
-            *p = ([0; 9], [0.0; 9], Some(Instant::now()));
+            *p = ([0; ALL.len()], [0.0; ALL.len()], Some(Instant::now()));
         }
     }
 }
