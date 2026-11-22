@@ -36,25 +36,25 @@ const SUB_ANIM: u32 = 15;
 /// `faces.rs`: al integrar, estas dos funciones pasan a ser `crate::faces::dblclick_on()` y
 /// `crate::faces::toggle_dblclick()` (que además avisa a su vigilante sin reiniciar).
 mod caras {
-    pub fn on() -> bool { !crate::sys::config_value("doble_clic_escritorio").is_some_and(|v| v.eq_ignore_ascii_case("no")) }
-    pub fn toggle() { crate::sys::set_config_value("doble_clic_escritorio", if on() { "no" } else { "si" }); }
+    pub fn on() -> bool { crate::faces::dblclick_on() }
+    pub fn toggle() { crate::faces::toggle_dblclick(); }
 }
 
 // ---------------------------------------------------------------- secciones y filas
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Sec { General, Island, Desk, Profiles, Weather, About }
-const SECS: [Sec; 6] = [Sec::General, Sec::Island, Sec::Desk, Sec::Profiles, Sec::Weather, Sec::About];
+enum Sec { General, Island, Desk, Tools, Profiles, Weather, About }
+const SECS: [Sec; 7] = [Sec::General, Sec::Island, Sec::Desk, Sec::Tools, Sec::Profiles, Sec::Weather, Sec::About];
 
 impl Sec {
     fn label(self) -> &'static str {
         i18n::t(match self {
-            Sec::General => "General", Sec::Island => "Isla y tarjeta", Sec::Desk => "Escritorio y widgets",
+            Sec::General => "General", Sec::Island => "Isla y tarjeta", Sec::Desk => "Escritorio y widgets", Sec::Tools => "Herramientas",
             Sec::Profiles => "Perfiles y temas", Sec::Weather => "Tiempo", Sec::About => "Acerca de",
         })
     }
     fn glyph(self) -> &'static str {
         match self {
-            Sec::General => "\u{E713}", Sec::Island => "\u{E8BD}", Sec::Desk => "\u{E8A9}",
+            Sec::General => "\u{E713}", Sec::Island => "\u{E8BD}", Sec::Desk => "\u{E8A9}", Sec::Tools => "\u{E90F}",
             Sec::Profiles => "\u{E771}", Sec::Weather => "\u{E706}", Sec::About => "\u{E946}",
         }
     }
@@ -68,7 +68,8 @@ enum Row {
     Widgets, Widget(usize), Style, Ink, FaceDbl,
     Profile, ProfileSave, ProfileDir, Theme,
     City, Refresh,
-    Version, Repo, Folder,
+    Version, Repo, Folder, Quit,
+    Face, Caffeine, Pomodoro, Picker, Note,
 }
 
 /// Grupos de filas de cada sección (con su rótulo, en español: se traduce al pintarlo).
@@ -89,14 +90,18 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
             (None, vec![Widgets]),
             (Some("Widgets"), (0..n_widgets).map(Widget).collect()),
             (Some("Aspecto"), vec![Style, Ink]),
-            (Some("Doble escritorio"), vec![FaceDbl]),
+            (Some("Doble escritorio"), vec![Face, FaceDbl]),
+        ],
+        Sec::Tools => vec![
+            (None, vec![Caffeine, Pomodoro]),
+            (None, vec![Picker, Note]),
         ],
         Sec::Profiles => vec![
             (Some("Perfiles"), vec![Profile, ProfileSave, ProfileDir]),
             (Some("Tema"), vec![Theme]),
         ],
         Sec::Weather => vec![(None, vec![City, Refresh])],
-        Sec::About => vec![(None, vec![Version, Repo, Folder])],
+        Sec::About => vec![(None, vec![Version, Repo, Folder]), (None, vec![Quit])],
     }
 }
 
@@ -142,6 +147,10 @@ struct State {
     saved: [bool; 3],
     city: String,
     latlon: bool,
+    away: bool,
+    caffeine: bool,
+    pomo: bool,
+    note: bool,
 }
 
 fn read() -> State {
@@ -163,6 +172,10 @@ fn read() -> State {
         saved: [0, 1, 2].map(profiles::exists),
         city: sys::config_value("ciudad").unwrap_or_default(),
         latlon: sys::config_value("lat").is_some() && sys::config_value("lon").is_some(),
+        away: crate::faces::AWAY.load(std::sync::atomic::Ordering::Relaxed),
+        caffeine: crate::live::caffeine_on(),
+        pomo: crate::live::POMO.load(std::sync::atomic::Ordering::Relaxed) != 0,
+        note: crate::notes::is_open(),
     }
 }
 
@@ -224,6 +237,12 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
         Repo if sub == 1 => Act::Url,
         Folder if sub == 1 => Act::Folder,
         Folder if sub == 2 => Act::EditConfig,
+        Face => match pick(2) { Some(i) if (i == 1) != st.away => Act::Bar(crate::BAR_FACE), _ => Act::Nothing },
+        Caffeine if sub == 0 => Act::Bar(crate::BAR_CAFFEINE),
+        Pomodoro if sub == 0 => Act::Bar(crate::BAR_POMODORO),
+        Picker if sub == 1 => Act::BarClose(crate::BAR_PICKER),
+        Note if sub == 0 => Act::BarClose(crate::BAR_NOTE),
+        Quit if sub == 1 => Act::BarClose(crate::BAR_QUIT),
         _ => Act::Nothing,
     }
 }
@@ -289,6 +308,12 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
         Refresh => (t("Actualizar el tiempo"), t("Vuelve a pedirlo ahora"), Ctl::Buttons(vec![("\u{E72C}", t("Actualizar"))]), true),
         Version => (t("Versión"), String::new(), Ctl::Value(env!("CARGO_PKG_VERSION").to_string()), true),
         Repo => (t("Código fuente"), "github.com/PelayoNaredo/macbar".to_string(), Ctl::Buttons(vec![("\u{E8A7}", t("Abrir"))]), true),
+        Face => (t("Ahora se ve"), t("Win+Alt+W o doble clic en un hueco del escritorio"), seg(&["Widgets", "Iconos"], Some(st.away as usize)), true),
+        Caffeine => (t("Cafeína"), t("No deja que el equipo se duerma"), Ctl::Switch(st.caffeine), true),
+        Pomodoro => (t("Pomodoro"), t("25 min de concentración y descansos de 5"), Ctl::Switch(st.pomo), true),
+        Picker => (t("Cuentagotas de color"), t("Copia el color de cualquier punto de la pantalla"), Ctl::Buttons(vec![("\u{E790}", t("Elegir color"))]), true),
+        Note => (t("Nota rápida"), t("No sale en capturas ni al compartir pantalla"), Ctl::Switch(st.note), true),
+        Quit => (t("Salir de macbar"), t("Cierra la barra, la isla y los widgets"), Ctl::Buttons(vec![("\u{E7E8}", t("Salir"))]), true),
         Folder => (t("Carpeta de configuración"), "%APPDATA%\\macbar".to_string(), Ctl::Buttons(vec![("\u{E8B7}", t("Abrir")), ("\u{E70F}", t("Editar config.ini"))]), true),
     }
 }

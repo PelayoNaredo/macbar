@@ -23,7 +23,7 @@ const WM_TRAY_READY: u32 = WM_USER + 30;
 #[derive(Clone)]
 struct Item { name: String, short: String, icon: Option<Arc<Vec<u8>>>, glyph: Option<&'static str>, host: Option<trayhost::TrayIcon>, own: bool }
 
-/// El icono de la propia macbar va siempre el primero: abre su menú (widgets, inicio con Windows, configuración, salir).
+/// El icono de la propia macbar va siempre el primero: abre la Configuración (clic derecho: su menú).
 fn with_own(mut v: Vec<Item>) -> Vec<Item> {
     v.insert(0, Item { name: "macbar".into(), short: "macbar".into(), icon: None, glyph: Some("\u{E713}"), host: None, own: true });
     v
@@ -481,9 +481,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_LBUTTONUP | WM_RBUTTONUP => {
                 if let Some(i) = item_at(hwnd, lp) {
                     let right = msg == WM_RBUTTONUP;
+                    // El icono de macbar: clic abre la Configuración; clic derecho, su menú de siempre
                     if ITEMS.lock().unwrap().get(i).is_some_and(|it| it.own) {
                         hide_ex(false);
-                        crate::macbar_menu();
+                        if right { crate::macbar_menu(); } else { crate::settings::open(); }
                         return LRESULT(0);
                     }
                     let host = ITEMS.lock().unwrap().get(i).and_then(|it| it.host.clone());
