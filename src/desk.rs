@@ -783,7 +783,8 @@ fn paint_real(hwnd: HWND) {
             let anim = moving || w.w.animating(t) || w.dying.is_some() || face_moving;
 
             // Las transiciones cortas van a 60 fotogramas; lo continuo (gráficas, letra) a 30
-            let fast = moving || t < 1.4 || w.dying.is_some() || w.w.smooth();
+            // (la transición entre caras también, a 60 fotogramas)
+            let fast = moving || t < 1.4 || w.dying.is_some() || w.w.smooth() || face_moving;
             FAST.with(|f| f.set(if fast { 15 } else { w.w.frame_ms() }));
             w.hits = std::mem::take(&mut ui.hits);
             drop(ui);

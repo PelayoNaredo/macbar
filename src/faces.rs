@@ -102,6 +102,9 @@ pub fn start(bar: HWND) {
     AWAY.store(away, Ordering::Relaxed);
     DBL_ON.store(dblclick_on(), Ordering::Relaxed);
     unsafe { let _ = RegisterHotKey(Some(bar), HOTKEY_ID, MOD_WIN | MOD_ALT | MOD_NOREPEAT, 'W' as u32); }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = PROBE.set(tx);
+    std::thread::spawn(move || probe_thread(rx));
     std::thread::spawn(mouse_thread);
 }
 
@@ -131,6 +134,14 @@ unsafe extern "system" fn mouse_hook(code: i32, wp: WPARAM, lp: LPARAM) -> LRESU
             let dbl = m.time.wrapping_sub(t0) <= GetDoubleClickTime() && (m.pt.x - x0).abs() <= dx && (m.pt.y - y0).abs() <= dy;
             *last = if dbl { (0, 0, 0) } else { (m.time, m.pt.x, m.pt.y) };
             drop(last);
+            // Primer clic en el escritorio con los iconos a la vista: se mira YA si hay un icono debajo (en otro
+            // hilo, para no frenar el ratón). Después del doble clic sería tarde: la carpeta o el programa
+            // ya se habría abierto encima
+            if !dbl && on_desktop(m.pt) {
+                ON_ICON.store(true, Ordering::Relaxed);
+                let n = ASKED.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(tx) = PROBE.get() { let _ = tx.send((m.pt, n)); }
+            }
             // Lo decide el hilo de la interfaz (mira si había un icono debajo); aquí solo se avisa
             if dbl && on_desktop(m.pt) {
                 let _ = PostMessageW(Some(bar_hwnd()), WM_FACE, WPARAM(2), LPARAM(((m.pt.y as i64) << 32 | (m.pt.x as u32 as i64)) as isize));
@@ -148,22 +159,47 @@ fn mouse_thread() {
     }
 }
 
+/// ¿El primer clic del doble clic cayó sobre un icono? (lo rellena el hilo que mira con UI Automation;
+/// empieza en «sí» hasta que se compruebe, para no cambiar de cara por error)
+static ON_ICON: AtomicBool = AtomicBool::new(true);
+static PROBE: std::sync::OnceLock<std::sync::mpsc::Sender<(POINT, u32)>> = std::sync::OnceLock::new();
+/// Comprobaciones pedidas y terminadas (para esperar la del primer clic).
+static ASKED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DONE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+fn probe_thread(rx: std::sync::mpsc::Receiver<(POINT, u32)>) {
+    use windows::Win32::UI::Accessibility::*;
+    unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
+    // UI Automation se crea una vez (la primera vez tarda) y se reutiliza
+    let uia: Option<IUIAutomation> = unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok() };
+    while let Ok((pt, n)) = rx.recv() {
+        // Iconos ocultos: nunca hay uno debajo
+        let on = !icons_hidden() && uia.as_ref().is_none_or(|u| over_icon(u, pt));
+        ON_ICON.store(on, Ordering::Relaxed);
+        DONE.store(n, Ordering::Relaxed);
+    }
+}
+
 /// Doble clic en el escritorio (desde el gancho): cambia de cara si no era sobre un icono.
-pub fn on_dblclick(lp: LPARAM) {
-    let pt = POINT { x: (lp.0 as i64 & 0xFFFF_FFFF) as u32 as i32, y: (lp.0 as i64 >> 32) as i32 };
+pub fn on_dblclick(_lp: LPARAM) {
     if crate::profiles::presenting() || crate::fullscreen() { return; }
-    // Con los iconos a la vista, un doble clic en un icono lo abre: eso no cuenta
-    if !icons_hidden() && over_icon(pt) { return; }
+    // Se espera a que termine la comprobación del primer clic (suele tardar pocos ms; como mucho 200)
+    let t = Instant::now();
+    while DONE.load(Ordering::Relaxed) != ASKED.load(Ordering::Relaxed) && t.elapsed() < Duration::from_millis(200) { std::thread::sleep(Duration::from_millis(2)); }
+    if DONE.load(Ordering::Relaxed) != ASKED.load(Ordering::Relaxed) || ON_ICON.load(Ordering::Relaxed) { return; }
     toggle();
 }
 
 /// ¿Hay un icono del escritorio bajo el punto? (UI Automation: los iconos son elementos de lista)
-fn over_icon(pt: POINT) -> bool {
+fn over_icon(uia: &windows::Win32::UI::Accessibility::IUIAutomation, pt: POINT) -> bool {
     use windows::Win32::UI::Accessibility::*;
     unsafe {
-        let Ok(uia) = CoCreateInstance::<_, IUIAutomation>(&CUIAutomation, None, CLSCTX_INPROC_SERVER) else { return false };
-        let Ok(el) = uia.ElementFromPoint(pt) else { return false };
-        el.CurrentControlType().is_ok_and(|t| t == UIA_ListItemControlTypeId || t == UIA_TextControlTypeId || t == UIA_ImageControlTypeId)
+        // Si no se puede mirar, se da por hecho que hay un icono (mejor no cambiar que cambiar por error)
+        let Ok(el) = uia.ElementFromPoint(pt) else { return true };
+        // El icono o cualquier parte suya (nombre, imagen); también si el elemento cuelga de un icono
+        let is_item = |e: &IUIAutomationElement| e.CurrentControlType().is_ok_and(|t| t == UIA_ListItemControlTypeId || t == UIA_TextControlTypeId || t == UIA_ImageControlTypeId || t == UIA_EditControlTypeId);
+        if is_item(&el) { return true; }
+        uia.ControlViewWalker().ok().and_then(|w| w.GetParentElement(&el).ok()).is_some_and(|p| p.CurrentControlType().is_ok_and(|t| t == UIA_ListItemControlTypeId))
     }
 }
 
