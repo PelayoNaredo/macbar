@@ -58,6 +58,8 @@ mod i18n;
 mod i18n_tabla;
 mod live;
 mod menus;
+mod net;
+mod news;
 mod notes;
 mod phone;
 mod picker;
@@ -67,6 +69,7 @@ mod search_extra;
 mod settings;
 mod share;
 mod profiles;
+mod stocks;
 mod sys;
 mod tray;
 mod trayhost;
@@ -1125,7 +1128,7 @@ fn bar_action(hwnd: HWND, id: u32) {
         BAR_NEXT => media(Cmd::Next),
         BAR_PLAYER => run(Act::OpenPlayer),
         BAR_WIDGETS => desk::toggle(),
-        i if (BAR_WIDGET0..BAR_WIDGET0 + 12).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
+        i if (BAR_WIDGET0..BAR_WIDGET0 + desk::ALL.len() as u32).contains(&i) => desk::toggle_kind((i - BAR_WIDGET0) as usize),
         i if (BAR_INK0..BAR_INK0 + 3).contains(&i) => desk::set_ink_mode((i - BAR_INK0) as i8),
         i if (BAR_ACCENT0..BAR_ACCENT0 + profiles::ACCENTS.len() as u32).contains(&i) => profiles::set_accent((i - BAR_ACCENT0) as usize),
         BAR_THEME_EXPORT => profiles::export_theme(),

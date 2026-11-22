@@ -127,6 +127,8 @@ pub fn new(k: Kind) -> Box<dyn Widget> {
         Kind::Todo => Box::new(crate::deskw3::TodoW::default()),
         Kind::Countdown if desk::variant(k) == 1 => Box::new(crate::deskv2::FlipW::default()),
         Kind::Countdown => Box::new(crate::deskw3::CountdownW::default()),
+        Kind::News => Box::new(crate::news::NewsW::default()),
+        Kind::Stocks => Box::new(crate::stocks::StocksW::default()),
     }
 }
 

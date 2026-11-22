@@ -13,19 +13,21 @@ const TIMER_FRAME: usize = 2;
 const TIMER_FADE: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone, Visual, Photos, Clocks, Todo, Countdown }
-const ALL: [Kind; 12] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone, Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown];
+pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone, Visual, Photos, Clocks, Todo, Countdown, News, Stocks }
+pub(crate) const ALL: [Kind; 14] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone, Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown, Kind::News, Kind::Stocks];
 /// Widgets que llegaron después: empiezan quitados (no aparecen de golpe al actualizar).
-const NEW_OFF: [Kind; 5] = [Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown];
+const NEW_OFF: [Kind; 7] = [Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown, Kind::News, Kind::Stocks];
 /// Los de `NEW_OFF` que ya traía la marca `nuevos_v2` (quien la tenga ya decidió sobre ellos).
 const NEW_OFF_V2: [Kind; 2] = [Kind::Visual, Kind::Photos];
+/// Los que ya traía la marca `nuevos_v3`.
+const NEW_OFF_V3: [Kind; 5] = [Kind::Visual, Kind::Photos, Kind::Clocks, Kind::Todo, Kind::Countdown];
 
 impl Kind {
     fn key(self) -> &'static str {
-        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil", Kind::Visual => "visualizador", Kind::Photos => "fotos", Kind::Clocks => "relojes", Kind::Todo => "tareas", Kind::Countdown => "cuentaatras" }
+        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil", Kind::Visual => "visualizador", Kind::Photos => "fotos", Kind::Clocks => "relojes", Kind::Todo => "tareas", Kind::Countdown => "cuentaatras", Kind::News => "noticias", Kind::Stocks => "bolsa" }
     }
     fn label(self) -> &'static str {
-        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)", Kind::Visual => "Visualizador de audio", Kind::Photos => "Marco de fotos", Kind::Clocks => "Relojes del mundo", Kind::Todo => "Tareas", Kind::Countdown => "Cuenta atrás" })
+        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)", Kind::Visual => "Visualizador de audio", Kind::Photos => "Marco de fotos", Kind::Clocks => "Relojes del mundo", Kind::Todo => "Tareas", Kind::Countdown => "Cuenta atrás", Kind::News => "Noticias", Kind::Stocks => "Bolsa" })
     }
 }
 
@@ -400,18 +402,20 @@ pub fn start() {
         RegisterClassW(&wc);
     }
     // Primera vez con widgets nuevos: se apuntan como quitados (se ponen desde el menú o la configuración)
-    if ini_get(&ini(), "nuevos_v3").is_none() {
+    if ini_get(&ini(), "nuevos_v4").is_none() {
         let txt = ini();
         // Quien ya tenía la marca anterior decidió sobre los de entonces: solo se quitan los nuevos
         let had_v2 = ini_get(&txt, "nuevos_v2").is_some();
+        let had_v3 = ini_get(&txt, "nuevos_v3").is_some();
         let mut hidden: Vec<String> = ini_get(&txt, "ocultos").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         for k in NEW_OFF {
             if had_v2 && NEW_OFF_V2.contains(&k) { continue; }
+            if had_v3 && NEW_OFF_V3.contains(&k) { continue; }
             if !hidden.iter().any(|h| h == k.key()) { hidden.push(k.key().to_string()); }
         }
-        let new = txt.lines().filter(|l| ini_get(l, "nuevos_v2").is_none()).map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        let new = txt.lines().filter(|l| ini_get(l, "nuevos_v2").is_none() && ini_get(l, "nuevos_v3").is_none()).map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
         let new = if txt.lines().any(|l| l.trim_start().starts_with("ocultos")) { new } else { format!("{new}\nocultos = {}", hidden.join(",")) };
-        let _ = std::fs::write(ini_path(), new + "\nnuevos_v3 = 1\n");
+        let _ = std::fs::write(ini_path(), new + "\nnuevos_v4 = 1\n");
     }
     let txt = ini();
     // Prueba visual: MACBAR_WIDGETS=clave,clave enseña solo esos (por encima de todo, ver WM_WINDOWPOSCHANGING)
@@ -441,7 +445,7 @@ fn place(k: Kind, order: usize) {
     // no quepa hasta abajo empieza otra columna a su derecha (nada se sale del área de trabajo)
     let left_col = |k: Kind| -> (i32, i32) {
         let (mut x, mut y, mut col_w) = (wa.left + m, y0, 0);
-        for c in [Kind::Photos, Kind::Visual, Kind::Clocks, Kind::Countdown, Kind::Todo] {
+        for c in [Kind::Photos, Kind::Visual, Kind::Clocks, Kind::Countdown, Kind::Todo, Kind::News, Kind::Stocks] {
             if y > y0 && y + h_of(c) > wa.bottom - m { x += col_w + gap; y = y0; col_w = 0; }
             if c == k { return ((x).min(wa.right - w_of(c)).max(wa.left), y.min(wa.bottom - h_of(c)).max(wa.top)); }
             col_w = col_w.max(w_of(c));
@@ -457,7 +461,7 @@ fn place(k: Kind, order: usize) {
         Kind::Phone => (x1 - gap - w_of(Kind::Phone), y0),
         // Los nuevos, a la izquierda de la pantalla (en la cara de widgets los iconos no están): fotos arriba
         // y el visualizador debajo
-        Kind::Photos | Kind::Visual | Kind::Clocks | Kind::Countdown | Kind::Todo => left_col(k),
+        Kind::Photos | Kind::Visual | Kind::Clocks | Kind::Countdown | Kind::Todo | Kind::News | Kind::Stocks => left_col(k),
     };
     let (x, y) = ini_get(&ini(), &pos_key(k)).and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).unwrap_or(def);
     create(k, x, y, w_of(k), h_of(k), order);
@@ -546,6 +550,8 @@ pub fn size(k: Kind) -> (f32, f32) {
         Kind::Clocks => (380.0, 170.0),
         Kind::Todo => (320.0, 300.0),
         Kind::Countdown => (300.0, 170.0),
+        Kind::News => (380.0, 330.0),
+        Kind::Stocks => (380.0, 296.0),
     }
 }
 

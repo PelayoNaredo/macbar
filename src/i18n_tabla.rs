@@ -562,4 +562,16 @@ pub static EN: &[(&str, &str)] = &[
     ("{} libres", "{} free"),
     ("en pausa", "paused"),
     ("PAUSA", "PAUSE"),
+    // ---- news.rs y stocks.rs (noticias y bolsa)
+    ("Noticias", "News"),
+    ("Bolsa", "Stocks"),
+    ("Cargando titulares…", "Loading headlines…"),
+    ("Cargando cotizaciones…", "Loading quotes…"),
+    ("Noticias y bolsa", "News and stocks"),
+    ("Fuentes de las noticias", "News sources"),
+    ("Feeds RSS: noticias_fuentes en widgets.ini", "RSS feeds: noticias_fuentes in widgets.ini"),
+    ("Editar fuentes…", "Edit sources…"),
+    ("Valores de la bolsa", "Stock symbols"),
+    ("Símbolos de Yahoo Finance: bolsa_simbolos", "Yahoo Finance symbols: bolsa_simbolos"),
+    ("Editar símbolos…", "Edit symbols…"),
 ];

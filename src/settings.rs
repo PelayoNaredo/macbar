@@ -65,7 +65,7 @@ impl Sec {
 enum Row {
     Autostart, Lang, Position, Solid, Accent, Present,
     CardClick, CardHover, CardGlance, Cpu,
-    Widgets, Widget(usize), Design(usize), Style, Ink, FaceDbl,
+    Widgets, Widget(usize), Design(usize), Style, Ink, FaceDbl, NewsSrc, StockSyms,
     Profile, ProfileSave, ProfileDir, Theme,
     City, Refresh,
     Version, Repo, Folder, Quit,
@@ -94,6 +94,7 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
                 if desk::variant_items().get(i).is_some_and(|d| d.0.len() > 1) { v.push(Design(i)); }
                 v
             }).collect()),
+            (Some("Noticias y bolsa"), vec![NewsSrc, StockSyms]),
             (Some("Aspecto"), vec![Style, Ink]),
             (Some("Doble escritorio"), vec![Face, FaceDbl]),
         ],
@@ -201,6 +202,8 @@ enum Act {
     Url,
     Folder,
     EditConfig,
+    EditNews,
+    EditStocks,
     EditCity,
     SaveCity,
     Design(usize, usize),
@@ -231,6 +234,8 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
         Style => match pick(2) { Some(i) if (i == 0) != st.floating => Act::Style, _ => Act::Nothing },
         Ink => match pick(3) { Some(i) if INK_ORDER[i as usize] as i8 != st.ink => Act::Bar(crate::BAR_INK0 + INK_ORDER[i as usize]), _ => Act::Nothing },
         FaceDbl if sub == 0 => Act::FaceDbl,
+        NewsSrc if sub == 1 => Act::EditNews,
+        StockSyms if sub == 1 => Act::EditStocks,
         // Un perfil ya guardado se carga y macbar se reinicia; uno vacío guarda en él lo de ahora
         Profile => match pick(3) {
             Some(i) if st.profile != Some(i as usize) => if st.saved[i as usize] { Act::BarClose(crate::BAR_PROFILE0 + i) } else { Act::Bar(crate::BAR_PROFILE0 + i) },
@@ -304,6 +309,8 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
             let sel = INK_ORDER.iter().position(|m| *m as i8 == st.ink);
             (t("Color del texto"), t("Automático: según el fondo de cada widget"), seg(&["Auto", "Claro", "Oscuro"], sel), true)
         }
+        NewsSrc => (t("Fuentes de las noticias"), t("Feeds RSS: noticias_fuentes en widgets.ini"), Ctl::Buttons(vec![("\u{E70F}", t("Editar fuentes…"))]), true),
+        StockSyms => (t("Valores de la bolsa"), t("Símbolos de Yahoo Finance: bolsa_simbolos"), Ctl::Buttons(vec![("\u{E70F}", t("Editar símbolos…"))]), true),
         FaceDbl => (t("Doble clic en el escritorio"), t("Cambia entre los widgets y los iconos"), Ctl::Switch(st.face_dbl), true),
         Profile => {
             let sel = st.profile;
@@ -443,6 +450,8 @@ impl Settings {
             Act::Url => Re::CloseRun(Box::new(|| sys::open(REPO))),
             Act::Folder => Re::CloseRun(Box::new(|| { let _ = std::fs::create_dir_all(sys::config_dir()); sys::open(&sys::config_dir()); })),
             Act::EditConfig => Re::CloseRun(Box::new(sys::edit_config)),
+            Act::EditNews => Re::CloseRun(Box::new(crate::news::edit_sources)),
+            Act::EditStocks => Re::CloseRun(Box::new(crate::stocks::edit_symbols)),
         }
     }
 
