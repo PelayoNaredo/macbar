@@ -110,6 +110,8 @@ pub fn new(k: Kind) -> Box<dyn Widget> {
         Kind::Storage => Box::new(StorageW::default()),
         Kind::Projects => Box::new(ProjectsW { tab: 0, scroll: 0, tab_at: None, pill: 0.0 }),
         Kind::Phone => { crate::phone::start(); Box::new(PhoneW::default()) }
+        Kind::Visual => Box::new(crate::deskw2::VisualW::default()),
+        Kind::Photos => Box::new(crate::deskw2::PhotosW::default()),
     }
 }
 
@@ -179,7 +181,7 @@ pub(crate) fn draw_art(rt: &ID2D1RenderTarget, bmp: &ID2D1Bitmap, side: u32, x: 
 fn ellipse(x: f32, y: f32, r: f32) -> D2D1_ELLIPSE { D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: r, radiusY: r } }
 
 /// Cabecera común: título a la izquierda y un texto suave a la derecha.
-fn header(ui: &Ui, d: &DFonts, title: &str, right: &str, w: f32) {
+pub(crate) fn header(ui: &Ui, d: &DFonts, title: &str, right: &str, w: f32) {
     ui.text(&d.title, title, PAD, PAD - 2.0, 22.0, &ui.white);
     if !right.is_empty() { ui.text_r(&ui.f.sub, right, w - PAD, PAD - 2.0, 22.0, &ui.dim); }
 }

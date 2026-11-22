@@ -418,4 +418,9 @@ pub static EN: &[(&str, &str)] = &[
     ("Ver los iconos del escritorio (Win+Alt+W)", "Show desktop icons (Win+Alt+W)"),
     ("Doble clic en el escritorio para cambiar", "Double-click the desktop to switch"),
     ("Cambiar entre widgets e iconos del escritorio", "Switch between widgets and desktop icons"),
+    ("Visualizador de audio", "Audio visualizer"),
+    ("Marco de fotos", "Photo frame"),
+    ("Pon algo de música", "Play some music"),
+    ("Clic derecho para elegir una carpeta de fotos", "Right-click to choose a photo folder"),
+    ("Carpeta del marco de fotos", "Photo frame folder"),
 ];

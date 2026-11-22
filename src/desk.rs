@@ -13,15 +13,17 @@ const TIMER_FRAME: usize = 2;
 const TIMER_FADE: usize = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone }
-const ALL: [Kind; 7] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone];
+pub enum Kind { Calendar, Weather, Music, System, Storage, Projects, Phone, Visual, Photos }
+const ALL: [Kind; 9] = [Kind::Calendar, Kind::Weather, Kind::Music, Kind::System, Kind::Storage, Kind::Projects, Kind::Phone, Kind::Visual, Kind::Photos];
+/// Widgets que llegaron después: empiezan quitados (no aparecen de golpe al actualizar).
+const NEW_OFF: [Kind; 2] = [Kind::Visual, Kind::Photos];
 
 impl Kind {
     fn key(self) -> &'static str {
-        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil" }
+        match self { Kind::Calendar => "calendario", Kind::Weather => "tiempo", Kind::Music => "musica", Kind::System => "sistema", Kind::Storage => "almacenamiento", Kind::Projects => "proyectos", Kind::Phone => "movil", Kind::Visual => "visualizador", Kind::Photos => "fotos" }
     }
     fn label(self) -> &'static str {
-        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)" })
+        i18n::t(match self { Kind::Calendar => "Calendario", Kind::Weather => "Tiempo", Kind::Music => "Música", Kind::System => "Sistema", Kind::Storage => "Almacenamiento y papelera", Kind::Projects => "Proyectos", Kind::Phone => "Móvil (Enlace Móvil)", Kind::Visual => "Visualizador de audio", Kind::Photos => "Marco de fotos" })
     }
 }
 
@@ -60,7 +62,7 @@ fn toggle_style() {
 }
 
 /// Todo un poco más pequeño que el diseño original (se dibuja en DIP y se escala entero).
-const ZOOM: f32 = 0.86;
+pub(crate) const ZOOM: f32 = 0.86;
 
 /// Escala de píxeles de un widget: la del monitor por el tamaño de los widgets.
 fn scale(hwnd: HWND) -> f32 { scale_of(hwnd) * ZOOM }
@@ -387,8 +389,20 @@ pub fn start() {
         let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinst.into(), lpszClassName: w!("MacBarDesk"), hCursor: LoadCursorW(None, IDC_ARROW).unwrap(), ..Default::default() };
         RegisterClassW(&wc);
     }
+    // Primera vez con widgets nuevos: se apuntan como quitados (se ponen desde el menú o la configuración)
+    if ini_get(&ini(), "nuevos_v2").is_none() {
+        let txt = ini();
+        let mut hidden: Vec<String> = ini_get(&txt, "ocultos").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
+        for k in NEW_OFF { if !hidden.iter().any(|h| h == k.key()) { hidden.push(k.key().to_string()); } }
+        let new = txt.lines().map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
+        let new = if txt.lines().any(|l| l.trim_start().starts_with("ocultos")) { new } else { format!("{new}\nocultos = {}", hidden.join(",")) };
+        let _ = std::fs::write(ini_path(), new + "\nnuevos_v2 = 1\n");
+    }
     let txt = ini();
+    // Prueba visual: MACBAR_WIDGETS=clave,clave enseña solo esos (por encima de todo, ver WM_WINDOWPOSCHANGING)
+    let only = std::env::var("MACBAR_WIDGETS").ok();
     for (i, k) in ALL.iter().enumerate() {
+        if let Some(o) = &only { if o.split(',').any(|x| x == k.key()) { place(*k, i); } continue; }
         if !is_hidden_in(&txt, *k) { place(*k, i); }
     }
 }
@@ -414,6 +428,10 @@ fn place(k: Kind, order: usize) {
         Kind::System => (x1, y0), Kind::Projects => (x1, y0 + h_of(Kind::System) + gap),
         // El del móvil, vertical: una columna más a la izquierda
         Kind::Phone => (x1 - gap - w_of(Kind::Phone), y0),
+        // Los nuevos, a la izquierda de la pantalla (en la cara de widgets los iconos no están): fotos arriba
+        // y el visualizador debajo
+        Kind::Photos => (wa.left + m, y0),
+        Kind::Visual => (wa.left + m, y0 + h_of(Kind::Photos) + gap),
     };
     let (x, y) = ini_get(&ini(), &pos_key(k)).and_then(|v| { let (a, b) = v.split_once(',')?; Some((a.trim().parse().ok()?, b.trim().parse().ok()?)) }).unwrap_or(def);
     create(k, x, y, w_of(k), h_of(k), order);
@@ -429,6 +447,8 @@ pub fn size(k: Kind) -> (f32, f32) {
         Kind::System => (540.0, 360.0),
         Kind::Projects => (540.0, 460.0),
         Kind::Phone => (330.0, 780.0),
+        Kind::Visual => (380.0, 200.0),
+        Kind::Photos => (380.0, 260.0),
     }
 }
 
@@ -493,7 +513,7 @@ fn age(born: Instant) -> f32 {
 }
 
 /// Medición opcional del coste de pintar (con MACBAR_PROF=1): pintados y milisegundos por widget cada 10 s.
-static PROF: Mutex<([u32; 6], [f32; 6], Option<Instant>)> = Mutex::new(([0; 6], [0.0; 6], None));
+static PROF: Mutex<([u32; 9], [f32; 9], Option<Instant>)> = Mutex::new(([0; 9], [0.0; 9], None));
 thread_local! {
 }
 
@@ -507,10 +527,10 @@ fn paint(hwnd: HWND) {
         p.0[k] += 1; p.1[k] += t0.elapsed().as_secs_f32() * 1000.0;
         let st = *p.2.get_or_insert_with(Instant::now);
         if st.elapsed().as_secs() >= 10 {
-            let per: Vec<String> = (0..6).map(|i| if p.0[i] > 0 { format!("{:.2}", p.1[i] / p.0[i] as f32) } else { "-".into() }).collect();
+            let per: Vec<String> = (0..9).map(|i| if p.0[i] > 0 { format!("{:.2}", p.1[i] / p.0[i] as f32) } else { "-".into() }).collect();
             let ed = ENDDRAW_MS.with(|e| e.replace(0.0));
             let _ = std::fs::write(std::env::temp_dir().join("macbar_prof.txt"), format!("pintados={:?}\nms_por_pintado={:?}\nms_total={:?}\nms_en_EndDraw={:.0}", p.0, per, p.1.map(|v| v.round()), ed));
-            *p = ([0; 6], [0.0; 6], Some(Instant::now()));
+            *p = ([0; 9], [0.0; 9], Some(Instant::now()));
         }
     }
 }
@@ -864,6 +884,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             WM_WINDOWPOSCHANGING => {
                 // Siempre justo encima del fondo: nunca por delante de una ventana normal
                 let pos = &mut *(lp.0 as *mut WINDOWPOS);
+                if std::env::var_os("MACBAR_WIDGETS").is_some() { pos.hwndInsertAfter = HWND_TOPMOST; pos.flags &= !SWP_NOZORDER; return LRESULT(0); }
                 let dragging = with_dw(hwnd, |w| w.drag.is_some()).unwrap_or(false);
                 if !dragging {
                     // Los widgets forman un bloque justo encima del escritorio. Si este ya está en el
