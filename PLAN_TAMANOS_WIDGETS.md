@@ -30,13 +30,13 @@ Reglas:
 
 | Widget | Pequeño | Mediano | Banda | Alto | Grande | Columna | Extragrande |
 |---|---|---|---|---|---|---|---|
-| Tiempo | temp + icono + ciudad | + máx/mín y 4 horas | + 12 horas en línea | temp arriba + 5 días | + horas y 5 días | + 7 días + detalles (viento, UV, lluvia) | horas + 7 días + detalles |
-| Calendario | día grande + día de la semana | día + 3 próximos eventos | semana en línea con eventos | mes mini + 2 eventos | mes completo + eventos de hoy | mes + agenda de 7 días | mes + agenda + semana |
-| Música | carátula + play | carátula + título + controles | + progreso y cola | carátula grande + controles | carátula + progreso + controles | + letra/cola | carátula + progreso + espectro |
-| Sistema | anillo de CPU | 3 anillos (CPU, RAM, disco) | anillos + red | 3 barras verticales | anillos + red + batería | + procesos que más gastan | todo + gráfica de 60 s |
-| Almacenamiento | unidad principal (anillo) | 2 unidades | todas en línea | todas en columna | todas + tamaño | + carpetas más grandes | todas + carpetas |
-| Proyectos | último proyecto | 3 recientes | 4 en línea | 5 recientes | recientes + rama/cambios | + commits recientes | dos columnas |
-| Móvil | batería + conexión | foto del móvil + estado + nº de avisos | — | foto + estado + accesos | + fotos recientes | + 6 fotos | — |
+| Tiempo | ciudad + temp con icono + cielo y máx/mín | + 4 horas | + 12 horas en línea | temp arriba + 5 días | cabecera + curva de 24 h + 5 días | + 6 días + detalles (lluvia, sol, mañana, próximas 24 h) | cabecera, curva y 6 días + detalles en columna |
+| Calendario | día grande + mes + próxima fecha | día + 3 próximas fechas | día + semana en línea + 3 fechas | mes mini + 2 fechas | cabecera con hora + mes completo (fechas marcadas) + enfoque | + 4 próximas fechas | mes + semana + 3 fechas + enfoque |
+| Música | carátula + play | carátula + título + controles | + progreso y cola | carátula + canción + progreso + controles | carátula + canción + progreso + controles + tema siguiente | + cola | carátula + canción + cola + espectro + progreso + controles |
+| Sistema | anillo de CPU | 3 anillos (CPU, RAM, disco) | anillos (+ batería) + red | 3 barras verticales + batería | anillos + batería + red + lo que más gasta | + gráfica de 60 s | cifras + gráfica de 60 s + red + lo que más gasta |
+| Almacenamiento | unidad principal (anillo) | 2 unidades (anillos) | todas en línea + papelera | todas en columna + papelera | todas + tamaño + papelera + lo más grande + liberar espacio | + usado por unidad + total | anillos + total + papelera + lo más grande + liberar espacio |
+| Proyectos | último proyecto | 3 recientes | 4 en tarjetas | 5 recientes | pestañas local/GitHub con rama y cambios | local y GitHub a la vez | dos columnas (local y GitHub) |
+| Móvil | batería + conexión | foto del móvil + estado + nº de avisos | — | foto + estado + accesos | + accesos + fotos recientes | + avisos por app | — |
 | Fotos | foto | foto horizontal | tira de 4 | foto vertical | foto grande | 2 fotos | collage |
 | Visualizador | espectro mini | espectro | espectro ancho | espectro vertical | espectro + título | + carátula | espectro grande + título |
 | Relojes | 1 reloj | 2 relojes | 4 relojes | 3 en columna | 4 en rejilla | 6 | 8 + diferencia horaria |
@@ -44,6 +44,15 @@ Reglas:
 | Cuenta atrás | días | días + nombre | varias en línea | 2 cuentas | 3 cuentas | 5 cuentas | 4 en rejilla |
 | Noticias | 1 titular | 2 titulares | 3 titulares en línea | 4 titulares | 4 + fuente | 7 titulares | 2 columnas de 4 |
 | Bolsa | 1 valor + gráfica | 2 valores | 4 valores en línea | 4 valores | 5 + gráfica grande del primero | 8 valores | 4 + gráfica grande + detalle |
+
+**Ajustes al hacerlo (lote de los siete clásicos de `deskw.rs`):** la tabla de arriba ya es la que se hizo; cambia respecto a la primera idea en lo que los datos no dan o no tenía sentido:
+- **Tiempo:** la previsión (Open-Meteo) trae 6 días (`forecast_days=6`) y no trae viento ni índice UV, así que no hay «7 días» y los detalles son lluvia, sol (amanecer y anochecer), mañana y el margen de las próximas 24 h.
+- **Calendario:** macbar no lee ningún calendario: los «eventos» son las fechas de **Cuenta atrás** (`cuenta_atras`), marcadas con un punto en el mes; pulsar una salta a su mes y, sin fechas, se invita a añadirlas. La «agenda de 7 días» pasa a **próximas fechas**, porque siete días seguidos casi siempre salen vacíos.
+- **Música:** la letra no está en el widget clásico, así que Columna enseña la cola. En Extragrande, el espectro va bajo la cola (solo pide fotogramas mientras suena).
+- **Sistema:** la batería es un anillo más cuando el equipo la tiene (y una línea en Alto); «lo que más gasta» entra ya en Grande.
+- **Almacenamiento:** no hay datos de «carpetas más grandes» (habría que recorrer el disco entero); en su lugar, lo más grande de la papelera, lo usado de cada unidad y el total.
+- **Proyectos:** no hay commits recientes en los datos (habría que lanzar `git log` en cada repo); Columna enseña a la vez los de local y los de GitHub.
+- **Móvil:** Enlace Móvil da como mucho 3 fotos, así que Columna no llega a 6: añade los avisos agrupados por app (cuántos y hace cuánto, sin su contenido, como el resto del widget).
 
 Los diseños alternativos (Cielo, Vinilo, Casete, Ojo…) declaran sus propios tamaños. Si eliges un tamaño que tu diseño no admite, el selector solo enseña los diseños que sí lo admiten, para que no salga nada roto.
 
