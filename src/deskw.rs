@@ -348,7 +348,7 @@ fn month_add(y: i32, m: u32, off: i32) -> (i32, u32) {
 }
 
 /// «hoy», «mañana», «en 5 días».
-fn days_left(n: i64) -> String {
+pub(crate) fn days_left(n: i64) -> String {
     match n { 0 => i18n::t("hoy").into(), 1 => i18n::t("mañana").into(), n => i18n::tf("en {} días", &[&n]) }
 }
 

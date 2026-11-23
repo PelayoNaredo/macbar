@@ -654,27 +654,28 @@ impl Lay {
 }
 
 /// Tamaños que admite cada widget con cada diseño (en el orden de `Sz::ALL`). Los clásicos admiten
-/// todos (Móvil sin Banda ni Extragrande); los diseños alternativos, de momento, solo el más cercano a
-/// su tamaño de siempre (la F5 del plan los ampliará).
+/// todos (Móvil sin Banda ni Extragrande); cada diseño alternativo, solo los tamaños donde su idea
+/// tiene sentido (siempre incluido el más cercano a su tamaño de siempre, así nadie cambia al actualizar).
 pub fn sizes(k: Kind, variant: usize) -> &'static [Sz] {
     use Sz::*;
     const ALL7: &[Sz] = &Sz::ALL;
     match (k, variant) {
-        (Kind::Weather, 1 | 2) => &[Mediano],
-        (Kind::Calendar, 1) => &[Pequeno],
-        (Kind::Calendar, 2) => &[Mediano],
-        (Kind::System, 1) => &[Mediano],
-        (Kind::System, 2) => &[Extragrande],
-        (Kind::Music, 1) => &[Grande],
-        (Kind::Music, 2) => &[Mediano],
-        (Kind::Music, 3) => &[Banda],
-        (Kind::Photos, 1) => &[Alto],
-        (Kind::Visual, 1) => &[Pequeno],
-        (Kind::Visual, 2) => &[Mediano],
-        (Kind::Visual, 3) => &[Grande],
-        (Kind::Clocks, 1) => &[Pequeno],
-        (Kind::Storage, 1) => &[Mediano],
-        (Kind::Countdown, 1) => &[Mediano],
+        (Kind::Weather, 1) => &[Pequeno, Mediano, Banda, Grande],          // Cielo
+        (Kind::Weather, 2) => &[Pequeno, Mediano, Banda],                  // Mínimo
+        (Kind::Calendar, 1) => &[Pequeno, Mediano, Alto],                  // Hoy
+        (Kind::Calendar, 2) => &[Pequeno, Mediano, Alto, Grande],          // Póster
+        (Kind::System, 1) => &[Pequeno, Mediano, Banda, Grande],           // Anillos
+        (Kind::System, 2) => &[Grande, Columna, Extragrande],              // Ficha
+        (Kind::Music, 1) => &[Pequeno, Alto, Grande, Columna],             // Carátula
+        (Kind::Music, 2) => &[Mediano, Banda, Grande, Extragrande],        // Vinilo
+        (Kind::Music, 3) => &[Banda, Grande, Extragrande],                 // Casete
+        (Kind::Photos, 1) => &[Pequeno, Alto, Grande],                     // Polaroid
+        (Kind::Visual, 1) => &[Pequeno, Mediano, Grande],                  // Radial
+        (Kind::Visual, 2) => &[Mediano, Banda, Grande, Extragrande],       // Cristal
+        (Kind::Visual, 3) => &[Pequeno, Alto, Grande],                     // Órbita
+        (Kind::Clocks, 1) => &[Pequeno, Grande],                           // Ojo
+        (Kind::Storage, 1) => &[Mediano, Alto, Grande, Columna],           // Tubos
+        (Kind::Countdown, 1) => &[Mediano, Banda],                         // Paletas
         (Kind::Phone, _) => &[Pequeno, Mediano, Alto, Grande, Columna],
         _ => ALL7,
     }
@@ -1909,17 +1910,42 @@ mod tests {
         assert_eq!(m(Kind::Clocks), Sz::Mediano); // 380×170
         assert_eq!(m(Kind::Countdown), Sz::Mediano); // 300×170
         assert_eq!(m(Kind::Photos), Sz::Grande); // 380×260
-        // La tabla de los diseños alternativos es justo el más cercano de los siete a su tamaño de siempre
+        // Cada diseño alternativo admite el más cercano de los siete a su tamaño de siempre (quien
+        // actualiza no cambia de tamaño), en el orden de `Sz::ALL`, sin repetir y nunca uno solo
         for k in ALL {
             for v in 1..variants(k).len() {
-                assert_eq!(sizes(k, v), &[nearest(legacy_size(k, v), &Sz::ALL)], "{k:?} diseño {v}");
+                let s = sizes(k, v);
+                assert!(s.contains(&nearest(legacy_size(k, v), &Sz::ALL)), "{k:?} diseño {v}");
+                assert!(s.len() >= 2, "{k:?} diseño {v}");
+                let pos: Vec<usize> = s.iter().map(|z| Sz::ALL.iter().position(|a| a == z).unwrap()).collect();
+                assert!(pos.windows(2).all(|p| p[0] < p[1]), "{k:?} diseño {v}: orden");
+                assert_eq!(nearest(legacy_size(k, v), s), nearest(legacy_size(k, v), &Sz::ALL), "{k:?} diseño {v}");
             }
         }
         // El Móvil no admite Banda ni Extragrande; los clásicos, todo lo demás
         assert!(!sizes(Kind::Phone, 0).contains(&Sz::Banda) && !all_sizes(Kind::Phone).contains(&Sz::Extragrande));
         assert_eq!(all_sizes(Kind::Weather).len(), 7);
         // Un tamaño guardado que el diseño no admite se cambia por el más parecido que sí
-        assert_eq!(nearest(Sz::Grande.dims(), sizes(Kind::Weather, 1)), Sz::Mediano);
+        assert_eq!(nearest(Sz::Grande.dims(), sizes(Kind::Weather, 2)), Sz::Mediano);
+    }
+
+    #[test]
+    fn disenos_segun_el_tamano() {
+        // Cada tamaño que se ofrece tiene al menos un diseño que lo admite (el selector nunca queda vacío)
+        for k in ALL { for s in all_sizes(k) { assert!(!compatible_variants(k, s).is_empty(), "{k:?} {s:?}"); } }
+        // Algunos de la tabla: el Ojo solo en cuadrado, las Paletas solo en horizontal, la Ficha en grande
+        assert_eq!(compatible_variants(Kind::Clocks, Sz::Grande), vec![0, 1]);
+        assert_eq!(compatible_variants(Kind::Clocks, Sz::Banda), vec![0]);
+        assert_eq!(compatible_variants(Kind::Countdown, Sz::Banda), vec![0, 1]);
+        assert_eq!(compatible_variants(Kind::Countdown, Sz::Pequeno), vec![0]);
+        assert_eq!(compatible_variants(Kind::System, Sz::Pequeno), vec![0, 1]);
+        assert_eq!(compatible_variants(Kind::System, Sz::Columna), vec![0, 2]);
+        assert_eq!(compatible_variants(Kind::Music, Sz::Grande), vec![0, 1, 2, 3]);
+        assert_eq!(compatible_variants(Kind::Music, Sz::Mediano), vec![0, 2]);
+        // Al cambiar a un diseño que no admite el tamaño de ahora, pasa al suyo más parecido
+        assert_eq!(nearest(Sz::Banda.dims(), sizes(Kind::Clocks, 1)), Sz::Grande);
+        assert_eq!(nearest(Sz::Columna.dims(), sizes(Kind::Photos, 1)), Sz::Grande);
+        assert_eq!(nearest(Sz::Pequeno.dims(), sizes(Kind::System, 2)), Sz::Grande);
     }
 
     #[test]

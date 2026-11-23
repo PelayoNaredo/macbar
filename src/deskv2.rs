@@ -2,7 +2,7 @@
 //! y cuenta atrás de paletas. Como los de `deskv`, cada uno es otro `Widget` con su tamaño (`desk::size`).
 
 use super::*;
-use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
+use desk::{DFonts, Kind, Sz};
 use deskw::Widget;
 use popup::Ui;
 use std::f32::consts::TAU;
@@ -241,9 +241,30 @@ impl VinylW {
     }
 }
 
+/// Maqueta del tocadiscos para cada tamaño: el disco (centro y radio) y la columna de la canción
+/// (x0, ancho, arriba del título, alto del progreso y centro de los controles en x e y).
+struct VinylLay { cx: f32, cy: f32, r: f32, x0: f32, maxw: f32, ty: f32, py: f32, bcx: f32, bcy: f32, album: bool }
+
+fn vinyl_lay(l: desk::Lay) -> VinylLay {
+    let (w, h) = (l.w, l.h);
+    match l.sz {
+        // Disco arriba, algo a la izquierda (el brazo va a su derecha) y la canción debajo, a lo ancho
+        Sz::Grande => { let r = 92.0; VinylLay { cx: w / 2.0 - 22.0, cy: 18.0 + r, r, x0: 20.0, maxw: w - 40.0, ty: 222.0, py: 278.0, bcx: w / 2.0, bcy: h - 32.0, album: false } }
+        // Disco grande a la izquierda; la canción con su disco y el progreso, y los controles debajo
+        Sz::Extragrande => { let r = h / 2.0 - 20.0; VinylLay { cx: 20.0 + r, cy: h / 2.0, r, x0: 2.0 * r + 92.0, maxw: w - 24.0 - (2.0 * r + 92.0), ty: 92.0, py: 196.0, bcx: (2.0 * r + 92.0 + w - 24.0) / 2.0, bcy: 266.0, album: true } }
+        // Banda: la canción en medio y los controles a la derecha, a media altura
+        Sz::Banda => { let r = h / 2.0 - 12.0; VinylLay { cx: 12.0 + r, cy: h / 2.0, r, x0: 2.0 * r + 44.0, maxw: w - 230.0 - (2.0 * r + 44.0), ty: 30.0, py: 108.0, bcx: w - 112.0, bcy: h / 2.0, album: true } }
+        // Mediano (el de siempre)
+        _ => { let r = h / 2.0 - 12.0; VinylLay { cx: 12.0 + r, cy: h / 2.0, r, x0: 2.0 * r + 44.0, maxw: w - 18.0 - (2.0 * r + 44.0), ty: 22.0, py: 88.0, bcx: (2.0 * r + 44.0 + w - 18.0) / 2.0, bcy: h - 30.0, album: false } }
+    }
+}
+
 impl Widget for VinylW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Music);
+        let l = desk::lay(Kind::Music);
+        let (w, h) = (l.w, l.h);
+        let vl = vinyl_lay(l);
         if self.rt.fresh(ui.rt) { self.art = None; }
         let m = MEDIA.lock().unwrap().clone();
         let playing = m.as_ref().is_some_and(|m| m.playing);
@@ -267,8 +288,10 @@ impl Widget for VinylW {
 
         // ---- Disco y brazo: entran desde la izquierda con un giro
         let k = ez(t, 0.0, 0.7);
-        let (r, cy) = (h / 2.0 - 12.0, h / 2.0);
-        let cx = 12.0 + r - 16.0 * (1.0 - k);
+        let (r, cy) = (vl.r, vl.cy);
+        // El brazo crece con el disco (sus piezas no: base, contrapeso y cápsula son de tamaño real)
+        let s = r / 73.0;
+        let cx = vl.cx - 16.0 * (1.0 - k);
         let base = cur_transform(ui);
         popup::push_alpha(ui.rt, k);
         let spin_in = -0.9 * (1.0 - k);
@@ -277,34 +300,36 @@ impl Widget for VinylW {
         self.disc(ui, cx, cy, r);
         self.ang = a0;
         let drop = smoothstep(0.7, 1.0, self.arm);
-        Self::tonearm(ui, cx + r + 6.0, cy - r + 14.0, 104.0, arm_angle(self.arm, prog), 1.0 - drop);
+        Self::tonearm(ui, cx + r + 6.0 * s, cy - r + 14.0 * s, 104.0 * s, arm_angle(self.arm, prog), 1.0 - drop);
         unsafe { ui.rt.PopLayer(); ui.rt.SetTransform(&base); }
-        ui.hit(rect(0.0, 0.0, cx + r + 18.0, h), 4);
+        ui.hit(rect(vl.cx - r - 10.0, cy - r - 10.0, vl.cx + r + 18.0 * s, cy + r + 10.0), 4);
 
         // ---- Canción
-        let x0 = 2.0 * r + 44.0;
-        let maxw = w - 18.0 - x0;
+        let (x0, maxw, ty) = (vl.x0, vl.maxw, vl.ty);
         let kt = ez(self.title_at.map(|a| a.elapsed().as_secs_f32()).unwrap_or(t).min(t), 0.12, 0.45);
         let ka = ez(self.title_at.map(|a| a.elapsed().as_secs_f32()).unwrap_or(t).min(t), 0.2, 0.45);
         let Some(m) = m else {
             popup::push_alpha(ui.rt, kt);
-            ui.text(&d.title, i18n::t("Nada sonando"), x0, 30.0 + 8.0 * (1.0 - kt), 24.0, &ui.white);
-            ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, i18n::t("Pon algo de música"), maxw), x0, 56.0, 18.0, &ui.dim);
+            ui.text(&d.title, i18n::t("Nada sonando"), x0, ty + 8.0 + 8.0 * (1.0 - kt), 24.0, &ui.white);
+            ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, i18n::t("Pon algo de música"), maxw), x0, ty + 34.0, 18.0, &ui.dim);
             unsafe { ui.rt.PopLayer(); }
             self.moving = moving;
             return;
         };
         popup::push_alpha(ui.rt, kt);
-        ui.text(&d.title, &fit(ui, &d.title, &m.title, maxw), x0, 22.0 + 8.0 * (1.0 - kt), 24.0, &ui.white);
+        ui.text(&d.title, &fit(ui, &d.title, &m.title, maxw), x0, ty + 8.0 * (1.0 - kt), 24.0, &ui.white);
         unsafe { ui.rt.PopLayer(); }
         popup::push_alpha(ui.rt, ka);
-        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &m.artist, maxw), x0, 48.0 + 8.0 * (1.0 - ka), 18.0, &ui.dim);
+        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &m.artist, maxw), x0, ty + 26.0 + 8.0 * (1.0 - ka), 18.0, &ui.dim);
+        if vl.album && !m.album.trim().is_empty() && m.album.trim() != m.title.trim() {
+            ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &m.album, maxw), x0, ty + 48.0 + 8.0 * (1.0 - ka), 18.0, &ui.faint);
+        }
         unsafe { ui.rt.PopLayer(); }
 
         // ---- Progreso: línea fina con los tiempos debajo
         let kp = ez(t, 0.3, 0.6);
         popup::push_alpha(ui.rt, kp);
-        let py = 88.0;
+        let py = vl.py;
         unsafe {
             ui.rt.FillRoundedRectangle(&rrect(rect(x0, py, x0 + maxw, py + 3.0), 1.5), &ui.track);
             if secs.is_some() && prog > 0.0 { ui.rt.FillRoundedRectangle(&rrect(rect(x0, py, x0 + (maxw * prog).max(3.0), py + 3.0), 1.5), &ui.white); }
@@ -314,8 +339,8 @@ impl Widget for VinylW {
             ui.text_r(&ui.f.small, &live::mmss(e as u32), x0 + maxw, py + 8.0, 16.0, &ui.dim);
         }
         // ---- Controles: anterior, reproducir/pausa (en un círculo) y siguiente
-        let cyb = h - 30.0;
-        let mid = x0 + maxw / 2.0;
+        let _ = (w, h);
+        let (mid, cyb) = (vl.bcx, vl.bcy);
         for (i, (g, id)) in [("\u{E892}", 1u32), (if m.playing { "\u{E769}" } else { "\u{E768}" }, 2), ("\u{E893}", 3)].into_iter().enumerate() {
             let bx = mid + (i as f32 - 1.0) * 52.0;
             let hk = ui.heat(id);
@@ -356,30 +381,104 @@ impl Widget for VinylW {
 #[derive(Default)]
 pub struct PosterW;
 
+/// Día del año (1 = 1 de enero) y días que tiene el año.
+fn day_of_year(y: i32, m: u32, d: u32) -> (i64, i64) {
+    let d0 = deskw3::days_from_civil(y, 1, 1);
+    (deskw3::days_from_civil(y, m, d) - d0 + 1, deskw3::days_from_civil(y + 1, 1, 1) - d0)
+}
+
+/// Semana ISO 8601 (la del jueves de la semana; la 1 es la que tiene el primer jueves del año).
+fn iso_week(y: i32, m: u32, d: u32) -> u32 {
+    let days = deskw3::days_from_civil(y, m, d);
+    // 1970-01-01 fue jueves: lunes = 0 … domingo = 6
+    let wd = (days + 3).rem_euclid(7);
+    let thu = days - wd + 3;
+    let (ty, _, _) = deskw3::civil_from_days(thu);
+    ((thu - deskw3::days_from_civil(ty, 1, 1)) / 7 + 1) as u32
+}
+
 impl Widget for PosterW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, _dt: f32) {
-        let (w, _h) = size(Kind::Calendar);
+        let l = desk::lay(Kind::Calendar);
+        let (w, h) = (l.w, l.h);
         let f = vfonts(ui);
         let now = unsafe { GetLocalTime() };
         let acc = crate::profiles::accent(1.0);
         let x = 14.0;
+        // Arriba del número (su caja), según el tamaño; el número ocupa ~124 de alto
+        let (wy, ny) = match l.sz { Sz::Pequeno => (12.0, 4.0), Sz::Mediano => (54.0, 6.0), _ => (14.0, 30.0) };
+        let wd = spaced(&i18n::weekday(now.wDayOfWeek as usize).to_uppercase());
+        let day = now.wDay.to_string();
+        let dw = ui.p.width(&f.day, &day);
+        // En el mediano, el día de la semana, el mes y el año van a la derecha del número
+        let xr = if l.sz == Sz::Mediano { x + dw + 14.0 } else { x };
         let k0 = ez(t, 0.0, 0.5);
         popup::push_alpha(ui.rt, k0);
-        let wd = spaced(&i18n::weekday(now.wDayOfWeek as usize).to_uppercase());
-        ui.text(&f.spaced, &wd, x + 2.0, 12.0, 18.0, &ui.brush(acc));
+        ui.text(&f.spaced, &wd, xr + 2.0, wy, 18.0, &ui.brush(acc));
         unsafe { ui.rt.PopLayer(); }
         // El número sube y aparece; el mes llega un poco después
         let k1 = ez(t, 0.08, 0.8);
         popup::push_alpha(ui.rt, k1);
-        ui.text(&f.day, &now.wDay.to_string(), x - 4.0, 30.0 + 14.0 * (1.0 - k1), 124.0, &ui.white);
+        ui.text(&f.day, &day, x - 4.0, ny + 14.0 * (1.0 - k1), 124.0, &ui.white);
         unsafe { ui.rt.PopLayer(); }
         let k2 = ez(t, 0.25, 0.6);
         popup::push_alpha(ui.rt, k2);
         let month = i18n::month(now.wMonth as usize + 11);
-        let my = 158.0 + 6.0 * (1.0 - k2);
-        ui.text(&f.word, month, x + 1.0, my, 28.0, &ui.white);
+        let year = now.wYear.to_string();
         let mw = ui.p.width(&f.word, month);
-        if x + mw + 70.0 < w { ui.text(&f.word, &now.wYear.to_string(), x + mw + 10.0, my, 28.0, &ui.dim); }
+        match l.sz {
+            Sz::Pequeno => {
+                // El mes al pie; el año, si cabe
+                let my = h - 38.0 + 6.0 * (1.0 - k2);
+                ui.text(&f.word, month, x + 1.0, my, 28.0, &ui.white);
+                if x + mw + 60.0 < w { ui.text(&f.word, &year, x + mw + 10.0, my, 28.0, &ui.dim); }
+            }
+            Sz::Mediano => {
+                let my = wy + 24.0 + 6.0 * (1.0 - k2);
+                ui.text(&f.word, month, xr + 1.0, my, 28.0, &ui.white);
+                ui.text(&f.word, &year, xr + 1.0, my + 30.0, 28.0, &ui.dim);
+            }
+            Sz::Alto => {
+                // Mes y año uno encima del otro, y al pie la semana y el día del año
+                let my = 158.0 + 6.0 * (1.0 - k2);
+                ui.text(&f.word, &fit(ui, &f.word, month, w - 2.0 * x), x + 1.0, my, 28.0, &ui.white);
+                ui.text(&f.word, &year, x + 1.0, my + 30.0, 28.0, &ui.dim);
+                let (doy, ndays) = day_of_year(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
+                let wk = iso_week(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
+                ui.text(&f.spaced, &spaced(&i18n::tf("SEMANA {}", &[&wk])), x + 2.0, h - 64.0, 18.0, &ui.dim);
+                ui.text(&f.spaced, &spaced(&i18n::tf("DÍA {} DE {}", &[&doy, &ndays])), x + 2.0, h - 42.0, 18.0, &ui.faint);
+                // El año que va pasando: una raya finísima con la punta en el acento
+                let fr = doy as f32 / ndays as f32;
+                unsafe {
+                    ui.rt.FillRectangle(&rect(x + 2.0, h - 18.0, w - x, h - 17.0), &ui.track);
+                    ui.rt.FillRectangle(&rect(x + 2.0, h - 18.0, x + 2.0 + (w - 2.0 * x - 2.0) * fr * k2, h - 17.0), &ui.dim);
+                    ui.rt.FillEllipse(&ellipse(x + 2.0 + (w - 2.0 * x - 2.0) * fr * k2, h - 17.5, 2.0), &ui.brush(acc));
+                }
+            }
+            _ => {
+                // Grande: mes y año en línea como siempre y, al pie, la semana de lunes a domingo
+                let my = 158.0 + 6.0 * (1.0 - k2);
+                ui.text(&f.word, month, x + 1.0, my, 28.0, &ui.white);
+                ui.text(&f.word, &year, x + mw + 10.0, my, 28.0, &ui.dim);
+                let today = deskw3::days_from_civil(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
+                let monday = today - (now.wDayOfWeek as i64 + 6) % 7;
+                let letters = i18n::weekday_letters();
+                let (x0, x1) = (x + 2.0, w - x);
+                let cw = (x1 - x0) / 7.0;
+                let y = h - 96.0;
+                unsafe { ui.rt.FillRectangle(&rect(x0, y - 16.0, x1, y - 16.0 + 1.0 / ui.s.max(0.5)), &ui.card_edge); }
+                for i in 0..7 {
+                    let dd = monday + i as i64;
+                    let (_, _, dn) = deskw3::civil_from_days(dd);
+                    let cx = x0 + cw * i as f32 + cw / 2.0;
+                    let is_today = dd == today;
+                    ui.text_c(&f.spaced, letters[i], cx, y, 18.0, &ui.faint);
+                    ui.text_c(&f.word, &dn.to_string(), cx, y + 22.0, 30.0, if is_today { &ui.white } else { &ui.dim });
+                    if is_today { unsafe { ui.rt.FillEllipse(&ellipse(cx, y + 62.0, 2.2), &ui.brush(acc)); } }
+                }
+            }
+        }
         unsafe { ui.rt.PopLayer(); }
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
@@ -390,10 +489,22 @@ impl Widget for PosterW {
 /// Lo que tarda en caer y asentarse una foto nueva.
 const DROP_S: f32 = 1.1;
 const TILT: f32 = -3.0;
-const PC_W: f32 = 192.0;
-const PC_H: f32 = 222.0;
-const PC_B: f32 = 10.0;
-const PC_STRIP: f32 = 40.0;
+
+/// Medidas de una polaroid: ancho, alto, marco y franja blanca de abajo (la del pie escrito a mano).
+#[derive(Clone, Copy)]
+struct Pc { w: f32, h: f32, b: f32, strip: f32 }
+
+/// Dónde va cada polaroid del montón (la más nueva primero): centro y giro en grados; y sus medidas.
+fn polaroid_slots(l: desk::Lay) -> (Vec<(f32, f32, f32)>, Pc) {
+    let (w, h) = (l.w, l.h);
+    match l.sz {
+        // Una encima de otra, cada una con su giro
+        Sz::Alto => (vec![(w / 2.0 - 2.0, 262.0, TILT), (w / 2.0 + 3.0, 96.0, 4.0)], Pc { w: 140.0, h: 164.0, b: 8.0, strip: 30.0 }),
+        // Un montoncito: la nueva delante y dos de antes asomando detrás
+        Sz::Grande => (vec![(w / 2.0 + 16.0, h / 2.0 + 14.0, TILT), (w / 2.0 - 38.0, h / 2.0 - 10.0, 5.0), (w / 2.0 + 34.0, h / 2.0 - 28.0, -9.0)], Pc { w: 200.0, h: 236.0, b: 10.0, strip: 40.0 }),
+        _ => (vec![(w / 2.0, h / 2.0 + 1.0, TILT)], Pc { w: 132.0, h: 154.0, b: 8.0, strip: 30.0 }),
+    }
+}
 
 /// Pose de la polaroid que cae (`e` en segundos desde que llegó): (desplazamiento vertical, giro en
 /// grados, opacidad, escala). Cae desde arriba, se balancea un poco y acaba quieta en `TILT`.
@@ -434,15 +545,17 @@ fn photo_date(path: &str) -> String {
 
 struct Snap { ver: u64, bmp: ID2D1Bitmap, w: f32, h: f32, path: String, date: String, at: Instant }
 
+/// Las fotos del montón (la más nueva al final) y si ya se pidió la siguiente.
 #[derive(Default)]
-pub struct PolaroidW { cur: Option<Snap>, prev: Option<Snap>, rt: crate::RtKey, asked: bool }
+pub struct PolaroidW { snaps: Vec<Snap>, rt: crate::RtKey, asked: bool }
 
 impl PolaroidW {
     /// Una polaroid centrada en (cx, cy) con su pose; `snap` = None la deja vacía (sin fotos).
-    #[allow(clippy::too_many_arguments)]
-    fn draw(ui: &mut Ui, snap: Option<&Snap>, cx: f32, cy: f32, ang: f32, alpha: f32, sc: f32, script: &IDWriteTextFormat) {
+    #[allow(clippy::too_many_arguments, non_snake_case)]
+    fn draw(ui: &mut Ui, snap: Option<&Snap>, cx: f32, cy: f32, ang: f32, alpha: f32, sc: f32, script: &IDWriteTextFormat, pc: Pc) {
         let base = cur_transform(ui);
         let m = mul(&Matrix3x2 { M11: sc, M12: 0.0, M21: 0.0, M22: sc, M31: 0.0, M32: 0.0 }, &rot(ang.to_radians(), cx, cy));
+        let (PC_W, PC_H, PC_B, PC_STRIP) = (pc.w, pc.h, pc.b, pc.strip);
         let (l, t, r, b) = (-PC_W / 2.0, -PC_H / 2.0, PC_W / 2.0, PC_H / 2.0);
         // El texto sobre el papel blanco va sin el halo oscuro de los widgets flotantes
         let halo = ui.shadow.take();
@@ -483,58 +596,79 @@ impl PolaroidW {
         }
         ui.shadow = halo;
     }
-    fn dropping(&self) -> bool { self.cur.as_ref().is_some_and(|c| c.at.elapsed().as_secs_f32() < DROP_S) }
+    fn dropping(&self) -> bool { self.snaps.last().is_some_and(|c| c.at.elapsed().as_secs_f32() < DROP_S) }
 }
 
 impl Widget for PolaroidW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, _dt: f32) {
         deskw2::photo_start();
-        let (w, h) = size(Kind::Photos);
-        if self.rt.fresh(ui.rt) { self.cur = None; self.prev = None; }
-        // ¿Foto nueva? Cae encima de la anterior
+        let l = desk::lay(Kind::Photos);
+        let (slots, pc) = polaroid_slots(l);
+        let n = slots.len();
+        if self.rt.fresh(ui.rt) { self.snaps.clear(); }
+        // ¿Foto nueva? Cae encima del montón
         if let Some((ver, px, pw, ph, path)) = deskw2::photo_latest() {
-            if self.cur.as_ref().is_none_or(|c| c.ver != ver) {
+            if self.snaps.last().is_none_or(|c| c.ver != ver) {
                 let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
                 if let Ok(bmp) = unsafe { ui.rt.CreateBitmap(D2D_SIZE_U { width: pw, height: ph }, Some(px.as_ptr() as _), pw * 4, &bp) } {
                     let date = photo_date(&path);
-                    self.prev = self.cur.take();
-                    self.cur = Some(Snap { ver, bmp, w: pw as f32, h: ph as f32, path, date, at: Instant::now() });
+                    self.snaps.push(Snap { ver, bmp, w: pw as f32, h: ph as f32, path, date, at: Instant::now() });
+                    // Como mucho una más de las que caben (la que se apaga debajo mientras cae la nueva)
+                    while self.snaps.len() > n + 1 { self.snaps.remove(0); }
                     self.asked = false;
                 }
             }
         }
         let f = vfonts(ui);
-        let (cx, cy) = (w / 2.0, h / 2.0 + 2.0);
-        match &self.cur {
-            None => {
-                let k = ez(t, 0.0, 0.6);
-                Self::draw(ui, None, cx, cy - 12.0 * (1.0 - k), TILT, k, 1.0, &f.script);
-            }
-            Some(c) => {
-                let e = c.at.elapsed().as_secs_f32();
-                // La de debajo se queda quieta y se apaga cuando la nueva ya ha caído
-                if let Some(p) = &self.prev {
-                    let a = 1.0 - smoothstep(DROP_S * 0.6, DROP_S, e);
-                    if a > 0.0 { Self::draw(ui, Some(p), cx, cy, TILT, a, 1.0, &f.script); }
-                }
-                let (dy, ang, a, sc) = drop_pose(e);
-                Self::draw(ui, self.cur.as_ref(), cx, cy + dy, ang, a, sc, &f.script);
-                if e >= DROP_S { self.prev = None; }
+        let Some(newest) = self.snaps.last() else {
+            let k = ez(t, 0.0, 0.6);
+            let (cx, cy, ang) = slots[0];
+            Self::draw(ui, None, cx, cy - 12.0 * (1.0 - k), ang, k, 1.0, &f.script, pc);
+            ui.hit(rect(cx - pc.w / 2.0, cy - pc.h / 2.0, cx + pc.w / 2.0, cy + pc.h / 2.0), 1);
+            return;
+        };
+        let e = newest.at.elapsed().as_secs_f32();
+        // Al caer una nueva, las de antes se corren un sitio en el montón (y la que sobra se apaga)
+        let slide = smoothstep(0.15, 0.75, e);
+        let lerp3 = |a: (f32, f32, f32), b: (f32, f32, f32), k: f32| (a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k);
+        let m = self.snaps.len();
+        // De la más vieja a la más nueva (la nueva, encima)
+        for (i, s) in self.snaps.iter().enumerate() {
+            let j = m - 1 - i;
+            if j == 0 {
+                let (dy, sway, a, sc) = drop_pose(e);
+                let (cx, cy, ang) = slots[0];
+                Self::draw(ui, Some(s), cx, cy + dy, ang + (sway - TILT), a, sc, &f.script, pc);
+            } else if j < n {
+                let (cx, cy, ang) = lerp3(slots[j - 1], slots[j], slide);
+                Self::draw(ui, Some(s), cx, cy, ang, 1.0, 1.0, &f.script, pc);
+            } else {
+                // Sobra: se queda en su sitio y se apaga cuando la nueva ya ha caído
+                let a = 1.0 - smoothstep(DROP_S * 0.6, DROP_S, e);
+                let (cx, cy, ang) = slots[n - 1];
+                if a > 0.0 { Self::draw(ui, Some(s), cx, cy, ang, a, 1.0, &f.script, pc); }
             }
         }
-        ui.hit(rect(cx - PC_W / 2.0, cy - PC_H / 2.0, cx + PC_W / 2.0, cy + PC_H / 2.0), 1);
+        if e >= DROP_S && self.snaps.len() > n { self.snaps.remove(0); }
+        let (cx, cy, _) = slots[0];
+        ui.hit(rect(cx - pc.w / 2.0, cy - pc.h / 2.0, cx + pc.w / 2.0, cy + pc.h / 2.0), 1);
     }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         if right { return Some(Box::new(deskw2::pick_folder)); }
-        let p = self.cur.as_ref().map(|c| c.path.clone()).filter(|_| id.is_some())?;
+        let p = self.snaps.last().map(|c| c.path.clone()).filter(|_| id.is_some())?;
         Some(Box::new(move || sys::open(&p)))
     }
-    // Quieta no pinta: cada segundo mira si hay foto nueva y pide la siguiente cuando toca
+    // Quieta no pinta: cada segundo mira si hay foto nueva y pide la siguiente cuando toca (en los
+    // tamaños con montón, al principio se piden seguidas hasta llenarlo)
     fn tick(&mut self) -> bool {
         let ver = deskw2::photo_latest().map(|p| p.0);
-        if ver.is_some() && ver != self.cur.as_ref().map(|c| c.ver) { return true; }
-        if let Some(c) = &self.cur {
-            if !self.asked && c.at.elapsed().as_secs_f32() > deskw2::SHOW_S - 2.0 { deskw2::photo_next(); self.asked = true; }
+        if ver.is_some() && ver != self.snaps.last().map(|c| c.ver) { return true; }
+        let want = polaroid_slots(desk::lay(Kind::Photos)).0.len();
+        if let Some(c) = self.snaps.last() {
+            let e = c.at.elapsed().as_secs_f32();
+            let fill = self.snaps.len() < want && e > DROP_S + 0.2;
+            if !self.asked && (fill || e > deskw2::SHOW_S - 2.0) { deskw2::photo_next(); self.asked = true; }
         }
         false
     }
@@ -575,8 +709,10 @@ pub struct RadialW { levels: [f32; audioviz::BANDS], alive: f32, art: Option<(u6
 impl Default for RadialW { fn default() -> Self { RadialW { levels: [0.0; audioviz::BANDS], alive: 0.0, art: None, rt: Default::default(), art_at: None } } }
 
 impl Widget for RadialW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Visual);
+        let l = desk::lay(Kind::Visual);
+        let (w, h) = (l.w, l.h);
         if self.rt.fresh(ui.rt) { self.art = None; }
         let m = MEDIA.lock().unwrap().clone();
         match &m {
@@ -592,15 +728,34 @@ impl Widget for RadialW {
         let on = energy / audioviz::BANDS as f32 > 0.02;
         self.alive += ((if on { 1.0 } else { 0.0 }) - self.alive) * (1.0 - (-dt / 0.3).exp());
         let tn = deskw2::tint();
-        let (cx, cy) = (w / 2.0, h / 2.0);
+        // El círculo con la carátula y sus rayos: en el mediano, a la izquierda (la canción a su lado)
+        let side = w.min(h);
+        let (cx, cy) = if l.sz == Sz::Mediano { (side / 2.0, h / 2.0) } else { (w / 2.0, h / 2.0) };
+        let (inner, sw) = match l.sz { Sz::Grande => (INNER * 1.45, 4.0), Sz::Pequeno | Sz::Mediano => (INNER * 0.62, 2.4), _ => (INNER, 3.0) };
         let ki = ez(t, 0.0, 0.8);
         let spin = now * 0.06 - 0.6 * (1.0 - ki);
-        let r0 = INNER + 5.0;
-        let maxl = w.min(h) / 2.0 - r0 - 6.0;
+        let r0 = inner + 5.0;
+        let maxl = side / 2.0 - r0 - 6.0;
         let st = round_stroke(ui.rt);
+        if l.sz == Sz::Mediano {
+            // La canción, en blanco y gris, con una raya del color de la carátula
+            let x0 = side + 6.0;
+            let maxw = w - 20.0 - x0;
+            let kt = ez(t, 0.15, 0.5);
+            popup::push_alpha(ui.rt, kt);
+            match &m {
+                Some(m) => {
+                    unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(x0, h / 2.0 - 40.0, x0 + 18.0, h / 2.0 - 37.0), 1.5), &ui.brush(rgba(tn[0], tn[1], tn[2], 0.9))); }
+                    ui.text(&d.title, &fit(ui, &d.title, &m.title, maxw), x0, h / 2.0 - 28.0, 24.0, &ui.white);
+                    ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &m.artist, maxw), x0, h / 2.0 - 2.0, 18.0, &ui.dim);
+                }
+                None => ui.text(&ui.f.sub, i18n::t("Nada sonando"), x0, h / 2.0 - 10.0, 20.0, &ui.dim),
+            }
+            unsafe { ui.rt.PopLayer(); }
+        }
         unsafe {
             // Halo tenue del color de la carátula alrededor del círculo
-            ui.rt.FillEllipse(&ellipse(cx, cy, INNER + 2.0), &ui.brush(rgba(tn[0], tn[1], tn[2], 0.10 * ki)));
+            ui.rt.FillEllipse(&ellipse(cx, cy, inner + 2.0), &ui.brush(rgba(tn[0], tn[1], tn[2], 0.10 * ki)));
             for i in 0..RAYS {
                 let v = ray_level(&self.levels, i);
                 let a = i as f32 / RAYS as f32 * TAU + spin;
@@ -609,10 +764,10 @@ impl Widget for RadialW {
                 let idle = 1.5 + 1.5 * (0.5 + 0.5 * (now * 1.6 + i as f32 * 0.4).sin());
                 let len = ((v * maxl).max(idle * (1.0 - self.alive) + 2.0 * self.alive)) * ki;
                 let b = ui.brush(rgba(tn[0], tn[1], tn[2], (0.5 + 0.5 * v) * ki));
-                ui.rt.DrawLine(v2(cx + s * r0, cy - c * r0), v2(cx + s * (r0 + len), cy - c * (r0 + len)), &b, 3.0, st.as_ref());
+                ui.rt.DrawLine(v2(cx + s * r0, cy - c * r0), v2(cx + s * (r0 + len), cy - c * (r0 + len)), &b, sw, st.as_ref());
             }
-            ui.rt.DrawEllipse(&ellipse(cx, cy, INNER), &ui.brush(rgba(tn[0], tn[1], tn[2], 0.45 * ki)), 1.2, None);
-            let ar = INNER - 5.0;
+            ui.rt.DrawEllipse(&ellipse(cx, cy, inner), &ui.brush(rgba(tn[0], tn[1], tn[2], 0.45 * ki)), 1.2, None);
+            let ar = inner - 5.0;
             let sc = 0.85 + 0.15 * ki;
             match &self.art {
                 Some((_, b)) => {
@@ -744,8 +899,10 @@ fn flip_card(ui: &Ui, font: &IDWriteTextFormat, x: f32, y: f32, cw: f32, ch: f32
 }
 
 impl Widget for FlipW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, _dt: f32) {
-        let (w, h) = size(Kind::Countdown);
+        let l = desk::lay(Kind::Countdown);
+        let (w, h) = (l.w, l.h);
         self.update();
         let f = vfonts(ui);
         if self.dates.is_empty() {
@@ -757,18 +914,44 @@ impl Widget for FlipW {
         }
         self.sel %= self.dates.len();
         let (name, date) = self.dates[self.sel].clone();
-        let x0 = 16.0;
+        // Las paletas ocupan siempre un bloque de 360 de ancho (en la banda, a la izquierda)
+        let bw = desk::Sz::Mediano.dims().0;
+        let x0 = 18.0;
         let k0 = ez(t, 0.0, 0.5);
         popup::push_alpha(ui.rt, k0);
         let (_, mo, dd) = deskw3::civil_from_days(date);
         let right = if date == self.today { i18n::t("¡Hoy!").to_string() } else { i18n::day_month_short(dd, (mo - 1) as usize) };
         let rb = if date == self.today { ui.brush(crate::profiles::accent(1.0)) } else { ui.dim.clone() };
         let rw = ui.p.width(&ui.f.sub, &right);
-        ui.text(&ui.f.lbl, &fit(ui, &ui.f.lbl, &name, w - 2.0 * x0 - rw - 12.0), x0 + 1.0, 8.0, 20.0, &ui.white);
-        ui.text_r(&ui.f.sub, &right, w - x0, 8.0, 20.0, &rb);
+        ui.text(&ui.f.lbl, &fit(ui, &ui.f.lbl, &name, bw - 2.0 * x0 - rw - 12.0), x0 + 1.0, 14.0, 20.0, &ui.white);
+        ui.text_r(&ui.f.sub, &right, bw - x0, 14.0, 20.0, &rb);
         unsafe { ui.rt.PopLayer(); }
+        // En la banda, las demás fechas a la derecha (pulsar una la pone en las paletas)
+        if l.sz == Sz::Banda {
+            let xl = bw + 10.0;
+            unsafe { ui.rt.FillRectangle(&rect(xl, 22.0, xl + 1.0 / ui.s.max(0.5), h - 22.0), &ui.card_edge); }
+            let (x1, x2) = (xl + 26.0, w - x0);
+            ui.text(&ui.f.small, i18n::t("PRÓXIMAS FECHAS"), x1, 16.0, 16.0, &ui.faint);
+            let others: Vec<(usize, (String, i64))> = self.dates.iter().cloned().enumerate().filter(|(i, _)| *i != self.sel).take(3).collect();
+            if others.is_empty() { ui.text(&ui.f.sub, i18n::t("Sin fechas a la vista"), x1, 44.0, 18.0, &ui.dim); }
+            for (j, (i, (nm, dt))) in others.iter().enumerate() {
+                let ki = ez(t, 0.25 + 0.06 * j as f32, 0.4);
+                popup::push_alpha(ui.rt, ki);
+                let y = 42.0 + j as f32 * 38.0 + 4.0 * (1.0 - ki);
+                let id = 10 + *i as u32;
+                let hk = ui.heat(id);
+                if hk > 0.01 { unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(x1 - 8.0, y - 4.0, x2 + 8.0, y + 30.0), 8.0), &ui.wa(0.06 * hk)); } }
+                let when = deskw::days_left(dt - self.today);
+                let ww = ui.p.width(&ui.f.sub, &when);
+                ui.text(&ui.f.lbl, &fit(ui, &ui.f.lbl, nm, x2 - x1 - ww - 12.0), x1, y, 26.0, &ui.white);
+                ui.text_r(&ui.f.sub, &when, x2, y, 26.0, &ui.dim);
+                unsafe { ui.rt.PopLayer(); }
+                ui.hit(rect(x1 - 8.0, y - 4.0, x2 + 8.0, y + 30.0), id);
+            }
+        }
         // Tres tarjetas en cascada
-        let (cw, ch, gap, y0) = (90.0, 80.0, 9.0, 36.0);
+        let (gap, ch, y0) = (9.0, 80.0, 46.0);
+        let cw = ((bw - 2.0 * x0 - 2.0 * gap) / 3.0).floor();
         let labels = [i18n::t("días"), i18n::t("horas"), "min"];
         let halo = ui.shadow.take();
         for i in 0..3 {
@@ -785,13 +968,15 @@ impl Widget for FlipW {
             ui.text_c(&ui.f.small, l, x0 + i as f32 * (cw + gap) + cw / 2.0, y0 + ch + 6.0, 16.0, &ui.dim);
             unsafe { ui.rt.PopLayer(); }
         }
-        ui.hit(rect(0.0, 0.0, w, h), 1);
+        ui.hit(rect(0.0, 0.0, bw, h), 1);
     }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
-        id?;
-        // Clic derecho: editar las fechas; clic: la fecha siguiente (las paletas giran hasta ella)
+        let id = id?;
+        // Clic derecho: editar las fechas; clic: la fecha siguiente (las paletas giran hasta ella) o,
+        // en la banda, la pulsada de la lista
         if right { return Some(Box::new(deskw3::countdown_edit)); }
-        if self.dates.len() > 1 { self.sel = (self.sel + 1) % self.dates.len(); self.update(); }
+        if id >= 10 { if ((id - 10) as usize) < self.dates.len() { self.sel = (id - 10) as usize; self.update(); } }
+        else if self.dates.len() > 1 { self.sel = (self.sel + 1) % self.dates.len(); self.update(); }
         Some(Box::new(|| {}))
     }
     fn tick(&mut self) -> bool { self.update() }

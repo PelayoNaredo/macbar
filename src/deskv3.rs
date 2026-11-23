@@ -8,7 +8,7 @@
 //! `deskv`/`deskv2`, cada uno es otro `Widget` con su propio tamaño (`desk::size`).
 
 use super::*;
-use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
+use desk::{DFonts, Kind, Sz};
 use deskw::Widget;
 use popup::Ui;
 use std::f32::consts::{PI, TAU};
@@ -662,8 +662,15 @@ fn uptime_big(s: u64) -> String {
 pub struct TermW { cpu: f32, ram: f32, lens: Lens }
 
 impl Widget for TermW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::System);
+        let l = desk::lay(Kind::System);
+        let (w, h) = (l.w, l.h);
+        let wide = l.sz == Sz::Extragrande;
+        // Logotipo (esquina y lado de baldosa), tiempo encendido (x, y) y la ficha (x, y, filas, salto)
+        let (lx, ly, ts) = if l.sz == Sz::Grande { (20.0, 58.0, 26.0) } else { (22.0, 60.0, 38.0) };
+        let (ux, uy) = if wide { (17.0, 145.0) } else if l.sz == Sz::Grande { (88.0, 46.0) } else { (124.0, 52.0) };
+        let (x0, ry, nrows, step) = match l.sz { Sz::Extragrande => (300.0, 64.0, 7, 26.0), Sz::Grande => (20.0, 140.0, 6, 24.0), _ => (20.0, 170.0, 7, 28.0) };
         let info = sysinfo();
         let sd = deskdata::SYS.lock().unwrap().clone();
         let cpu_now = sd.as_ref().and_then(|s| s.cpu.last().copied()).unwrap_or(0.0);
@@ -680,10 +687,10 @@ impl Widget for TermW {
 
         // ---- El logotipo de Windows en cuatro baldosas de cristal macizo que doblan el fondo de pantalla
         let kl = ez(t, 0.05, 0.6);
-        let (lx, ly, ts, gap) = (22.0, 60.0, 38.0, 5.0);
+        let gap = if ts < 30.0 { 4.0 } else { 5.0 };
         let tiles: Vec<Piece> = (0..4).map(|i| {
             let (x, y) = (lx + (i % 2) as f32 * (ts + gap), ly + (i / 2) as f32 * (ts + gap));
-            Piece::slab(x, y, x + ts, y + ts, 6.0, 15.0, 1.5)
+            Piece::slab(x, y, x + ts, y + ts, 6.0 * ts / 38.0, 15.0 * ts / 38.0, 1.5)
         }).collect();
         self.lens.set(&tiles);
         popup::push_alpha(rt, kl);
@@ -693,23 +700,22 @@ impl Widget for TermW {
             let (x0, y0, x1, y1) = p.bounds();
             // Cuerpo del vidrio: un velo que se aclara arriba (donde da la luz)
             let body = lin(ui, 0.0, y0, 0.0, y1, &[(0.0, wh(q(lerp(0.07, 0.18, ui.ink), 50.0))), (0.6, wh(0.0)), (1.0, wh(q(lerp(0.03, 0.08, ui.ink), 50.0)))]);
-            unsafe { rt.FillRoundedRectangle(&rrect(rect(x0, y0, x1, y1), 6.0), &body); }
+            unsafe { rt.FillRoundedRectangle(&rrect(rect(x0, y0, x1, y1), 6.0 * ts / 38.0), &body); }
             self.lens.rim(ui, i, 1.0);
         }
         unsafe { rt.PopLayer(); }
 
-        // ---- Tiempo encendido, debajo y limpio
+        // ---- Tiempo encendido, debajo del logotipo (o a su lado) y limpio
         let up = if sys::demo() { 3 * 3600 + 25 * 60 + 9 } else { (unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }) / 1000 };
         let ku = ez(t, 0.15, 0.6);
         popup::push_alpha(rt, ku);
-        ui.text(&gf.clock, &uptime_big(up), 17.0, 145.0 + 6.0 * (1.0 - ku), 66.0, &ui.white);
+        ui.text(&gf.clock, &uptime_big(up), ux, uy + 6.0 * (1.0 - ku), 66.0, &ui.white);
         unsafe { rt.PopLayer(); }
         // Un punto de acento diminuto: el equipo sigue encendido
-        dot(rt, 23.0, 222.0, 2.2, &ui.brush(acc(1.0)));
-        ui.text(&ui.f.small, &format!("{} · {}", i18n::t("encendido"), uptime_words(up)), 31.0, 213.0, 18.0, &ui.dim);
+        dot(rt, ux + 6.0, uy + 77.0, 2.2, &ui.brush(acc(1.0)));
+        ui.text(&ui.f.small, &fit(ui, &ui.f.small, &format!("{} · {}", i18n::t("encendido"), uptime_words(up)), w - ux - 34.0), ux + 14.0, uy + 68.0, 18.0, &ui.dim);
 
         // ---- Ficha: claves en gris y valores en blanco
-        let x0 = 236.0;
         let st = deskdata::STORE.lock().unwrap().clone();
         let c_drive = st.as_ref().and_then(|s| s.drives.iter().find(|d| d.root.to_ascii_uppercase().starts_with("C:")).or(s.drives.first()).cloned());
         let media = MEDIA.lock().unwrap().clone();
@@ -729,30 +735,52 @@ impl Widget for TermW {
         rows.push((i18n::t("Sonando"), media.as_ref().map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }).unwrap_or_else(|| "—".into())));
         let kx = x0 + 80.0;
         let maxw = w - 20.0 - kx;
-        let mut y = 58.0;
-        for (i, (k, v)) in rows.iter().take(7).enumerate() {
+        let mut y = ry;
+        for (i, (k, v)) in rows.iter().take(nrows).enumerate() {
             let ki = ez(t, 0.12 + 0.04 * i as f32, 0.35);
             popup::push_alpha(rt, ki);
             let dx = 6.0 * (1.0 - ki);
             ui.text(&ui.f.sub, k, x0 + dx, y, 20.0, &ui.dim);
             ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, v, maxw), kx + dx, y, 20.0, &ui.white);
             unsafe { rt.PopLayer(); }
-            y += 23.0;
+            y += step;
         }
 
-        // ---- Abajo: procesador y memoria en barras finas y la hora
+        // ---- Columna: el procesador del último minuto, en una línea fina
+        if l.sz == Sz::Columna {
+            if let Some(s) = sd.as_ref().filter(|s| s.cpu.len() > 1) {
+                let (gx0, gx1, gy0, gy1) = (20.0, w - 20.0, y + 30.0, h - 76.0);
+                ui.text(&ui.f.small, &format!("{} · 60 s", i18n::t("Procesador")), gx0, y + 6.0, 18.0, &ui.faint);
+                unsafe { rt.FillRectangle(&rect(gx0, gy1, gx1, gy1 + 1.0 / ui.s.max(0.5)), &ui.track); }
+                let pts: Vec<f32> = s.cpu.iter().rev().take(60).rev().copied().collect();
+                let n = pts.len();
+                let kg = ez(t, 0.3, 0.6);
+                let st = round_stroke(rt);
+                let line = ui.wa(q(0.8 * kg, 20.0));
+                let py = |v: f32| gy1 - (v / 100.0).clamp(0.0, 1.0) * (gy1 - gy0) * kg;
+                for i in 1..n {
+                    let (xa, xb) = (gx1 - (n - i) as f32 * (gx1 - gx0) / 59.0, gx1 - (n - 1 - i) as f32 * (gx1 - gx0) / 59.0);
+                    unsafe { rt.DrawLine(v2(xa, py(pts[i - 1])), v2(xb, py(pts[i])), &line, 1.3, st.as_ref()); }
+                }
+                if let Some(v) = pts.last() { dot(rt, gx1, py(*v), 2.2, &ui.brush(acc(1.0))); }
+            }
+        }
+
+        // ---- Abajo: procesador y memoria en barras finas y la hora (si cabe)
         ui.sep(h - 58.0);
         let fy = h - 42.0;
+        let bw = if wide { 120.0 } else { 56.0 };
         let mut x = 20.0;
         for (lab, v) in [("CPU", self.cpu), ("RAM", self.ram)] {
             ui.text(&ui.f.small, lab, x, fy, 22.0, &ui.dim);
             let bx = x + ui.p.width(&ui.f.small, "RAM") + 10.0;
-            bar(ui, bx, fy + 9.0, 120.0, 4.0, v / 100.0);
-            ui.text(&ui.f.small, &format!("{:.0} %", v), bx + 128.0, fy, 22.0, &ui.white);
-            x = bx + 128.0 + ui.p.width(&ui.f.small, "100 %") + 26.0;
+            bar(ui, bx, fy + 9.0, bw, 4.0, v / 100.0);
+            ui.text(&ui.f.small, &format!("{:.0} %", v), bx + bw + 8.0, fy, 22.0, &ui.white);
+            x = bx + bw + 8.0 + ui.p.width(&ui.f.small, "100 %") + if wide { 26.0 } else { 18.0 };
         }
         let now = unsafe { GetLocalTime() };
-        ui.text_r(&gf.mid, &format!("{:02}:{:02}", now.wHour, now.wMinute), w - 20.0, fy - 1.0, 24.0, &ui.white);
+        let hm = format!("{:02}:{:02}", now.wHour, now.wMinute);
+        if x - 8.0 + ui.p.width(&gf.mid, &hm) < w - 20.0 { ui.text_r(&gf.mid, &hm, w - 20.0, fy - 1.0, 24.0, &ui.white); }
     }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
     fn animating(&self, t: f32) -> bool { t < 1.4 }
@@ -763,9 +791,12 @@ const DCOLS: usize = 20;
 
 /// Espectro en columnas de cristal macizo que doblan el fondo de pantalla, con su altura al compás del
 /// audio y el pico como una raya finísima (el más alto, en el acento).
-pub struct SpecDotsW { lv: [f32; DCOLS], peak: [f32; DCOLS], hold: [f32; DCOLS], alive: f32, moving: bool, lens: Lens }
+pub struct SpecDotsW { lv: [f32; MAXCOLS], peak: [f32; MAXCOLS], hold: [f32; MAXCOLS], alive: f32, moving: bool, lens: Lens }
 
-impl Default for SpecDotsW { fn default() -> Self { SpecDotsW { lv: [0.0; DCOLS], peak: [0.0; DCOLS], hold: [0.0; DCOLS], alive: 0.0, moving: false, lens: Lens::default() } } }
+/// Columnas en los tamaños anchos (Banda y Extragrande); en los demás, `DCOLS`.
+const MAXCOLS: usize = 40;
+
+impl Default for SpecDotsW { fn default() -> Self { SpecDotsW { lv: [0.0; MAXCOLS], peak: [0.0; MAXCOLS], hold: [0.0; MAXCOLS], alive: 0.0, moving: false, lens: Lens::default() } } }
 
 /// Altura de una columna para un nivel: algo comprimida (con música, el espectro casi nunca baja de la mitad
 /// y las columnas irían siempre casi llenas).
@@ -779,22 +810,25 @@ fn peak_step(peak: &mut f32, hold: &mut f32, lv: f32, dt: f32) {
 }
 
 impl Widget for SpecDotsW {
-    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Visual);
+    fn layouts(&self) -> bool { true }
+    fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
+        let l = desk::lay(Kind::Visual);
+        let (w, h) = (l.w, l.h);
+        let ncols = if l.is_wide() && l.w > 400.0 { MAXCOLS } else { DCOLS };
         let dt = dt.min(0.1);
         let src = levels_now();
         let k = 1.0 - (-dt / 0.05).exp();
         let mut energy = 0.0;
         self.moving = false;
-        for c in 0..DCOLS {
-            let v = col_level(&src, c, DCOLS);
+        for c in 0..ncols {
+            let v = col_level(&src, c, ncols);
             self.lv[c] += (v - self.lv[c]) * k;
             energy += self.lv[c];
             let before = self.peak[c];
             peak_step(&mut self.peak[c], &mut self.hold[c], self.lv[c], dt);
             if self.peak[c] > 0.004 && (self.peak[c] - before).abs() > 1e-5 { self.moving = true; }
         }
-        let on = energy / DCOLS as f32 > 0.02;
+        let on = energy / ncols as f32 > 0.02;
         self.alive += ((if on { 1.0 } else { 0.0 }) - self.alive) * (1.0 - (-dt / 0.3).exp());
         let rt = ui.rt;
         let base = cur_xf(ui);
@@ -802,16 +836,23 @@ impl Widget for SpecDotsW {
         let live = self.alive > 0.5;
         dot(rt, 21.0, 19.0, 2.6, &ui.brush(if live { acc(1.0) } else { ui.ic(0.3) }));
         ui.text(&ui.f.small, if live { i18n::t("en vivo") } else { i18n::t("en pausa") }, 30.0, 10.0, 18.0, &ui.dim);
-        let title = MEDIA.lock().unwrap().as_ref().map(|m| m.title.clone());
-        if let Some(tt) = title { let s = fit(ui, &ui.f.small, &tt, w * 0.55); ui.text_r(&ui.f.small, &s, w - 18.0, 10.0, 18.0, &ui.faint); }
+        let media = MEDIA.lock().unwrap().as_ref().map(|m| (m.title.clone(), m.artist.clone()));
+        // En los de dos filas, la canción en grande arriba; en los de una, el título en pequeño a la derecha
+        let tall = l.rows() >= 2;
+        if let Some((tt, ar)) = &media {
+            if tall {
+                ui.text(&d.title, &fit(ui, &d.title, tt, w - 40.0), 20.0, 34.0, 22.0, &ui.white);
+                ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, ar, w - 40.0), 20.0, 58.0, 18.0, &ui.dim);
+            } else { let s = fit(ui, &ui.f.small, tt, w * 0.55); ui.text_r(&ui.f.small, &s, w - 18.0, 10.0, 18.0, &ui.faint); }
+        }
         // Columnas de cristal macizo: el mapa es el de las columnas enteras (se hace una vez) y en cada
         // fotograma solo se rellena con el cristal la altura que toca
-        let (x0, x1, top, floor) = (20.0, w - 20.0, 40.0, h - 16.0);
-        let pitch = (x1 - x0) / DCOLS as f32;
+        let (x0, x1, top, floor) = (20.0, w - 20.0, if tall { 96.0 } else { 40.0 }, h - 16.0);
+        let pitch = (x1 - x0) / ncols as f32;
         let bw = (pitch * 0.64).round().max(4.0);
         let span = floor - top;
-        let top_c = (0..DCOLS).fold(0, |a, c| if self.peak[c] > self.peak[a] { c } else { a });
-        let xs: Vec<f32> = (0..DCOLS).map(|c| (x0 + c as f32 * pitch + (pitch - bw) / 2.0).round()).collect();
+        let top_c = (0..ncols).fold(0, |a, c| if self.peak[c] > self.peak[a] { c } else { a });
+        let xs: Vec<f32> = (0..ncols).map(|c| (x0 + c as f32 * pitch + (pitch - bw) / 2.0).round()).collect();
         let cols: Vec<Piece> = xs.iter().map(|&x| Piece::slab(x, top, x + bw, floor, bw / 2.0, bw / 2.0, 1.0)).collect();
         self.lens.set(&cols);
         let glass = self.lens.update(ui, w, h, 0, |_| {});
@@ -905,8 +946,10 @@ fn orbit_ring(u: &Ui, base: &Matrix3x2, cx: f32, cy: f32, r: f32, yaw: f32, ki: 
 }
 
 impl Widget for OrbW {
-    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Visual);
+    fn layouts(&self) -> bool { true }
+    fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
+        let l = desk::lay(Kind::Visual);
+        let (w, h) = (l.w, l.h);
         let dt = dt.min(0.1);
         let src = levels_now();
         let e = band_mean(&src, 0, audioviz::BANDS);
@@ -921,8 +964,22 @@ impl Widget for OrbW {
         ui.text(&ui.f.small, if live { i18n::t("en vivo") } else { i18n::t("en pausa") }, 30.0, 10.0, 18.0, &ui.dim);
         let ki = ez(t, 0.0, 0.8);
         let en = q(self.energy, 16.0);
-        let (cx, cy) = (w / 2.0, h / 2.0 + 10.0);
-        let r = (w.min(h) * 0.27).round();
+        // El orbe; en el alto y el grande, la canción debajo (fuera del cristal)
+        let (cx, cy, r) = match l.sz {
+            Sz::Alto => (w / 2.0, 150.0, (w * 0.30).round()),
+            Sz::Grande => (w / 2.0, h / 2.0 - 4.0, (w * 0.26).round()),
+            _ => (w / 2.0, h / 2.0 + 10.0, (w.min(h) * 0.27).round()),
+        };
+        if l.sz != Sz::Pequeno {
+            if let Some((tt, ar)) = MEDIA.lock().unwrap().as_ref().map(|m| (m.title.clone(), m.artist.clone())) {
+                let kt = ez(t, 0.2, 0.5);
+                popup::push_alpha(rt, kt);
+                let ty = if l.sz == Sz::Alto { 246.0 } else { h - 62.0 };
+                ui.text_c(&d.title, &fit(ui, &d.title, &tt, w - 36.0), w / 2.0, ty, 22.0, &ui.white);
+                ui.text_c(&ui.f.sub, &fit(ui, &ui.f.sub, &ar, w - 36.0), w / 2.0, ty + 24.0, 18.0, &ui.dim);
+                unsafe { rt.PopLayer(); }
+            }
+        }
         let (yaw, pts) = (self.yaw, &self.pts);
         self.lens.set(&[Piece::disc(cx, cy, r, r, 0.55)]);
         // Lo de detrás: el fondo de pantalla (lo pone la lente), la mitad de atrás del anillo, la nube de
@@ -978,8 +1035,11 @@ fn sec_frac(s: u16) -> f32 { (s.min(59) as f32) / 60.0 }
 pub struct EyeW { sec: f32, moving: bool, lens: Lens }
 
 impl Widget for EyeW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Clocks);
+        let l = desk::lay(Kind::Clocks);
+        let (w, h) = (l.w, l.h);
+        let big = l.sz == Sz::Grande;
         let rt = ui.rt;
         let base = cur_xf(ui);
         let gf = gfonts(ui);
@@ -1036,8 +1096,20 @@ impl Widget for EyeW {
 
         // La hora y el día, encima y sin deformar (caen en la parte plana del cristal)
         popup::push_alpha(rt, kt);
-        ui.text_c(&gf.face, &hm, cx, cy - 32.0 + 6.0 * (1.0 - kt), 50.0, &ui.white);
-        ui.text_c(&ui.f.sub, &date, cx, cy + 15.0, 18.0, &ui.dim);
+        if big {
+            // Grande: la hora con la letra fina mayor y las cuatro horas cardinales en la parte plana
+            ui.text_c(&gf.clock, &hm, cx, cy - 42.0 + 6.0 * (1.0 - kt), 66.0, &ui.white);
+            ui.text_c(&ui.f.sub, &date, cx, cy + 24.0, 18.0, &ui.dim);
+            let rn = cr * 0.50;
+            for (i, n) in ["12", "3", "6", "9"].iter().enumerate() {
+                let a = i as f32 * PI / 2.0;
+                let (nx, ny) = (cx + rn * a.sin(), cy - rn * a.cos());
+                ui.text_c(&ui.f.small, n, nx, ny - 8.0, 16.0, &ui.faint);
+            }
+        } else {
+            ui.text_c(&gf.face, &hm, cx, cy - 32.0 + 6.0 * (1.0 - kt), 50.0, &ui.white);
+            ui.text_c(&ui.f.sub, &date, cx, cy + 15.0, 18.0, &ui.dim);
+        }
         unsafe { rt.PopLayer(); }
         // El brillo del vidrio: filo fino y un reflejo curvo arriba a la izquierda
         popup::push_alpha(rt, kc);
@@ -1059,6 +1131,27 @@ fn reel_radii(prog: f32) -> (f32, f32) {
     let p = prog.clamp(0.0, 1.0);
     let span = PACK * PACK - HUB * HUB;
     ((HUB * HUB + span * (1.0 - p)).sqrt(), (HUB * HUB + span * p).sqrt())
+}
+
+/// Medida de siempre de la casete (la de la Banda); en los demás tamaños se escala entera.
+const TAPE_W: f32 = 226.0;
+const TAPE_H: f32 = 118.0;
+
+/// Maqueta del casete: escala y esquina de la casete, y la columna de la canción (x0, xr, título,
+/// centro y amplitud de la onda, progreso y controles).
+struct TapeLay { s: f32, ox: f32, oy: f32, x0: f32, xr: f32, ty: f32, mid: f32, amp: f32, py: f32, bcx: f32, cyb: f32 }
+
+fn tape_lay(l: desk::Lay) -> TapeLay {
+    let (w, h) = (l.w, l.h);
+    match l.sz {
+        // Grande: la casete arriba, a lo ancho, y la canción debajo
+        Sz::Grande => { let s = (w - 60.0) / TAPE_W; TapeLay { s, ox: 30.0, oy: 14.0, x0: 20.0, xr: w - 20.0, ty: 186.0, mid: 250.0, amp: 16.0, py: 280.0, bcx: w / 2.0, cyb: h - 30.0 } }
+        // Extragrande: la casete grande a la izquierda y la canción a su derecha
+        Sz::Extragrande => { let s = 380.0 / TAPE_W; TapeLay { s, ox: 22.0, oy: (h - TAPE_H * s) / 2.0, x0: 438.0, xr: w - 22.0, ty: 70.0, mid: 170.0, amp: 30.0, py: 240.0, bcx: (438.0 + w - 22.0) / 2.0, cyb: 300.0 } }
+        // Banda (la de siempre)
+        // Banda: la canción en medio y los controles a la derecha, a media altura
+        _ => TapeLay { s: 1.0, ox: 14.0, oy: 26.0, x0: 262.0, xr: w - 214.0, ty: 22.0, mid: 88.0, amp: 20.0, py: 126.0, bcx: w - 112.0, cyb: h / 2.0 },
+    }
 }
 
 /// «1:14» (o «61:05» si pasa de la hora).
@@ -1102,8 +1195,9 @@ impl TapeW {
 }
 
 impl Widget for TapeW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Music);
+        let (w, h) = desk::Sz::dims(desk::sz(Kind::Music));
         let dt = dt.min(0.1);
         let m = MEDIA.lock().unwrap().clone();
         let playing = m.as_ref().is_some_and(|m| m.playing);
@@ -1133,20 +1227,33 @@ impl Widget for TapeW {
         // ---- La casete, de plástico ahumado translúcido: el cuerpo es cristal que deja ver (oscurecido) el
         // fondo de pantalla, doblado en sus cantos; por la ventana transparente se ven las bobinas
         let kc = ez(t, 0.0, 0.6);
-        let (bx0, by0, bx1, by1) = (14.0, 26.0, 240.0, h - 26.0);
+        // La casete se dibuja a su medida de siempre (226 × 118) y se escala entera según el tamaño
+        // (como un objeto: las bobinas y la ventana crecen con ella); las piezas de cristal, en cambio,
+        // van en coordenadas del widget para que el mapa de refracción sea el de su tamaño real
+        let l = desk::lay(Kind::Music);
+        let cl = tape_lay(l);
+        let (s, ox, oy) = (cl.s, cl.ox, cl.oy);
+        let mm = Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: ox, M32: oy };
+        let on_tape = |u: &Ui, b: &Matrix3x2| unsafe { u.rt.SetTransform(&mulm(&mm, b)); };
+        let wr = |x0: f32, y0: f32, x1: f32, y1: f32| (ox + x0 * s, oy + y0 * s, ox + x1 * s, oy + y1 * s);
+        let (bx0, by0, bx1, by1) = (0.0, 0.0, TAPE_W, TAPE_H);
         popup::push_alpha(rt, kc);
-        ui.hit(rect(bx0, by0, bx1, by1), 4);
+        let (hx0, hy0, hx1, hy1) = wr(bx0, by0, bx1, by1);
+        ui.hit(rect(hx0, hy0, hx1, hy1), 4);
         let hk = ui.heat(4);
-        self.body.set(&[Piece::slab(bx0, by0, bx1, by1, 12.0, 14.0, 0.9)]);
+        self.body.set(&[Piece::slab(hx0, hy0, hx1, hy1, 12.0 * s, 14.0 * s, 0.9)]);
         self.body.shade(ui, &base, 0, 1.0);
         if self.body.update(ui, w, h, 0, |_| {}) { self.body.fill(ui, 0); }
+        on_tape(ui, &base);
         unsafe {
             // Ahumado: oscurece lo de detrás sin taparlo
             rt.FillRoundedRectangle(&rrect(rect(bx0, by0, bx1, by1), 12.0), &ui.brush(rgba(0.04 + 0.02 * hk, 0.04 + 0.02 * hk, 0.05 + 0.02 * hk, 0.66)));
             let sheen = lin(ui, 0.0, by0, 0.0, by1, &[(0.0, wh(0.07)), (0.5, wh(0.0)), (1.0, wh(0.02))]);
             rt.FillRoundedRectangle(&rrect(rect(bx0, by0, bx1, by1), 12.0), &sheen);
         }
+        reset(ui, &base);
         self.body.rim(ui, 0, 0.8);
+        on_tape(ui, &base);
         for (sx, sy) in [(bx0 + 8.0, by0 + 8.0), (bx1 - 8.0, by0 + 8.0), (bx0 + 8.0, by1 - 8.0), (bx1 - 8.0, by1 - 8.0)] {
             dot(rt, sx, sy, 2.0, &ui.brush(wh(0.14)));
         }
@@ -1169,39 +1276,48 @@ impl Widget for TapeW {
             }
         };
         tape_path(ui);
+        reset(ui, &base);
         // Ventana de plástico transparente: detrás, el fondo de pantalla, las bobinas y la cinta; el
         // plástico los dobla un poco en sus cantos
         let (a0, a1) = (self.ang[0], self.ang[1]);
         let reels = |u: &Ui| {
-            let b0 = cur_xf(u);
+            let b0 = mulm(&mm, &cur_xf(u));
+            unsafe { u.rt.SetTransform(&b0); }
             tape_path(u);
             Self::reel(u, &b0, c1, rcy, rl, a0);
             Self::reel(u, &b0, c2, rcy, rr, a1);
         };
-        self.win.set(&[Piece::slab(wx0, wy0, wx1, wy1, 10.0, 8.0, 0.8)]);
+        let (vx0, vy0, vx1, vy1) = wr(wx0, wy0, wx1, wy1);
+        self.win.set(&[Piece::slab(vx0, vy0, vx1, vy1, 10.0 * s, 8.0 * s, 0.8)]);
         let key = ((a0 * 512.0) as u64) << 40 ^ ((a1 * 512.0) as u64) << 20 ^ ((rl * 64.0) as u64);
         if self.win.update(ui, w, h, key, reels) {
             self.win.fill(ui, 0);
         } else {
-            Self::reel(ui, &base, c1, rcy, rl, a0);
-            Self::reel(ui, &base, c2, rcy, rr, a1);
+            let bm = mulm(&mm, &base);
+            on_tape(ui, &base);
+            Self::reel(ui, &bm, c1, rcy, rl, a0);
+            Self::reel(ui, &bm, c2, rcy, rr, a1);
+            reset(ui, &base);
         }
+        on_tape(ui, &base);
         unsafe {
             rt.FillRoundedRectangle(&rrect(rect(wx0, wy0, wx1, wy1), 10.0), &ui.brush(rgba(0.0, 0.0, 0.0, 0.16)));
             rt.FillRoundedRectangle(&rrect(rect(wx0, wy0, wx1, wy1), 10.0), &lin(ui, 0.0, wy0, 0.0, wy1, &[(0.0, wh(0.08)), (0.45, wh(0.0)), (1.0, wh(0.0))]));
         }
+        reset(ui, &base);
         self.win.rim(ui, 0, 0.9);
+        on_tape(ui, &base);
         for gx in [g1, g2] { dot(rt, gx, gy, 2.2, &ui.brush(wh(0.35))); }
         let hx = (bx0 + bx1) / 2.0;
         unsafe { rt.FillRoundedRectangle(&rrect(rect(hx - 16.0, gy - 1.0, hx + 16.0, gy + 6.0), 2.5), &ui.brush(wh(0.16))); }
+        reset(ui, &base);
         unsafe { rt.PopLayer(); }
 
-        // ---- A la derecha: la canción
-        let x0 = 262.0;
-        let xr = w - 18.0;
+        // ---- La canción (a la derecha de la casete o debajo)
+        let (x0, xr) = (cl.x0, cl.xr);
         let (title, artist) = match &m { Some(m) => (m.title.clone(), m.artist.clone()), None => (i18n::t("Nada sonando").to_string(), i18n::t("Pon algo de música").to_string()) };
-        ui.text(&d.title, &fit(ui, &d.title, &title, xr - x0), x0, 16.0, 22.0, &ui.white);
-        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &artist, xr - x0), x0, 38.0, 18.0, &ui.dim);
+        ui.text(&d.title, &fit(ui, &d.title, &title, xr - x0), x0, cl.ty, 22.0, &ui.white);
+        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &artist, xr - x0), x0, cl.ty + 22.0, 18.0, &ui.dim);
 
         // ---- Onda: una línea fina, suma de senos con las bandas como amplitudes
         let groups = [band_mean(&self.lv, 0, 4), band_mean(&self.lv, 4, 9), band_mean(&self.lv, 9, 15), band_mean(&self.lv, 15, 22), band_mean(&self.lv, 22, 29), band_mean(&self.lv, 29, 36)];
@@ -1218,8 +1334,7 @@ impl Widget for TapeW {
             let target = (v * 0.55).clamp(-1.0, 1.0) * edge;
             self.wave[x] += (target - self.wave[x]) * kw;
         }
-        let mid = 92.0;
-        let amp = 22.0;
+        let (mid, amp) = (cl.mid, cl.amp);
         let sw = (xr - x0) / (WN - 1) as f32;
         let ks = ez(t, 0.15, 0.6);
         let line = ui.wa(q(0.9 * ks, 20.0));
@@ -1230,7 +1345,7 @@ impl Widget for TapeW {
         }
 
         // ---- Progreso (la punta, un punto diminuto en el acento) y tiempos
-        let py = 132.0;
+        let py = cl.py;
         bar(ui, x0, py, xr - x0, 3.0, prog);
         if secs.is_some() { dot(rt, x0 + (xr - x0) * prog, py + 1.5, 2.6, &ui.brush(acc(1.0))); }
         if let Some((p, e)) = secs {
@@ -1238,8 +1353,8 @@ impl Widget for TapeW {
             ui.text_r(&ui.f.small, &mmss(e as u32), xr, py + 6.0, 16.0, &ui.faint);
         }
         // ---- Controles
-        let cyb = h - 26.0;
-        let ccx = (x0 + xr) / 2.0;
+        let cyb = cl.cyb;
+        let ccx = cl.bcx;
         for (i, (g, id)) in [("\u{E892}", 1u32), (if playing { "\u{E769}" } else { "\u{E768}" }, 2), ("\u{E893}", 3)].into_iter().enumerate() {
             let bx = ccx + (i as f32 - 1.0) * 56.0;
             let hk = ui.heat(id);
@@ -1278,41 +1393,64 @@ impl Widget for TapeW {
 pub struct DriveDotsW { fills: Vec<f32>, moving: bool, lens: Lens }
 
 impl Widget for DriveDotsW {
+    fn layouts(&self) -> bool { true }
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Storage);
+        let l = desk::lay(Kind::Storage);
+        let (w, h) = (l.w, l.h);
+        let narrow = l.sz == Sz::Alto;
         let st = deskdata::STORE.lock().unwrap().clone();
         let n = st.as_ref().map(|s| s.drives.len()).unwrap_or(0);
-        deskw::header(ui, d, i18n::t("Almacenamiento"), &match n { 0 => String::new(), 1 => i18n::t("1 unidad").into(), n => i18n::tf("{} unidades", &[&n]) }, w);
+        // En el alto no cabe el «n unidades» junto al título
+        let right = if narrow { String::new() } else { match n { 0 => String::new(), 1 => i18n::t("1 unidad").into(), n => i18n::tf("{} unidades", &[&n]) } };
+        deskw::header(ui, d, i18n::t("Almacenamiento"), &right, w);
         let Some(st) = st else { return };
         let base = cur_xf(ui);
         let pad = 20.0;
         let tr = 9.0;
-        let shown = st.drives.len().min(3);
+        // Filas que caben (en la columna se reserva el pie para el total) y su alto: en el alto, el
+        // «libres de» va en su propia línea, bajo el nombre
+        let (rh, foot) = (if narrow { 70.0 } else { 54.0 }, if l.sz == Sz::Columna { 44.0 } else { 0.0 });
+        let fit_n = (((h - 56.0 - foot - 6.0) / rh).floor() as usize).max(1);
+        let shown = st.drives.len().min(fit_n).min(10);
         self.fills.resize(shown, 0.0);
         self.moving = false;
         let mut pieces = Vec::new();
         let mut rows = Vec::new();
-        for (i, dr) in st.drives.iter().take(3).enumerate() {
-            let y = 56.0 + i as f32 * 54.0;
+        for (i, dr) in st.drives.iter().take(shown).enumerate() {
+            let y = 56.0 + i as f32 * rh;
             let used = dr.total.saturating_sub(dr.free);
             let frac = used as f32 / dr.total.max(1) as f32;
             let letter = dr.root.trim_end_matches('\\');
             let name = if dr.label.is_empty() { i18n::tf("Disco ({})", &[&letter]) } else { format!("{} ({letter})", dr.label) };
             let id = 40 + i as u32;
             let hk = ui.heat(id);
-            ui.card_k(rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + 46.0), hk);
+            let card = rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + rh - 8.0);
+            ui.card_k(card, hk);
             ui.glyph(&ui.f.icon_l, "\u{EDA2}", pad + 3.0 * hk, y, 20.0, 20.0, &ui.wa(0.72 + 0.25 * hk));
             let free = i18n::tf("{} libres de {}", &[&deskdata::fmt_bytes(dr.free), &deskdata::fmt_bytes(dr.total)]);
-            let fw = ui.p.width(&ui.f.sub, &free);
-            ui.text(&ui.f.name, &fit(ui, &ui.f.name, &name, w - 2.0 * pad - fw - 40.0), pad + 28.0 + 4.0 * hk, y, 20.0, &ui.white);
-            ui.text_r(&ui.f.sub, &free, w - pad, y, 20.0, &ui.dim);
+            if narrow {
+                ui.text(&ui.f.name, &fit(ui, &ui.f.name, &name, w - 2.0 * pad - 30.0), pad + 28.0 + 4.0 * hk, y, 20.0, &ui.white);
+                ui.text(&ui.f.small, &fit(ui, &ui.f.small, &free, w - 2.0 * pad), pad, y + 22.0, 16.0, &ui.dim);
+            } else {
+                let fw = ui.p.width(&ui.f.sub, &free);
+                ui.text(&ui.f.name, &fit(ui, &ui.f.name, &name, w - 2.0 * pad - fw - 40.0), pad + 28.0 + 4.0 * hk, y, 20.0, &ui.white);
+                ui.text_r(&ui.f.sub, &free, w - pad, y, 20.0, &ui.dim);
+            }
             // Se llena en cascada al aparecer; después sigue al dato con suavidad
             let k = ez(t, 0.15 + i as f32 * 0.12, 0.9);
             if t < 1.1 { self.fills[i] = frac * k; } else { self.moving |= approach(&mut self.fills[i], frac, dt, 0.4); }
-            let cy = y + 33.0;
+            // El tubo, debajo de los textos (nunca encima)
+            let cy = y + rh - 21.0;
             pieces.push(Piece::slab(pad, cy - tr, w - pad, cy + tr, tr, tr, 0.85));
             rows.push((cy, self.fills[i], frac >= 0.9));
-            ui.hit(rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + 46.0), id);
+            ui.hit(card, id);
+        }
+        // Columna: el total de todas las unidades al pie
+        if foot > 0.0 && !st.drives.is_empty() {
+            let (free, total) = st.drives.iter().fold((0u64, 0u64), |a, d| (a.0 + d.free, a.1 + d.total));
+            ui.sep(h - foot - 2.0);
+            ui.text(&ui.f.small, &i18n::t("TOTAL").to_string(), pad, h - foot + 12.0, 18.0, &ui.faint);
+            ui.text_r(&ui.f.sub, &i18n::tf("{} libres de {}", &[&deskdata::fmt_bytes(free), &deskdata::fmt_bytes(total)]), w - pad, h - foot + 12.0, 18.0, &ui.dim);
         }
         if pieces.is_empty() { return; }
         self.lens.set(&pieces);
@@ -1338,7 +1476,7 @@ impl Widget for DriveDotsW {
     }
     fn click(&mut self, id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         match id? {
-            i @ 40..=42 => {
+            i @ 40..=49 => {
                 let root = deskdata::STORE.lock().unwrap().as_ref().and_then(|s| s.drives.get((i - 40) as usize).map(|d| d.root.clone()))?;
                 Some(Box::new(move || sys::open(&root)))
             }

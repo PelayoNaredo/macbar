@@ -718,4 +718,8 @@ pub static EN: &[(&str, &str)] = &[
     ("Renovar el abono de transporte", "Renew the travel pass"),
     ("Llamar a mamá", "Call mum"),
     ("Ordenar las fotos del viaje", "Sort the trip photos"),
+    // ---- deskv/deskv2/deskv3: diseños alternativos según el tamaño
+    ("SEMANA {}", "WEEK {}"),
+    ("DÍA {} DE {}", "DAY {} OF {}"),
+    ("TOTAL", "TOTAL"),
 ];
