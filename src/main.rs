@@ -2500,6 +2500,8 @@ fn paint(hwnd: HWND) {
                     // Mismo tamaño visible para todos: cada glifo de Segoe Fluent tiene su propia caja
                     // (la flecha es pequeña, la batería ancha…), así que se escala por su tinta real
                     sc *= icon_norm(&p, &g.f.icon, &gl);
+                    // El glifo de Bluetooth es alto y estrecho: algo más pequeño para que pese como los demás
+                    if act == Act::Bluetooth { sc *= 0.84; }
                     // La taza de la cafeína entra creciendo con un pequeño rebote
                     if act == Act::Caffeine { let k = appear("caffeine", &mut animating); sc *= 0.4 + 0.6 * ease_back(k); }
                     // Si el icono cambia (batería que sube, señal Wi-Fi, sin conexión…), el viejo se funde
