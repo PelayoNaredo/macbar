@@ -417,7 +417,7 @@ impl Ui<'_> {
 
 // ---------------------------------------------------------------- ventanas de los paneles
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Kind { Calendar, Weather, Wifi, Search, Settings }
+pub enum Kind { Calendar, Weather, Wifi, Bluetooth, Search, Settings }
 
 struct Pw {
     hwnd: HWND,
@@ -455,13 +455,14 @@ fn new_content(k: Kind) -> Box<dyn Content> {
         Kind::Calendar => Box::new(calendar::Calendar::new()),
         Kind::Weather => Box::new(weather::WeatherPanel::new()),
         Kind::Wifi => Box::new(wifi::WifiPanel::new()),
+        Kind::Bluetooth => Box::new(bluetooth::BtPanel::new()),
         Kind::Search => Box::new(search::SearchPanel::new()),
         Kind::Settings => Box::new(settings::Settings::new()),
     }
 }
 
 /// Crea de antemano las ventanas (ocultas): al pulsar, el panel aparece sin esperar.
-pub fn prewarm() { for k in [Kind::Calendar, Kind::Weather, Kind::Wifi, Kind::Search] { ensure(k); } }
+pub fn prewarm() { for k in [Kind::Calendar, Kind::Weather, Kind::Wifi, Kind::Bluetooth, Kind::Search] { ensure(k); } }
 
 fn ensure(k: Kind) {
     if PANELS.with(|p| p.borrow().iter().any(|w| w.kind == k)) { return; }

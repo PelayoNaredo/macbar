@@ -727,4 +727,15 @@ pub static EN: &[(&str, &str)] = &[
     ("Sin previsión por ahora", "No forecast yet"),
     ("Se vuelve a pedir en unos minutos", "Trying again in a few minutes"),
     ("Máx {}°  Mín {}°", "H {}°  L {}°"),
+    // ---- bluetooth.rs
+    ("{} dispositivos conectados", "{} devices connected"),
+    ("Dispositivos", "Devices"),
+    ("No hay dispositivos emparejados", "No paired devices"),
+    ("No conectado", "Not connected"),
+    ("Añadir dispositivo…", "Add device…"),
+    ("{} · desconectado", "{} · disconnected"),
+    ("Mostrar Bluetooth en la barra", "Show Bluetooth in the menu bar"),
+    ("A la derecha del Wi-Fi, con su panel de dispositivos", "Right of Wi-Fi, with its devices panel"),
+    ("Avisos de Bluetooth", "Bluetooth notices"),
+    ("Al conectar o desconectar un dispositivo emparejado", "When a paired device connects or disconnects"),
 ];

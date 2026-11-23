@@ -38,6 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows_numerics::{Matrix3x2, Vector2};
 
 mod basket;
+mod bluetooth;
 mod calendar;
 mod card;
 mod ccenter;
@@ -102,6 +103,7 @@ impl Mode {
             Mode::Hud(live::Hud::Full) => 28, Mode::Hud(live::Hud::Saver(_)) => 29, Mode::Hud(live::Hud::Wifi) => 30,
             Mode::Hud(live::Hud::Disk(_)) => 31,
             Mode::Hud(live::Hud::Pomo(..)) => 32, Mode::Hud(live::Hud::Caffeine(_)) => 33, Mode::Hud(live::Hud::Color(_)) => 34, Mode::Hud(live::Hud::Cpu(_)) => 35, Mode::Hud(live::Hud::FileOp(..)) => 36, Mode::Hud(live::Hud::Face(_)) => 37, Mode::Hud(live::Hud::DlStart) => 39,
+            Mode::Hud(live::Hud::Bt(..)) => 41,
         }
     }
 }
@@ -159,6 +161,7 @@ fn hud_parts(h: live::Hud) -> (&'static str, String, bool) {
         Color(c) => ("\u{E790}", i18n::tf("{} copiado", &[&format!("#{:06X}", c & 0xFF_FFFF)]), false),
         Present(on) => ("\u{E7F4}", if on { i18n::t("Modo presentación: sin avisos").into() } else { i18n::t("Modo presentación desactivado").into() }, false),
         Usb(on) => { let l = live::USB_LETTER.load(Ordering::Relaxed) as char; ("\u{E88E}", if on { i18n::tf("USB conectado · {}:", &[&l]) } else { i18n::t("USB expulsado").into() }, false) }
+        Bt(_, t) => (bluetooth::glyph_of(t), bluetooth::NOTE.lock().unwrap().clone(), false),
     }
 }
 
@@ -438,14 +441,14 @@ enum Act {
     // Abren un menú nativo
     AppMenu, Battery, User,
     // Abren un panel propio
-    Logo, Weather, Tray, Wifi, Clock,
+    Logo, Weather, Tray, Wifi, Bluetooth, Clock,
     // Acción directa
     Desktop, OpenPlayer, OpenYtm, Prev, Toggle, Next, Island, Claude, Search, TimerStop, HudDismiss, TimerOpen, ShelfOpen(u8), ShelfClear, ShelfShare, Caffeine, ShelfCard, Glance, CallMic, CallOpen, DlOpen,
 }
 
 impl Act {
     fn is_menu(self) -> bool { matches!(self, Act::AppMenu | Act::Battery | Act::User) }
-    fn is_panel(self) -> bool { matches!(self, Act::Logo | Act::Weather | Act::Tray | Act::Wifi | Act::Clock) }
+    fn is_panel(self) -> bool { matches!(self, Act::Logo | Act::Weather | Act::Tray | Act::Wifi | Act::Bluetooth | Act::Clock) }
     /// Menús y paneles se abren al pulsar (como en macOS); el resto, al soltar.
     fn on_press(self) -> bool { self.is_menu() || self.is_panel() }
     /// Los menús de la derecha se alinean por su borde derecho.
@@ -1205,6 +1208,7 @@ fn run(a: Act) {
                 (Some(live::Hud::Cpu(_) | live::Hud::Mem(_)), _) => sys::open_args("taskmgr.exe", ""),
                 (Some(live::Hud::Volume(..) | live::Hud::Audio), _) if card::click_opens() => { live::dismiss(); card::open_tab(card::Origin::Click, Some(card::Tab::Audio)); return; }
                 (Some(live::Hud::Saver(_)), _) => sys::open("ms-settings:batterysaver"),
+                (Some(live::Hud::Bt(..)), _) => sys::open("ms-settings:bluetooth"),
                 _ => {}
             }
             live::dismiss();
@@ -1314,12 +1318,13 @@ fn click(hwnd: HWND, a: Act) {
     let close_others = |keep: Act| {
         if keep != Act::Logo { ccenter::close(); }
         if keep != Act::Tray { tray::close(); }
-        if !matches!(keep, Act::Clock | Act::Weather | Act::Wifi) { popup::hide_all(); }
+        if !matches!(keep, Act::Clock | Act::Weather | Act::Wifi | Act::Bluetooth) { popup::hide_all(); }
     };
     match a {
         Act::Logo => { close_others(a); ccenter::toggle(hwnd); }
         Act::Tray => { close_others(a); trayhost::mark_seen(); tray::toggle(anchor_right(hwnd, a, 40.0)); }
         Act::Wifi => { close_others(a); popup::toggle(popup::Kind::Wifi, anchor_right(hwnd, a, 60.0)); }
+        Act::Bluetooth => { close_others(a); popup::toggle(popup::Kind::Bluetooth, anchor_right(hwnd, a, 60.0)); }
         Act::Weather => { close_others(a); popup::toggle(popup::Kind::Weather, anchor_right(hwnd, a, 24.0)); }
         // Clic en la isla del temporizador: su pestaña en la tarjeta
         Act::TimerOpen if card::click_opens() => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)),
@@ -2205,7 +2210,8 @@ fn paint(hwnd: HWND) {
                         let (gl, lbl, has_bar) = hud_parts(hh);
                         let (icon_b, fill_b) = match hh {
                             live::Hud::TimerDone => (&orange, &orange),
-                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn | live::Hud::FileOp(_, true) => (&green, &green),
+                            live::Hud::Power(_, true) | live::Hud::Net(true) | live::Hud::Download | live::Hud::Usb(true) | live::Hud::Full | live::Hud::Wifi | live::Hud::CamOn | live::Hud::FileOp(_, true) | live::Hud::Bt(true, _) => (&green, &green),
+                            live::Hud::Bt(false, _) => (&dim, &dim),
                             live::Hud::FileOp(_, false) => (&red, &red),
                             live::Hud::MicOn | live::Hud::Disk(_) | live::Hud::Saver(true) | live::Hud::Pomo(true, _) | live::Hud::Caffeine(true) => (&orange, &orange),
                             live::Hud::Pomo(false, _) => (&green, &green),
@@ -2432,7 +2438,12 @@ fn paint(hwnd: HWND) {
             let net = *live::NET.lock().unwrap();
             let (net_g, net_ok) = live::net_glyph(&net);
             // De derecha a izquierda: escritorio, red, batería, iconos ocultos, búsqueda, Claude
-            let mut icons: Vec<(String, Act, bool)> = vec![("\u{E7F4}".into(), Act::Desktop, true), (net_g.into(), Act::Wifi, net_ok)];
+            let mut icons: Vec<(String, Act, bool)> = vec![("\u{E7F4}".into(), Act::Desktop, true)];
+            // Bluetooth, a la derecha del Wi-Fi (si hay radio y no se ocultó): atenuado con la radio apagada
+            let bt = bluetooth::bar();
+            if let Some((bt_on, _)) = bt { icons.push(("\u{E702}".into(), Act::Bluetooth, bt_on)); }
+            let bt_conn = bt.is_some_and(|b| b.1);
+            icons.push((net_g.into(), Act::Wifi, net_ok));
             if let Some(b) = bat_glyph { icons.push((b, Act::Battery, true)); }
             let tray_open = tray::is_open();
             icons.extend([
@@ -2525,6 +2536,11 @@ fn paint(hwnd: HWND) {
                         let e = D2D1_ELLIPSE { point: Vector2 { X: pcx + 7.5, Y: pcy - 7.0 }, radiusX: 3.0, radiusY: 3.0 };
                         rt.FillEllipse(&e, &p.brush(crate::profiles::accent(1.0)));
                     }
+                    // Bluetooth con algún dispositivo conectado: un puntito discreto debajo, del color del icono
+                    if act == Act::Bluetooth && bt_conn {
+                        let e = D2D1_ELLIPSE { point: Vector2 { X: pcx + 5.5, Y: pcy + 6.5 }, radiusX: 1.7, radiusY: 1.7 };
+                        rt.FillEllipse(&e, ib);
+                    }
                 }
                 hits.push((rect(rx + 4.0, sy, hit_r, sb), act));
             }
@@ -2540,6 +2556,7 @@ fn paint(hwnd: HWND) {
                 Act::Clock => panel == Some(popup::Kind::Calendar),
                 Act::Weather => panel == Some(popup::Kind::Weather),
                 Act::Wifi => panel == Some(popup::Kind::Wifi),
+                Act::Bluetooth => panel == Some(popup::Kind::Bluetooth),
                 _ => false,
             };
             // El brillo de "ratón encima" es UNA píldora que se desliza de un botón a otro (muelle suave)
@@ -2866,7 +2883,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, false);
                 LRESULT(0)
             }
-            WM_FACETEST => { if wp.0 == 7 { settings::open(); } else { faces::set(wp.0 == 1); } LRESULT(0) }
+            WM_FACETEST => {
+                match wp.0 { 7 => settings::open(), 20 => click(hwnd, Act::Bluetooth), 23 => click(hwnd, Act::Wifi), 21 | 22 => bluetooth::test_hud(wp.0 == 21), w => faces::set(w == 1) }
+                LRESULT(0)
+            }
             faces::WM_FACE => { if wp.0 == 2 { faces::on_dblclick(lp); } else { faces::on_face_msg(wp); } LRESULT(0) }
             WM_HOTKEY if wp.0 as i32 == faces::HOTKEY_ID => { faces::toggle(); LRESULT(0) }
             WM_CARDTEST => { match wp.0 { 1 => card::open(card::Origin::Click), 2 => card::test_hover(Some(lp.0 as u8)), 3 => card::open_tab(card::Origin::Click, Some(card::Tab::Timer)), 4 => card::test_switch(card::Tab::Media), 5 => card::test_switch(card::Tab::Timer), 6 => card::open_tab(card::Origin::Click, Some(card::Tab::Shelf)), 7 => card::drop_hover(lp.0 == 1), 8 => card::open_tab(card::Origin::Click, Some(card::Tab::Glance)), 9 => card::open_tab(card::Origin::Click, Some(card::Tab::Call)), 10 => card::test_switch(card::Tab::Audio), _ => card::close(card::Why::Toggle) } LRESULT(0) }
@@ -3221,6 +3241,8 @@ fn main() {
     // Render fuera de pantalla de cada widget × diseño × tamaño a PNG (sin ventanas; ver desk/shot.rs).
     // Antes del aviso de fallos (no relanza nada) y del candado de instancia única: corre aparte del macbar que esté abierto
     if let Ok(dir) = std::env::var("MACBAR_WIDGETSHOT") { std::process::exit(desk::shot::run(&dir)); }
+    // Diagnóstico de solo lectura del Bluetooth: qué radio y qué dispositivos ve Windows (no cambia nada)
+    if let Ok(path) = std::env::var("MACBAR_BTLIST") { std::process::exit(bluetooth::dump(&path)); }
     // Si algo falla (panic), queda escrito dónde, antes de que el proceso se cierre
     std::panic::set_hook(Box::new(|info| {
         let loc = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
@@ -3359,6 +3381,8 @@ fn main() {
         // Iconos de bandeja reales, avisos de la isla y estado de la red
         trayhost::start();
         live::start();
+        // Radio y dispositivos Bluetooth (icono de la barra, su panel y avisos al conectar)
+        bluetooth::start();
         // Paneles creados de antemano (ocultos): se abren sin esperar
         popup::prewarm();
         ccenter::prewarm();
@@ -3380,6 +3404,12 @@ fn main() {
             std::thread::spawn(|| {
                 for (ms, w) in [(4000u64, 1usize), (5000, 0)] { std::thread::sleep(Duration::from_millis(ms)); unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_FACETEST, WPARAM(w), LPARAM(0)); } }
             });
+        }
+        // Prueba visual del Bluetooth sin ratón: MACBAR_BTTEST=panel abre su panel; aviso_on / aviso_off enseñan
+        // el aviso de la isla con los AirPods del modo demostración; wifi abre el del Wi-Fi (para compararlos)
+        if let Ok(v) = std::env::var("MACBAR_BTTEST") {
+            let w = match v.as_str() { "aviso_on" => 21usize, "aviso_off" => 22, "wifi" => 23, _ => 20 };
+            std::thread::spawn(move || { std::thread::sleep(Duration::from_millis(3000)); unsafe { let _ = PostMessageW(Some(bar_hwnd()), WM_FACETEST, WPARAM(w), LPARAM(0)); } });
         }
         if std::env::var_os("MACBAR_BASKETTEST").is_some() {
             std::thread::spawn(|| { std::thread::sleep(Duration::from_millis(2500)); basket::test_show(1100, 500); });

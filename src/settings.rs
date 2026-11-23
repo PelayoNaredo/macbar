@@ -69,8 +69,8 @@ impl Sec {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
-    Autostart, Lang, Position, Solid, Accent, Present,
-    CardClick, CardHover, CardGlance, Cpu,
+    Autostart, Lang, Position, Solid, BtBar, Accent, Present,
+    CardClick, CardHover, CardGlance, Cpu, BtHud,
     Widgets, Widget(usize), Design(usize), Style, Ink, FaceDbl, NewsSrc, StockSyms,
     Profile, ProfileSave, ProfileDir, Theme,
     City, Refresh,
@@ -88,12 +88,12 @@ fn groups(sec: Sec, n_widgets: usize) -> Vec<(Option<&'static str>, Vec<Row>)> {
     match sec {
         Sec::General => vec![
             (None, vec![Autostart, Lang]),
-            (Some("Barra de menús"), vec![Position, Solid]),
+            (Some("Barra de menús"), vec![Position, Solid, BtBar]),
             (Some("Aspecto"), vec![Accent, Present]),
         ],
         Sec::Island => vec![
             (Some("Tarjeta de la isla"), vec![CardClick, CardHover, CardGlance]),
-            (Some("Avisos"), vec![Cpu]),
+            (Some("Avisos"), vec![Cpu, BtHud]),
         ],
         Sec::Desk => vec![
             (None, vec![Widgets]),
@@ -157,6 +157,9 @@ struct State {
     present: bool,
     card: [bool; 3],
     cpu: usize,
+    /// Bluetooth: icono en la barra y avisos en la isla
+    bt_bar: bool,
+    bt_hud: bool,
     widgets: bool,
     each: Vec<(&'static str, bool)>,
     /// Diseños que admiten el tamaño actual de cada widget y la posición del elegido
@@ -186,6 +189,8 @@ fn read() -> State {
         present: profiles::presenting(),
         card: [card::opt(card::OPT_CLICK), card::opt(card::OPT_HOVER), card::opt(card::OPT_GLANCE)],
         cpu: cpu_index(sys::config_value("alerta_cpu").as_deref()),
+        bt_bar: bluetooth::bar_opt(),
+        bt_hud: bluetooth::hud_opt(),
         widgets: desk::enabled(),
         each: desk::menu_items(),
         designs: desk::variant_items(),
@@ -215,6 +220,8 @@ enum Act {
     Style,
     FaceDbl,
     Cpu(usize),
+    BtBar(bool),
+    BtHud(bool),
     SaveProfile,
     Url,
     Folder,
@@ -241,6 +248,8 @@ fn action(row: Row, sub: u32, st: &State) -> Act {
             _ => Act::Nothing,
         },
         Solid if sub == 0 => Act::Bar(crate::BAR_SOLID),
+        BtBar if sub == 0 => Act::BtBar(!st.bt_bar),
+        BtHud if sub == 0 => Act::BtHud(!st.bt_hud),
         Accent => match pick(profiles::ACCENTS.len() as u32) { Some(i) if st.accent != Some(i as usize) => Act::Bar(crate::BAR_ACCENT0 + i), _ => Act::Nothing },
         Present if sub == 0 => Act::Bar(crate::BAR_PRESENT),
         CardClick if sub == 0 => Act::Bar(crate::BAR_CARD_CLICK),
@@ -310,6 +319,8 @@ fn spec(row: Row, st: &State) -> (String, String, Ctl, bool) {
             let name = match st.accent { Some(i) => t(profiles::ACCENTS[i].0), None => t("Personalizado (config.ini)") };
             (t("Color de acento"), name, Ctl::Swatch(st.accent), true)
         }
+        BtBar => (t("Mostrar Bluetooth en la barra"), t("A la derecha del Wi-Fi, con su panel de dispositivos"), Ctl::Switch(st.bt_bar), true),
+        BtHud => (t("Avisos de Bluetooth"), t("Al conectar o desconectar un dispositivo emparejado"), Ctl::Switch(st.bt_hud), true),
         Present => (t("Modo presentación"), t("Sin avisos en la isla ni widgets"), Ctl::Switch(st.present), true),
         CardClick => (t("Abrir con un clic en la isla"), t("Si no, el clic pausa o reanuda la música"), Ctl::Switch(st.card[0]), true),
         CardHover => (t("Abrir al dejar el ratón encima"), t("La tarjeta sale sola tras un momento"), Ctl::Switch(st.card[1]), true),
@@ -493,6 +504,8 @@ impl Settings {
             Act::Size(i, n) => Re::Run(Box::new(move || desk::set_size_i(i, n))),
             Act::FaceDbl => Re::Run(Box::new(caras::toggle)),
             Act::Cpu(i) => Re::Run(Box::new(move || sys::set_config_value("alerta_cpu", &cpu_value(i).to_string()))),
+            Act::BtBar(on) => Re::Run(Box::new(move || bluetooth::set_bar_opt(on))),
+            Act::BtHud(on) => Re::Run(Box::new(move || bluetooth::set_hud_opt(on))),
             Act::SaveProfile => Re::Run(Box::new(profiles::save_active)),
             Act::Url => Re::CloseRun(Box::new(|| sys::open(REPO))),
             Act::Folder => Re::CloseRun(Box::new(|| { let _ = std::fs::create_dir_all(sys::config_dir()); sys::open(&sys::config_dir()); })),
@@ -926,6 +939,11 @@ mod tests {
         assert_eq!(action(Row::Cpu, 4, &st), Act::Cpu(3));
         assert_eq!(action(Row::Cpu, 5, &st), Act::Nothing);
         assert_eq!(action(Row::Autostart, 0, &st), Act::Autostart(true));
+        // Bluetooth: cada interruptor cambia a lo contrario de lo que hay
+        assert_eq!(action(Row::BtBar, 0, &st), Act::BtBar(true));
+        st.bt_hud = true;
+        assert_eq!(action(Row::BtHud, 0, &st), Act::BtHud(false));
+        assert_eq!(action(Row::BtHud, 1, &st), Act::Nothing);
         // Perfiles: uno vacío se guarda sin reiniciar; uno guardado se carga (cierra el panel)
         st.saved = [false, true, false];
         assert_eq!(action(Row::Profile, 1, &st), Act::Bar(crate::BAR_PROFILE0));

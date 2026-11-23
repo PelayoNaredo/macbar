@@ -25,7 +25,10 @@ pub enum Hud { Volume(f32, bool), Bright(f32), Power(u8, bool), TimerDone, Net(b
     /// Empieza una descarga
     DlStart,
     /// Cara del escritorio: true = iconos, false = widgets
-    Face(bool) }
+    Face(bool),
+    /// Dispositivo Bluetooth emparejado que se conecta (true) o se desconecta, y su tipo
+    /// (`bluetooth::Tipo`); el texto está en `bluetooth::NOTE`
+    Bt(bool, u8) }
 
 /// Última notificación del móvil que se enseñó: (app, título)
 pub static PHONE_NOTE: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
