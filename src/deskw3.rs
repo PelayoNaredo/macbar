@@ -1,7 +1,7 @@
 //! Más widgets del escritorio: relojes del mundo, tareas y cuenta atrás.
 
 use super::*;
-use desk::{layout_size as size, DFonts, Kind}; // `size`: medidas de la maqueta (ver `desk::layout_size`)
+use desk::{DFonts, Kind}; // Todos responsive: maquetan con `desk::lay`
 use deskw::{header, Widget};
 use popup::Ui;
 use std::f32::consts::{PI, TAU};
@@ -149,18 +149,28 @@ pub(crate) fn today() -> i64 { let n = local_now(); days_from_civil(n.wYear as i
 
 // ================================================================ relojes del mundo
 /// Ciudades por defecto (en el idioma de la interfaz).
+/// (Ocho: los tamaños grandes enseñan hasta ocho relojes; los pequeños, las primeras.)
 fn default_zones() -> String {
-    if i18n::en() { "New York|America/New_York, Tokyo|Asia/Tokyo, London|Europe/London".into() }
-    else { "Nueva York|America/New_York, Tokio|Asia/Tokyo, Londres|Europe/London".into() }
+    if i18n::en() { "New York|America/New_York, Tokyo|Asia/Tokyo, London|Europe/London, Sydney|Australia/Sydney, Los Angeles|America/Los_Angeles, Dubai|Asia/Dubai, Beijing|Asia/Shanghai, São Paulo|America/Sao_Paulo".into() }
+    else { "Nueva York|America/New_York, Tokio|Asia/Tokyo, Londres|Europe/London, Sídney|Australia/Sydney, Los Ángeles|America/Los_Angeles, Dubái|Asia/Dubai, Pekín|Asia/Shanghai, São Paulo|America/Sao_Paulo".into() }
 }
 
-/// «Nueva York|America/New_York, Tokio|Asia/Tokyo» → [(ciudad, zona)] (cuatro como mucho).
+/// Relojes como mucho (los que caben en Extragrande).
+const MAX_ZONES: usize = 8;
+
+/// «Nueva York|America/New_York, Tokio|Asia/Tokyo» → [(ciudad, zona)] (ocho como mucho).
 fn parse_zones(s: &str) -> Vec<(String, String)> {
     s.split(',').filter_map(|p| {
         let (name, zone) = p.split_once('|')?;
         let (name, zone) = (name.trim(), zone.trim());
         (!name.is_empty() && !zone.is_empty()).then(|| (name.to_string(), zone.to_string()))
-    }).take(4).collect()
+    }).take(MAX_ZONES).collect()
+}
+
+/// Relojes que caben en cada tamaño, en (columnas, filas). Alto los pone en lista (esfera y texto al lado).
+fn clock_grid(s: desk::Sz) -> (usize, usize) {
+    use desk::Sz::*;
+    match s { Pequeno => (1, 1), Mediano => (2, 1), Banda => (4, 1), Alto => (1, 3), Grande => (2, 2), Columna => (2, 3), Extragrande => (4, 2) }
 }
 
 /// Minutos de diferencia entre dos horas de pared [año, mes, día, hora, minuto, …].
@@ -275,25 +285,35 @@ fn dial(ui: &Ui, cx: f32, cy: f32, r: f32, day: f32, ang: Option<(f32, f32, Opti
 }
 
 impl Widget for ClocksW {
-    fn paint(&mut self, ui: &mut Ui, _d: &DFonts, t: f32, _dt: f32) {
-        let (w, h) = size(Kind::Clocks);
+    fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, _dt: f32) {
+        let l = desk::lay(Kind::Clocks);
+        let (w, h) = (l.w, l.h);
         self.refresh();
         self.update();
-        let n = self.zones.len().max(1) as f32;
-        let cw = (w - PAD * 2.0) / n;
-        let r = (cw * 0.36).min(36.0);
-        let content = 2.0 * r + 44.0;
-        let top = (h - content) / 2.0;
+        // Los que caben en este tamaño (si hay menos ciudades, se reparten el sitio)
+        let (gc, gr) = clock_grid(l.sz);
+        let list = l.sz == desk::Sz::Alto;
+        let n = self.zones.len().min(gc * gr).max(1);
+        let cols = if list { 1 } else { n.min(gc) };
+        let rows = n.div_ceil(cols);
+        let (aw, ah) = (w - PAD * 2.0, h - PAD * 2.0);
+        let (cw, ch) = (aw / cols as f32, ah / rows as f32);
+        let r = if list { (ch * 0.30).min(24.0) } else { (cw * 0.36).min((ch - 48.0) / 2.0).min(70.0) };
+        let content = if list { 2.0 * r } else { 2.0 * r + 44.0 };
         // Segundero: salta cada segundo con un «tic» elástico corto
         let kt = self.tic_k();
         let jump = (self.sec - self.sec_prev).rem_euclid(60) as f32;
         let sec = self.sec_prev as f32 + jump * crate::ease_back(kt);
         if self.zones.is_empty() {
-            ui.text_c(&ui.f.sub, i18n::t("Clic derecho para elegir ciudades"), w / 2.0, h / 2.0 - 9.0, 18.0, &ui.dim);
+            let msg = if l.sz == desk::Sz::Pequeno || list { i18n::t("Clic derecho: ciudades") } else { i18n::t("Clic derecho para elegir ciudades") };
+            ui.text_c(&ui.f.sub, msg, w / 2.0, h / 2.0 - 9.0, 18.0, &ui.dim);
         }
         let local = self.local;
-        for (i, z) in self.zones.iter().enumerate() {
-            let cx = PAD + cw * (i as f32 + 0.5);
+        for (i, z) in self.zones.iter().take(n).enumerate() {
+            let (c, rr) = (i % cols, i / cols);
+            let (cell_x, cell_y) = (PAD + cw * c as f32, PAD + ch * rr as f32);
+            let top = cell_y + (ch - content) / 2.0;
+            let cx = if list { cell_x + r } else { cell_x + cw / 2.0 };
             let cy = top + r;
             let k = ez(t, 0.08 + 0.07 * i as f32, 0.8);
             let (day, ang, info) = match z.now {
@@ -315,13 +335,25 @@ impl Widget for ClocksW {
             popup::push_alpha(ui.rt, k);
             dial(ui, cx, cy, r, day, ang, popup::ease_out(((t - 0.15 - 0.07 * i as f32) / 0.9).clamp(0.0, 1.0)));
             unsafe { ui.rt.PopLayer(); ui.rt.SetTransform(&base); }
-            let name = fit(ui, &ui.f.lbl, &z.name, cw - 6.0);
-            ui.text_c(&ui.f.lbl, &name, cx, cy + r + 8.0, 18.0, &ui.white);
-            let info = fit(ui, &ui.f.sub, &info, cw - 4.0);
-            ui.text_c(&ui.f.sub, &info, cx, cy + r + 25.0, 16.0, &ui.dim);
-            ui.hit(rect(cx - cw / 2.0, top - 6.0, cx + cw / 2.0, top + content + 4.0), 1 + i as u32);
+            if list {
+                // En lista: ciudad, hora grande y diferencia, a la derecha de la esfera
+                let tx = cx + r + 10.0;
+                let tw = w - PAD - tx;
+                let (hm, off) = match z.now { Some(nw) => (format!("{:02}:{:02}", nw[3], nw[4]), fmt_offset(offset_min(&local, &nw))), None => ("--:--".into(), i18n::t("Zona desconocida").to_string()) };
+                ui.text(&ui.f.lbl, &fit(ui, &ui.f.lbl, &z.name, tw), tx, cy - 30.0, 18.0, &ui.white);
+                ui.text(&d.big, &hm, tx, cy - 13.0, 28.0, &ui.white);
+                ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &off, tw), tx, cy + 14.0, 16.0, &ui.dim);
+                ui.hit(rect(cell_x - 6.0, top - 6.0, w - PAD + 6.0, top + content + 6.0), 1 + i as u32);
+            } else {
+                let name = fit(ui, &ui.f.lbl, &z.name, cw - 6.0);
+                ui.text_c(&ui.f.lbl, &name, cx, cy + r + 8.0, 18.0, &ui.white);
+                let info = fit(ui, &ui.f.sub, &info, cw - 4.0);
+                ui.text_c(&ui.f.sub, &info, cx, cy + r + 25.0, 16.0, &ui.dim);
+                ui.hit(rect(cx - cw / 2.0, top - 6.0, cx + cw / 2.0, top + content + 4.0), 1 + i as u32);
+            }
         }
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         // Clic derecho en una esfera: editar las ciudades (fuera de ellas, el menú de siempre)
         if right && id.is_some() { return Some(Box::new(|| edit_ini("relojes", default_zones()))); }
@@ -361,11 +393,12 @@ const CHECK_S: f32 = 0.62;
 const GONE_S: f32 = 0.24;
 const BORN_S: f32 = 0.3;
 
-struct Task { text: String, done: bool, k: f32, gone: Option<Instant>, born: Option<Instant>, fit: Option<String> }
+/// `pos`: sitio en la lista (x, y desde arriba), que se desliza cuando las hechas bajan al final.
+struct Task { text: String, done: bool, k: f32, gone: Option<Instant>, born: Option<Instant>, fit: Option<String>, pos: Option<(f32, f32)> }
 
 impl Task {
     fn new(done: bool, text: String, born: bool) -> Self {
-        Task { text, done, k: if done { 1.0 } else { 0.0 }, gone: None, born: born.then(Instant::now), fit: None }
+        Task { text, done, k: if done { 1.0 } else { 0.0 }, gone: None, born: born.then(Instant::now), fit: None, pos: None }
     }
 }
 
@@ -375,7 +408,9 @@ pub struct TodoW { tasks: Vec<Task>, loaded: bool, mtime: Option<std::time::Syst
 impl TodoW {
     fn load(&mut self) {
         let list = if sys::demo() {
-            [(true, "Responder el correo de Marta"), (true, "Revisar la presentación"), (false, "Comprar pan y café"), (false, "Llamar al dentista"), (false, "Preparar la reunión del lunes")]
+            [(true, "Responder el correo de Marta"), (true, "Revisar la presentación"), (false, "Comprar pan y café"), (false, "Llamar al dentista"), (false, "Preparar la reunión del lunes"),
+             (false, "Reservar mesa para el sábado"), (true, "Pagar el alquiler"), (false, "Devolver el libro a la biblioteca"), (false, "Enviar el informe trimestral"),
+             (false, "Regar las plantas"), (false, "Comprar el regalo de Ana"), (true, "Renovar el abono de transporte"), (false, "Llamar a mamá"), (false, "Ordenar las fotos del viaje")]
                 .iter().map(|(d, s)| (*d, i18n::t(s).to_string())).collect()
         } else {
             parse_tasks(&std::fs::read_to_string(tasks_path()).unwrap_or_default())
@@ -420,7 +455,8 @@ fn checkbox(ui: &Ui, cx: f32, cy: f32, k: f32, hot: f32) {
 
 impl Widget for TodoW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Todo);
+        let l = desk::lay(Kind::Todo);
+        let (w, h) = (l.w, l.h);
         if !self.loaded { self.load(); }
         let mut moving = false;
         // Lo escrito en el cuadro de «+» entra por abajo y se va hasta ella
@@ -439,9 +475,57 @@ impl Widget for TodoW {
         self.tasks.retain(|tk| tk.gone.is_none_or(|g| g.elapsed().as_secs_f32() < GONE_S));
         if self.tasks.len() != before || self.tasks.iter().any(|tk| tk.gone.is_some()) { moving = true; }
 
-        // Cabecera: «Hoy · 2 de 5», una línea de progreso y el botón «+»
         let live: Vec<&Task> = self.tasks.iter().filter(|tk| tk.gone.is_none()).collect();
         let (done, total) = (live.iter().filter(|tk| tk.done).count(), live.len());
+        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+        moving |= approach(&mut self.prog, frac, dt, 0.25);
+        if l.sz == desk::Sz::Pequeno {
+            // Pequeño: cuántas quedan, en grande, y la primera pendiente (se puede marcar desde aquí)
+            let pending = total - done;
+            ui.text(&d.title, i18n::t("Tareas"), PAD, PAD - 4.0, 22.0, &ui.white);
+            let num = pending.to_string();
+            let dim = ui.dim.clone();
+            let huge = d.huge.clone();
+            self.r_count.draw(ui, &huge, &num, PAD, 44.0, 44.0, &ui.white.clone(), true);
+            moving |= self.r_count.busy();
+            let lbl = if pending == 1 { i18n::t("pendiente") } else { i18n::t("pendientes") };
+            ui.text(&ui.f.name, lbl, PAD + ui.p.width(&d.huge, &num) + 8.0, 58.0, 22.0, &dim);
+            unsafe {
+                let (x0, x1, y) = (PAD, w - PAD, 100.0);
+                ui.rt.FillRoundedRectangle(&rrect(rect(x0, y, x1, y + 3.0), 1.5), &ui.track);
+                if self.prog > 0.005 { ui.rt.FillRoundedRectangle(&rrect(rect(x0, y, x0 + ((x1 - x0) * self.prog).max(3.0), y + 3.0), 1.5), &ui.on); }
+            }
+            // La que se acaba de marcar sigue a la vista hasta que termina de tacharse
+            let pick = self.tasks.iter().position(|tk| tk.gone.is_none() && (!tk.done || tk.k < 1.0));
+            let y = h - PAD - RH + 4.0;
+            match pick {
+                Some(i) => {
+                    let fname = ui.f.name.clone();
+                    let tk = &mut self.tasks[i];
+                    let id = 100 + i as u32;
+                    let hot = ui.heat(id);
+                    ui.card_k(rect(PAD - 8.0, y + 2.0, w - PAD + 8.0, y + RH - 2.0), hot);
+                    let cy = y + RH / 2.0;
+                    checkbox(ui, PAD + 10.0, cy, tk.k, hot);
+                    let tx = PAD + 30.0;
+                    let s = fit(ui, &fname, &tk.text, w - PAD - tx);
+                    let strike = popup::ease_out(((tk.k - 0.3) / 0.4).clamp(0.0, 1.0));
+                    let fade = popup::ease_out(((tk.k - 0.65) / 0.35).clamp(0.0, 1.0));
+                    ui.text(&fname, &s, tx, y, RH, &ui.wa(0.95 - 0.5 * fade));
+                    if strike > 0.0 {
+                        let tw = ui.p.width(&fname, &s);
+                        unsafe { ui.rt.FillRectangle(&rect(tx - 1.0, cy - 0.7, tx - 1.0 + (tw + 2.0) * strike, cy + 0.7), &ui.wa(0.8 - 0.4 * fade)); }
+                    }
+                    ui.hit(rect(PAD - 8.0, y, w - PAD + 8.0, y + RH), id);
+                }
+                None => ui.text(&ui.f.sub, if total == 0 { i18n::t("Nada pendiente") } else { i18n::t("Todo hecho") }, PAD, y, RH, &ui.faint),
+            }
+            self.max_scroll = 0.0;
+            self.moving = moving;
+            return;
+        }
+
+        // Cabecera: «Hoy · 2 de 5», una línea de progreso y el botón «+»
         let hoy = i18n::t("Hoy");
         ui.text(&d.title, hoy, PAD, PAD - 4.0, 22.0, &ui.white);
         let x = PAD + ui.p.width(&d.title, hoy) + 6.0;
@@ -451,8 +535,6 @@ impl Widget for TodoW {
         let sub = ui.f.sub.clone();
         self.r_count.draw(ui, &sub, &count, x + 10.0, PAD - 4.0, 22.0, &dim, true);
         moving |= self.r_count.busy();
-        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-        moving |= approach(&mut self.prog, frac, dt, 0.25);
         unsafe {
             let (x0, x1, y) = (PAD, w - PAD, 46.0);
             ui.rt.FillRoundedRectangle(&rrect(rect(x0, y, x1, y + 3.0), 1.5), &ui.track);
@@ -470,55 +552,76 @@ impl Widget for TodoW {
         unsafe { ui.rt.SetTransform(&base); }
         ui.hit(rect(bx - br - 3.0, by - br - 3.0, bx + br + 3.0, by + br + 3.0), 2);
 
-        // Lista (con rueda si no caben)
-        let (top, bottom) = (LIST_TOP, h - 10.0);
-        let content: f32 = self.tasks.iter().map(|tk| RH * tk.gone.map(|g| 1.0 - popup::ease_out(g.elapsed().as_secs_f32() / GONE_S)).unwrap_or(1.0)).sum();
+        // Lista (con rueda si no caben). Banda y Extragrande, en columnas (por filas: 1 2 / 3 4)
+        let cols = match l.sz { desk::Sz::Banda => 3, desk::Sz::Extragrande => 2, _ => 1 };
+        let colw = (w - 2.0 * PAD - (cols - 1) as f32 * 2.0 * PAD) / cols as f32;
+        // El final de la lista cae entre filas (sin una a medias abajo)
+        let (top, bottom) = (LIST_TOP, LIST_TOP + ((h - 10.0 - LIST_TOP) / RH).floor() * RH);
+        // En columnas, las que se borran se desvanecen sin cerrar el hueco (no se descoloca la rejilla)
+        let grow = |tk: &Task| if cols > 1 { 1.0 } else { tk.gone.map(|g| 1.0 - popup::ease_out(g.elapsed().as_secs_f32() / GONE_S)).unwrap_or(1.0) };
+        let content: f32 = if cols > 1 { self.tasks.len().div_ceil(cols) as f32 * RH } else { self.tasks.iter().map(|tk| RH * grow(tk)).sum() };
+        // Las pendientes primero: las hechas bajan al final (cuando terminan de tacharse), deslizándose
+        let mut ord: Vec<usize> = (0..self.tasks.len()).collect();
+        ord.sort_by_key(|&i| (self.tasks[i].done && self.tasks[i].k >= 1.0) as u8);
+        let mut acc = 0.0;
+        for (slot, &i) in ord.iter().enumerate() {
+            let tk = &mut self.tasks[i];
+            let to = if cols > 1 { ((slot % cols) as f32 * (colw + 2.0 * PAD), (slot / cols) as f32 * RH) } else { (0.0, acc) };
+            acc += RH * grow(tk);
+            match &mut tk.pos {
+                None => tk.pos = Some(to),
+                Some(p) => { moving |= approach(&mut p.0, to.0, dt, 0.12); moving |= approach(&mut p.1, to.1, dt, 0.12); }
+            }
+        }
         self.max_scroll = (content - (bottom - top)).max(0.0);
         self.scroll_to = self.scroll_to.clamp(0.0, self.max_scroll);
         moving |= approach(&mut self.scroll, self.scroll_to, dt, 0.09);
         if total == 0 && self.tasks.is_empty() {
             let k = ez(t, 0.1, 0.5);
+            let cy = (top + bottom) / 2.0;
             popup::push_alpha(ui.rt, k);
-            ui.glyph(&d.glyph_l, "\u{E73E}", w / 2.0 - 20.0, 110.0, 40.0, 40.0, &ui.faint);
-            ui.text_c(&ui.f.name, i18n::t("Nada pendiente"), w / 2.0, 156.0, 20.0, &ui.dim);
-            ui.text_c(&ui.f.sub, i18n::t("Pulsa + para añadir una tarea"), w / 2.0, 178.0, 18.0, &ui.faint);
+            if bottom - top > 120.0 { ui.glyph(&d.glyph_l, "\u{E73E}", w / 2.0 - 20.0, cy - 50.0, 40.0, 40.0, &ui.faint); }
+            ui.text_c(&ui.f.name, i18n::t("Nada pendiente"), w / 2.0, cy - 6.0, 20.0, &ui.dim);
+            ui.text_c(&ui.f.sub, i18n::t("Pulsa + para añadir una tarea"), w / 2.0, cy + 16.0, 18.0, &ui.faint);
             unsafe { ui.rt.PopLayer(); }
         }
         unsafe { ui.rt.PushAxisAlignedClip(&rect(0.0, top - 4.0, w, bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
-        let mut y = top - self.scroll;
         let fname = ui.f.name.clone();
-        let tx = PAD + 30.0;
-        let maxw = w - PAD - tx;
         for (i, tk) in self.tasks.iter_mut().enumerate() {
             let g = tk.gone.map(|g| 1.0 - popup::ease_out(g.elapsed().as_secs_f32() / GONE_S)).unwrap_or(1.0);
-            let rh = RH * g;
-            if y + rh < top - 4.0 || y > bottom { y += rh; continue; }
+            let rh = if cols > 1 { RH } else { RH * g };
+            let (px, py) = tk.pos.unwrap_or((0.0, 0.0));
+            let x0 = PAD + px;
+            let ry = top - self.scroll + py;
+            if ry + rh < top - 4.0 || ry > bottom { continue; }
             let id = 100 + i as u32;
             let born = tk.born.map(|b| popup::ease_out(b.elapsed().as_secs_f32() / BORN_S)).unwrap_or(1.0);
             let a = g * born * ez(t, 0.1 + 0.05 * i as f32, 0.4);
-            if a <= 0.01 { y += rh; continue; }
+            if a <= 0.01 { continue; }
             let dx = 10.0 * (1.0 - born);
             popup::push_alpha(ui.rt, a);
             let hot = if tk.gone.is_none() { ui.heat(id) } else { 0.0 };
-            ui.card_k(rect(PAD - 8.0, y + 2.0, w - PAD + 8.0, y + RH - 2.0), hot);
-            let cy = y + RH / 2.0;
-            checkbox(ui, PAD + 10.0 + dx, cy, tk.k, hot);
+            ui.card_k(rect(x0 - 8.0, ry + 2.0, x0 + colw + 8.0, ry + RH - 2.0), hot);
+            let cy = ry + RH / 2.0;
+            checkbox(ui, x0 + 10.0 + dx, cy, tk.k, hot);
+            let tx = x0 + 30.0;
+            let maxw = x0 + colw - tx;
             let s = tk.fit.get_or_insert_with(|| fit(ui, &fname, &tk.text, maxw)).clone();
             // Hecha: se tacha de izquierda a derecha y luego se apaga
             let strike = popup::ease_out(((tk.k - 0.3) / 0.4).clamp(0.0, 1.0));
             let fade = popup::ease_out(((tk.k - 0.65) / 0.35).clamp(0.0, 1.0));
-            ui.text(&fname, &s, tx + dx, y, RH, &ui.wa(0.95 - 0.5 * fade));
+            ui.text(&fname, &s, tx + dx, ry, RH, &ui.wa(0.95 - 0.5 * fade));
             if strike > 0.0 {
                 let tw = ui.p.width(&fname, &s);
                 unsafe { ui.rt.FillRectangle(&rect(tx + dx - 1.0, cy - 0.7, tx + dx - 1.0 + (tw + 2.0) * strike, cy + 0.7), &ui.wa(0.8 - 0.4 * fade)); }
             }
             unsafe { ui.rt.PopLayer(); }
-            if tk.gone.is_none() { ui.hit(rect(PAD - 8.0, y.max(top - 4.0), w - PAD + 8.0, (y + RH).min(bottom)), id); }
-            y += rh;
+            if tk.gone.is_none() { ui.hit(rect(x0 - 8.0, ry.max(top - 4.0), x0 + colw + 8.0, (ry + RH).min(bottom)), id); }
         }
         unsafe { ui.rt.PopAxisAlignedClip(); }
         self.moving = moving;
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, id: Option<u32>, right: bool, pt: POINT) -> Option<Box<dyn FnOnce()>> {
         let id = id?;
         if id == 2 && !right {
@@ -762,6 +865,10 @@ fn demo_countdowns(today: i64) -> String {
     let l = [
         Cd { name: i18n::t("Vacaciones").into(), date: today + 28, from: Some(today - 40) },
         Cd { name: i18n::t("Concierto").into(), date: today + 61, from: Some(today - 10) },
+        Cd { name: i18n::t("Cumpleaños de Ana").into(), date: today + 12, from: Some(today - 353) },
+        Cd { name: i18n::t("Viaje a Lisboa").into(), date: today + 95, from: Some(today - 20) },
+        Cd { name: i18n::t("Media maratón").into(), date: today + 45, from: Some(today - 60) },
+        Cd { name: i18n::t("Fin de curso").into(), date: today + 190, from: Some(today - 80) },
         Cd { name: i18n::t("Año nuevo").into(), date: days_from_civil(y + 1, 1, 1), from: Some(days_from_civil(y, 1, 1)) },
     ];
     fmt_countdowns(&l)
@@ -793,7 +900,9 @@ const NUM_TOP: f32 = 46.0;
 const PARTY_S: f32 = 3.4;
 
 #[derive(Default)]
-pub struct CountdownW { cfg: Option<String>, items: Vec<Cd>, checked: Option<Instant>, today: i64, sel: usize, r_num: Roll, r_name: Roll, party: Option<Instant>, partied: Option<(String, i64)>, bar: f32, dot: f32, lab_x: f32, moving: bool, up: bool }
+pub struct CountdownW { cfg: Option<String>, items: Vec<Cd>, checked: Option<Instant>, today: i64, sel: usize, r_num: Roll, r_name: Roll, party: Option<Instant>, partied: Option<(String, i64)>, bar: f32, dot: f32, lab_x: f32, moving: bool, up: bool,
+    /// Rejillas (Banda, Alto, Extragrande): página que se ve y cuándo se pasó; lista de debajo (Grande y Columna): qué cuenta es cada fila
+    grid: bool, page: usize, page_at: Option<Instant>, list: Vec<usize> }
 
 impl CountdownW {
     /// Relee las fechas cada pocos segundos (y al cambiar el día). true si algo cambió.
@@ -818,6 +927,7 @@ impl CountdownW {
         self.items = items;
         true
     }
+    fn page_k(&self) -> f32 { self.page_at.map(|a| popup::ease_out((a.elapsed().as_secs_f32() / 0.4).min(1.0))).unwrap_or(1.0) }
     fn party_k(&self) -> Option<f32> { self.party.map(|p| p.elapsed().as_secs_f32()).filter(|e| *e < PARTY_S) }
 }
 
@@ -860,21 +970,118 @@ fn confetti(ui: &Ui, ox: f32, oy: f32, e: f32) {
     unsafe { ui.rt.SetTransform(&base); }
 }
 
+/// Una cuenta en su caja `r` (rejillas y lista): nombre y fecha arriba, número grande con «días» y la
+/// barra fina abajo. `sc` escala el número; `a` es la entrada (0..1).
+fn cd_cell(ui: &Ui, d: &DFonts, r: D2D_RECT_F, c: &Cd, today: i64, sc: f32, a: f32) {
+    if a <= 0.01 { return; }
+    popup::push_alpha(ui.rt, a);
+    let days = c.date - today;
+    let date = fmt_date_short(c.date, today);
+    let dw = ui.p.width(&ui.f.sub, &date) + 10.0;
+    ui.text(&d.title, &fit(ui, &d.title, &c.name, r.right - r.left - dw), r.left, r.top, 22.0, &ui.white);
+    ui.text_r(&ui.f.sub, &date, r.right, r.top, 22.0, &ui.dim);
+    let num = if days == 0 { i18n::t("¡Hoy!").to_string() } else { days.to_string() };
+    let lbl = if days == 1 { i18n::t("día") } else { i18n::t("días") };
+    // Lo más grande que quepa (sin pasar de `sc`) con «días» al lado
+    let lw = if days != 0 { ui.p.width(&ui.f.name, lbl) + 8.0 } else { 0.0 };
+    let sc = sc.min((r.right - r.left - lw) / ui.p.width(&d.huge, &num).max(1.0));
+    let top = r.top + 28.0;
+    let base = cur_transform(ui);
+    unsafe { ui.rt.SetTransform(&mul(&scale_at(sc, r.left, top), &base)); }
+    ui.text(&d.huge, &num, r.left, top, 44.0, &ui.white);
+    unsafe { ui.rt.SetTransform(&base); }
+    if days != 0 { ui.text(&ui.f.name, lbl, r.left + ui.p.width(&d.huge, &num) * sc + 8.0, top + 44.0 * sc - 29.0, 22.0, &ui.dim); }
+    let frac = progress(today, c.from.unwrap_or(today), c.date) * a;
+    let by = r.bottom - 4.0;
+    unsafe {
+        ui.rt.FillRoundedRectangle(&rrect(rect(r.left, by, r.right, by + 4.0), 2.0), &ui.track);
+        if frac > 0.003 { ui.rt.FillRoundedRectangle(&rrect(rect(r.left, by, r.left + ((r.right - r.left) * frac).max(4.0), by + 4.0), 2.0), &ui.on); }
+        ui.rt.PopLayer();
+    }
+}
+
+/// Una cuenta en una fila de la lista (Grande y Columna): nombre y fecha a la izquierda, días a la derecha.
+fn cd_row(ui: &Ui, d: &DFonts, x0: f32, x1: f32, y: f32, c: &Cd, today: i64, a: f32, hot: f32) {
+    if a <= 0.01 { return; }
+    popup::push_alpha(ui.rt, a);
+    ui.card_k(rect(x0 - 10.0, y - 4.0, x1 + 10.0, y + CD_ROW - 6.0), hot);
+    let days = c.date - today;
+    let (num, lbl) = if days == 0 { (i18n::t("¡Hoy!").to_string(), "") } else { (days.to_string(), if days == 1 { i18n::t("día") } else { i18n::t("días") }) };
+    let lw = if lbl.is_empty() { 0.0 } else { ui.p.width(&ui.f.sub, lbl) + 6.0 };
+    let nw = ui.p.width(&d.big, &num);
+    ui.text_r(&ui.f.sub, lbl, x1, y + 8.0, 22.0, &ui.dim);
+    ui.text_r(&d.big, &num, x1 - lw, y + 2.0, 28.0, &ui.white);
+    let tw = x1 - x0 - nw - lw - 14.0;
+    ui.text(&ui.f.name, &fit(ui, &ui.f.name, &c.name, tw), x0, y + 2.0, 20.0, &ui.white);
+    ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &fmt_date_short(c.date, today), tw), x0, y + 21.0, 18.0, &ui.dim);
+    let frac = progress(today, c.from.unwrap_or(today), c.date) * a;
+    let by = y + CD_ROW - 14.0;
+    unsafe {
+        ui.rt.FillRoundedRectangle(&rrect(rect(x0, by, x1, by + 3.0), 1.5), &ui.track);
+        if frac > 0.003 { ui.rt.FillRoundedRectangle(&rrect(rect(x0, by, x0 + ((x1 - x0) * frac).max(3.0), by + 3.0), 1.5), &ui.on); }
+        ui.rt.PopLayer();
+    }
+}
+
+/// Alto de cada fila de la lista (Grande y Columna).
+const CD_ROW: f32 = 58.0;
+/// Alto de la cuenta destacada (la de arriba en Pequeño, Mediano, Grande y Columna).
+const CD_FEAT: f32 = 170.0;
+
+/// Cajas de las rejillas (Banda: 4 en línea; Alto: 2 apiladas; Extragrande: 2×2). None = destacada (+ lista).
+fn cd_grid(l: desk::Lay) -> Option<Vec<D2D_RECT_F>> {
+    let (w, h) = (l.w, l.h);
+    match l.sz {
+        desk::Sz::Banda => { let cw = (w - 2.0 * PAD - 3.0 * 28.0) / 4.0; Some((0..4).map(|i| { let x = PAD + i as f32 * (cw + 28.0); rect(x, PAD - 4.0, x + cw, h - 34.0) }).collect()) }
+        desk::Sz::Alto => { let ch = (h - 2.0 * PAD - 30.0 - 24.0) / 2.0; Some((0..2).map(|i| { let y = PAD - 4.0 + i as f32 * (ch + 24.0); rect(PAD, y, w - PAD, y + ch) }).collect()) }
+        desk::Sz::Extragrande => {
+            let (cw, ch) = ((w - 2.0 * PAD - 40.0) / 2.0, (h - 2.0 * PAD - 30.0 - 28.0) / 2.0);
+            Some((0..4).map(|i| { let (x, y) = (PAD + (i % 2) as f32 * (cw + 40.0), PAD - 4.0 + (i / 2) as f32 * (ch + 28.0)); rect(x, y, x + cw, y + ch) }).collect())
+        }
+        _ => None,
+    }
+}
+
 impl Widget for CountdownW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Countdown);
+        let l = desk::lay(Kind::Countdown);
+        let (w, h) = (l.w, l.h);
         self.refresh();
         let mut moving = false;
         let up = upcoming(&self.items, self.today);
         if up.is_empty() {
             header(ui, d, i18n::t("Cuenta atrás"), "", w);
-            let msg = if self.items.is_empty() { i18n::t("Clic derecho para añadir una fecha") } else { i18n::t("No quedan fechas por llegar") };
+            let small = l.sz == desk::Sz::Pequeno || l.sz == desk::Sz::Alto;
+            let msg = if self.items.is_empty() { if small { i18n::t("Clic derecho: añadir") } else { i18n::t("Clic derecho para añadir una fecha") } } else { i18n::t("No quedan fechas por llegar") };
             ui.glyph(&d.glyph_l, "\u{E787}", w / 2.0 - 20.0, h / 2.0 - 30.0, 40.0, 40.0, &ui.faint);
             ui.text_c(&ui.f.sub, msg, w / 2.0, h / 2.0 + 14.0, 18.0, &ui.dim);
             ui.hit(rect(0.0, 0.0, w, h), 1);
             self.moving = false;
             return;
         }
+        // Rejillas: todas a la vista (por páginas si hay más que cajas)
+        if let Some(cells) = cd_grid(l) {
+            self.grid = true;
+            let per = cells.len();
+            let pages = up.len().div_ceil(per);
+            self.page %= pages.max(1);
+            let sc = BIG;
+            for (j, r) in cells.iter().enumerate() {
+                let Some(&ix) = up.get(self.page * per + j) else { break };
+                let a = ez(t, 0.08 + 0.07 * j as f32, 0.5) * self.page_k();
+                cd_cell(ui, d, *r, &self.items[ix], self.today, sc, a);
+                ui.hit(*r, 1);
+            }
+            if pages > 1 {
+                moving |= approach(&mut self.dot, self.page as f32, dt, 0.09);
+                crate::news::page_dots(ui, pages, self.dot, w / 2.0, h - 16.0);
+            }
+            moving |= self.page_k() < 1.0;
+            self.moving = moving || t < 1.0;
+            return;
+        }
+        self.grid = false;
+        let fh = CD_FEAT;
         self.sel %= up.len();
         let c = self.items[up[self.sel]].clone();
         let days = c.date - self.today;
@@ -884,38 +1091,61 @@ impl Widget for CountdownW {
         let white = ui.white.clone();
         let dim = ui.dim.clone();
         let title = d.title.clone();
-        self.r_name.draw(ui, &title, &c.name, PAD, PAD - 4.0, 22.0, &white, self.up);
-        ui.text_r(&ui.f.sub, &fmt_date_short(c.date, self.today), w - PAD, PAD - 4.0, 22.0, &dim);
+        let date = fmt_date_short(c.date, self.today);
+        ui.text_r(&ui.f.sub, &date, w - PAD, PAD - 4.0, 22.0, &dim);
+        // El nombre, recortado para no pisar la fecha
+        let name = fit(ui, &title, &c.name, w - 2.0 * PAD - ui.p.width(&ui.f.sub, &date) - 10.0);
+        self.r_name.draw(ui, &title, &name, PAD, PAD - 4.0, 22.0, &white, self.up);
         let num = if days == 0 { i18n::t("¡Hoy!").to_string() } else { days.to_string() };
-        // Número grande (escalado: más grande que cualquier fuente de los widgets)
+        let lbl = if days == 1 { i18n::t("día") } else { i18n::t("días") };
+        // Número grande (escalado: más grande que cualquier fuente de los widgets); en Pequeño, lo que quepa
+        let lw = if days != 0 { ui.p.width(&ui.f.name, lbl) + 10.0 } else { 0.0 };
+        let big = BIG.min((w - 2.0 * PAD - lw) / ui.p.width(&d.huge, &num).max(1.0));
         let k = ez(t, 0.1, 0.6);
         let base = cur_transform(ui);
-        unsafe { ui.rt.SetTransform(&mul(&scale_at(BIG * (0.94 + 0.06 * k), PAD, NUM_TOP), &base)); }
+        unsafe { ui.rt.SetTransform(&mul(&scale_at(big * (0.94 + 0.06 * k), PAD, NUM_TOP), &base)); }
         let huge = d.huge.clone();
         self.r_num.draw(ui, &huge, &num, PAD, NUM_TOP, 44.0, &white, self.up);
         unsafe { ui.rt.SetTransform(&base); }
         moving |= self.r_num.busy() || self.r_name.busy();
         if days != 0 {
-            let lx = PAD + ui.p.width(&d.huge, &num) * BIG + 10.0;
+            let lx = PAD + ui.p.width(&d.huge, &num) * big + 10.0;
             if self.lab_x == 0.0 { self.lab_x = lx; }
             moving |= approach(&mut self.lab_x, lx, dt, 0.08);
-            let lbl = if days == 1 { i18n::t("día") } else { i18n::t("días") };
-            ui.text(&ui.f.name, lbl, self.lab_x, NUM_TOP + 41.0, 22.0, &dim);
+            ui.text(&ui.f.name, lbl, self.lab_x, NUM_TOP + 44.0 * big - 29.0, 22.0, &dim);
         }
         // Barra fina: lo que va desde que se creó la cuenta
         let frac = progress(self.today, c.from.unwrap_or(self.today), c.date) * ez(t, 0.2, 0.8);
         moving |= approach(&mut self.bar, frac, dt, 0.2);
-        let (x0, x1, by) = (PAD, w - PAD, h - 46.0);
+        let (x0, x1, by) = (PAD, w - PAD, fh - 46.0);
         unsafe {
             ui.rt.FillRoundedRectangle(&rrect(rect(x0, by, x1, by + 4.0), 2.0), &ui.track);
             if self.bar > 0.003 { ui.rt.FillRoundedRectangle(&rrect(rect(x0, by, x0 + ((x1 - x0) * self.bar).max(4.0), by + 4.0), 2.0), &ui.on); }
         }
         ui.hit(rect(0.0, 0.0, w, by - 4.0), 1);
-        // Puntos para pasar a las demás fechas (el de ahora es una píldora)
+        // Grande y Columna: debajo, las siguientes en lista (un clic la pasa arriba)
+        self.list.clear();
+        if h > fh + CD_ROW {
+            let rows = ((h - fh - 6.0) / CD_ROW).floor() as usize;
+            let others: Vec<usize> = (1..up.len()).map(|o| (self.sel + o) % up.len()).take(rows).collect();
+            unsafe { ui.rt.FillRectangle(&rect(PAD, fh - 10.0, w - PAD, fh - 10.0 + 1.0 / ui.s), &ui.wa(0.08)); }
+            for (j, &si) in others.iter().enumerate() {
+                let id = 100 + j as u32;
+                let y = fh + 4.0 + j as f32 * CD_ROW;
+                let a = ez(t, 0.2 + 0.07 * j as f32, 0.5);
+                cd_row(ui, d, PAD, w - PAD, y, &self.items[up[si]], self.today, a, ui.heat(id));
+                ui.hit(rect(PAD - 10.0, y - 4.0, w - PAD + 10.0, y + CD_ROW - 6.0), id);
+                self.list.push(si);
+            }
+            if others.is_empty() {
+                ui.text_c(&ui.f.sub, i18n::t("Clic derecho en el número para añadir más fechas"), w / 2.0, fh + 10.0, 18.0, &ui.faint);
+            }
+        }
+        // Puntos para pasar a las demás fechas (el de ahora es una píldora); con lista no hacen falta
         let n = up.len();
-        if n > 1 {
+        if n > 1 && self.list.is_empty() {
             let gap = 12.0;
-            let dy = h - 22.0;
+            let dy = fh - 22.0;
             let x_of = |i: f32| w / 2.0 - (n as f32 - 1.0) * gap / 2.0 + i * gap;
             moving |= approach(&mut self.dot, self.sel as f32, dt, 0.09);
             unsafe {
@@ -930,11 +1160,12 @@ impl Widget for CountdownW {
             }
         }
         if let Some(e) = self.party_k() {
-            confetti(ui, PAD + ui.p.width(&d.huge, &num) * BIG / 2.0, NUM_TOP + 34.0, e);
+            confetti(ui, PAD + ui.p.width(&d.huge, &num) * big / 2.0, NUM_TOP + 34.0, e);
             moving = true;
         }
-        self.moving = moving;
+        self.moving = moving || t < 1.0;
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         let id = id?;
         if right {
@@ -945,9 +1176,15 @@ impl Widget for CountdownW {
             return Some(Box::new(move || edit_ini("cuenta_atras", ex)));
         }
         let n = upcoming(&self.items, self.today).len().max(1);
+        if self.grid {
+            // Rejillas: los puntos pasan de página
+            if (10..100).contains(&id) && (id - 10) as usize != self.page { self.page = (id - 10) as usize; self.page_at = Some(Instant::now()); self.moving = true; }
+            return None;
+        }
         let old = self.sel;
         match id {
             1 => self.sel = (self.sel + 1) % n,
+            i if i >= 100 => { if let Some(&s) = self.list.get((i - 100) as usize) { self.sel = s; } }
             i if i >= 10 => self.sel = ((i - 10) as usize).min(n - 1),
             _ => {}
         }
@@ -1013,6 +1250,22 @@ mod tests {
     }
 
     #[test]
+    fn cajas_de_la_cuenta_atras() {
+        use desk::{Lay, Sz};
+        for sz in Sz::ALL {
+            let (w, h) = sz.dims();
+            match cd_grid(Lay { w, h, sz }) {
+                Some(v) => {
+                    assert_eq!(v.len(), match sz { Sz::Alto => 2, _ => 4 }, "{sz:?}");
+                    for a in &v { assert!(a.left >= PAD - 0.01 && a.right <= w - PAD + 0.01 && a.top >= 0.0 && a.bottom <= h - 20.0 && a.bottom - a.top >= 110.0, "{sz:?}"); }
+                }
+                // Destacada arriba (y la lista debajo si cabe)
+                None => assert!(matches!(sz, Sz::Pequeno | Sz::Mediano | Sz::Grande | Sz::Columna), "{sz:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn archivo_de_tareas() {
         let t = parse_tasks("[x] Hecha\n[ ] Pendiente\r\n\n   \nSin prefijo\n[X]   Mayúscula  \n[ ]\n[]Pegada");
         assert_eq!(t, vec![(true, "Hecha".into()), (false, "Pendiente".into()), (false, "Sin prefijo".into()), (true, "Mayúscula".into()), (false, "Pegada".into())]);
@@ -1027,7 +1280,11 @@ mod tests {
     #[test]
     fn cadena_de_relojes() {
         let z = parse_zones("Nueva York|America/New_York, Tokio|Asia/Tokyo ,roto, |Europe/Paris, Londres|Europe/London, A|B, C|D");
-        assert_eq!(z.len(), 4);
+        assert_eq!(z.len(), 5);
+        // Ocho como mucho (los que caben en Extragrande); las de por defecto, justo ocho
+        assert_eq!(parse_zones(&"A|B, ".repeat(12)).len(), MAX_ZONES);
+        assert_eq!(parse_zones(&default_zones()).len(), MAX_ZONES);
+        for s in desk::Sz::ALL { let (c, r) = clock_grid(s); assert!(c * r <= MAX_ZONES); }
         assert_eq!(z[0], ("Nueva York".into(), "America/New_York".into()));
         assert_eq!(z[2], ("Londres".into(), "Europe/London".into()));
         assert!(parse_zones("").is_empty());

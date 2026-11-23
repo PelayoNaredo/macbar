@@ -461,7 +461,7 @@ impl Settings {
             (Some(t("Opciones")), vec![
                 R::Line(t("Pasar de página"), String::new(), seg(&["No", "8 s", "11 s", "20 s"], ti), lid(L_TURN)),
                 R::Line(t("Fuente y hora"), t("Encima de cada titular"), Ctl::Switch(f.nw.meta), lid(L_META)),
-                R::Line(t("Titulares por página"), t("Los que caben en el widget, como mucho"), seg(&["2", "3", "4"], pp), lid(L_PER_PAGE)),
+                R::Line(t("Titulares por página"), t("Los que caben en el widget, como mucho"), seg(&["2", "3", "Todos"], pp), lid(L_PER_PAGE)),
             ]),
         ]
     }

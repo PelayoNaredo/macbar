@@ -4,14 +4,14 @@
 //! - `noticias_fuentes = url1|url2` (feeds propios) y `noticias_nombres = url Nombre|…` (su nombre)
 //! - `noticias_silenciar = palabra, otra` y `noticias_ocultar = Medio|Otro` (filtros)
 //! - `noticias_pasar = 0|8|11|20` (segundos por página; 0 = no pasa sola), `noticias_meta = 1|0` (fuente
-//!   y hora) y `noticias_por_pagina = 2|3|4`
+//!   y hora) y `noticias_por_pagina = 2|3|4` (4 = «Todos»: los que caben en el tamaño del widget, ver `news_grid`)
 //!
 //! Un hilo los pide cada 15 min mientras el widget se ve y los guarda en `%APPDATA%\macbar\noticias_cache.txt`,
 //! para arrancar con datos aunque no haya red. Los filtros se aplican al enseñarlos (cambiarlos no pide
 //! nada a la red). Los titulares pasan por páginas con un deslizamiento suave; un clic abre la noticia.
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{DFonts, Kind};
 use deskw::{header, Widget};
 use popup::Ui;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
@@ -38,8 +38,7 @@ pub(crate) const MAX_FEEDS: usize = 8;
 
 const PAD: f32 = 20.0;
 const LIST_TOP: f32 = 54.0;
-const ROW: f32 = 64.0;
-/// Titulares por página que caben en el widget (el máximo; Configuración puede poner menos).
+/// «Todos» en «Titulares por página» (los que quepan en el tamaño, `news_grid`); 2 y 3 ponen menos.
 pub(crate) const ROWS_MAX: usize = 4;
 /// Segundos por página que se ofrecen (0 = no pasa sola).
 pub(crate) const TURN_OPTS: [u32; 4] = [0, 8, 11, 20];
@@ -681,14 +680,21 @@ fn ensure_started() {
 }
 
 // ================================================================ widget
+/// Titulares a la vista en cada tamaño, en (columnas, filas). Las líneas de cada titular salen del alto
+/// que le toca (entre 1 y 4). El ajuste «Titulares por página» puede poner menos (`NewsW::grid`).
+pub(crate) fn news_grid(s: desk::Sz) -> (usize, usize) {
+    use desk::Sz::*;
+    match s { Pequeno => (1, 1), Mediano => (2, 1), Banda => (3, 1), Alto => (1, 3), Grande => (1, 4), Columna => (1, 7), Extragrande => (2, 4) }
+}
+
 pub struct NewsW {
     ver: u64, items: Vec<Item>, fetched: i64, offline: bool,
     page: usize,
     /// Página que se va (y cuándo empezó el paso)
     prev: Option<(usize, Instant)>,
     turned: Instant,
-    /// Titulares ya partidos en dos líneas (se mide una vez)
-    wraps: HashMap<String, (String, String)>,
+    /// Titulares ya partidos en líneas (se mide una vez)
+    wraps: HashMap<String, Vec<String>>,
     dot: f32, hovering: bool, moving: bool, minute: i64,
     cfg: Cfg, cfg_ver: u64,
 }
@@ -701,21 +707,25 @@ impl Default for NewsW {
     }
 }
 
-/// Parte un titular en dos líneas que quepan en `maxw` (la segunda, con «…» si sobra).
-fn wrap2(ui: &Ui, f: &IDWriteTextFormat, s: &str, maxw: f32) -> (String, String) {
+/// Parte un titular en hasta `n` líneas que quepan en `maxw` (la última, con «…» si sobra).
+fn wrap_n(ui: &Ui, f: &IDWriteTextFormat, s: &str, maxw: f32, n: usize) -> Vec<String> {
     let words: Vec<&str> = s.split_whitespace().collect();
-    let mut l1 = String::new();
+    let mut out: Vec<String> = Vec::new();
     let mut i = 0;
-    while i < words.len() {
-        let cand = if l1.is_empty() { words[i].to_string() } else { format!("{l1} {}", words[i]) };
-        if ui.p.width(f, &cand) > maxw { break; }
-        l1 = cand;
-        i += 1;
+    while i < words.len() && out.len() + 1 < n {
+        let mut l = String::new();
+        while i < words.len() {
+            let cand = if l.is_empty() { words[i].to_string() } else { format!("{l} {}", words[i]) };
+            if ui.p.width(f, &cand) > maxw { break; }
+            l = cand;
+            i += 1;
+        }
+        // Una palabra más larga que la línea: se corta con «…» y se sigue
+        if l.is_empty() { l = fit(ui, f, words[i], maxw); i += 1; }
+        out.push(l);
     }
-    if l1.is_empty() { return (fit(ui, f, s, maxw), String::new()); }
-    let rest = words[i..].join(" ");
-    let l2 = if rest.is_empty() { String::new() } else { fit(ui, f, &rest, maxw) };
-    (l1, l2)
+    if i < words.len() { out.push(fit(ui, f, &words[i..].join(" "), maxw)); }
+    out
 }
 
 impl NewsW {
@@ -735,8 +745,16 @@ impl NewsW {
         self.offline = sh.offline;
         true
     }
-    fn rows(&self) -> usize { self.cfg.per_page.clamp(1, ROWS_MAX) }
-    fn pages(&self) -> usize { self.items.len().div_ceil(self.rows()).max(1) }
+    /// (columnas, filas) de cada página: las del tamaño, o menos si así se eligió en Configuración
+    /// (`per_page` = 4 es «todos los que quepan»).
+    fn grid(&self) -> (usize, usize) {
+        let (c, r) = news_grid(desk::sz(Kind::News));
+        let pp = self.cfg.per_page;
+        if pp >= ROWS_MAX { return (c, r); }
+        if c == 1 { (1, r.min(pp)) } else if r == 1 { (c.min(pp), 1) } else { (c, r.min(pp)) }
+    }
+    fn per_page(&self) -> usize { let (c, r) = self.grid(); c * r }
+    fn pages(&self) -> usize { self.items.len().div_ceil(self.per_page()).max(1) }
     fn turn(&mut self, to: usize) {
         let to = to % self.pages();
         if to == self.page { return; }
@@ -746,45 +764,49 @@ impl NewsW {
         self.moving = true;
     }
 
-    /// Un titular: fuente y hace cuánto (en gris; un puntito del acento si es de la última media hora) y
-    /// el título en dos líneas.
-    fn row(&mut self, ui: &mut Ui, i: usize, y: f32, a: f32, w: f32, live: bool) {
+    /// Un titular en la columna que empieza en `x0` (ancho `cw`): fuente y hace cuánto (en gris; un
+    /// puntito del acento si es de la última media hora) y el título en `lines` líneas. `sh` = alto del hueco.
+    fn row(&mut self, ui: &mut Ui, i: usize, x0: f32, cw: f32, y: f32, sh: f32, lines: usize, a: f32, live: bool) {
         let Some(it) = self.items.get(i).cloned() else { return };
         let id = 100 + i as u32;
+        let x1 = x0 + cw;
         if live {
-            ui.hit(rect(PAD - 10.0, y - 6.0, w - PAD + 10.0, y + ROW - 8.0), id);
-            ui.card_k(rect(PAD - 10.0, y - 6.0, w - PAD + 10.0, y + ROW - 8.0), ui.heat(id) * a);
+            ui.hit(rect(x0 - 10.0, y - 6.0, x1 + 10.0, y + sh - 8.0), id);
+            ui.card_k(rect(x0 - 10.0, y - 6.0, x1 + 10.0, y + sh - 8.0), ui.heat(id) * a);
         }
         if a < 0.01 { return; }
         popup::push_alpha(ui.rt, a);
         let ago = if it.ts > 0 { fmt_ago(now() - it.ts) } else { String::new() };
         let aw = if ago.is_empty() { 0.0 } else { ui.p.width(&ui.f.sub, &ago) + 12.0 };
         let fresh = self.cfg.meta && it.ts > 0 && now() - it.ts < 30 * 60;
-        let sx = if fresh { PAD + 9.0 } else { PAD };
+        let sx = if fresh { x0 + 9.0 } else { x0 };
         if fresh {
-            unsafe { ui.rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: PAD + 2.5, Y: y + 7.5 }, radiusX: 2.5, radiusY: 2.5 }, &ui.brush(profiles::accent(1.0))); }
+            unsafe { ui.rt.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x0 + 2.5, Y: y + 7.5 }, radiusX: 2.5, radiusY: 2.5 }, &ui.brush(profiles::accent(1.0))); }
         }
         // Sin fuente ni hora, el titular sube a su sitio
         let ty = if self.cfg.meta {
-            let src = fit(ui, &ui.f.small, &it.source, w - PAD - sx - aw);
+            let src = fit(ui, &ui.f.small, &it.source, x1 - sx - aw);
             ui.text(&ui.f.small, &src, sx, y, 15.0, &ui.dim);
-            if !ago.is_empty() { ui.text_r(&ui.f.sub, &ago, w - PAD, y, 15.0, &ui.dim); }
+            if !ago.is_empty() { ui.text_r(&ui.f.sub, &ago, x1, y, 15.0, &ui.dim); }
             y + 18.0
         } else { y + 8.0 };
-        let maxw = w - 2.0 * PAD;
-        let (l1, l2) = match self.wraps.get(&it.title) {
+        let ls = match self.wraps.get(&it.title) {
             Some(v) => v.clone(),
-            None => { let v = wrap2(ui, &ui.f.name, &it.title, maxw); self.wraps.insert(it.title.clone(), v.clone()); v }
+            None => { let v = wrap_n(ui, &ui.f.name, &it.title, cw, lines); self.wraps.insert(it.title.clone(), v.clone()); v }
         };
-        ui.text(&ui.f.name, &l1, PAD, ty, 19.0, &ui.white);
-        if !l2.is_empty() { ui.text(&ui.f.name, &l2, PAD, ty + 18.0, 19.0, &ui.white); }
+        for (j, s) in ls.iter().enumerate() { ui.text(&ui.f.name, s, x0, ty + 18.0 * j as f32, 19.0, &ui.white); }
         unsafe { ui.rt.PopLayer(); }
     }
 }
 
+/// Alto de la fuente y la hora, y de cada línea del título.
+const META_H: f32 = 18.0;
+const LINE_H: f32 = 18.0;
+
 impl Widget for NewsW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::News);
+        let l = desk::lay(Kind::News);
+        let (w, h) = (l.w, l.h);
         SEEN.store(now(), Ordering::Relaxed);
         self.sync();
         self.hovering = ui.hover.is_some_and(|id| id >= 100);
@@ -802,35 +824,51 @@ impl Widget for NewsW {
         }
         let mut moving = false;
         let n = self.items.len();
-        // Con menos titulares por página, cada uno tiene más aire (la lista ocupa lo mismo)
-        let rows = self.rows();
-        let slot = ROW * ROWS_MAX as f32 / rows as f32;
-        let top = LIST_TOP + (slot - ROW) / 2.0;
-        let bottom = LIST_TOP + ROWS_MAX as f32 * ROW - 6.0;
+        let (cols, rows) = self.grid();
+        let per = cols * rows;
+        // Las columnas, con un hueco de dos márgenes; los titulares de cada columna se reparten el alto
+        let gap = 2.0 * PAD;
+        let cw = (w - 2.0 * PAD - gap * (cols - 1) as f32) / cols as f32;
+        let bottom = h - 26.0;
+        let (_, gr) = news_grid(l.sz);
+        // El hueco de cada titular es el del tamaño (con menos por página, cada uno tiene más aire)
+        let slot_full = (bottom - LIST_TOP) / gr as f32;
+        let slot = (bottom - LIST_TOP) / rows as f32;
+        let meta = if self.cfg.meta { META_H } else { 8.0 };
+        let lines = (((slot_full - meta - 6.0) / LINE_H).floor() as usize).clamp(1, 4);
+        let rowh = meta + lines as f32 * LINE_H + 10.0;
+        let top = LIST_TOP + ((slot - rowh) / 2.0).max(0.0);
+        let place = |s: usize| -> (f32, f32) { let (c, r) = (s / rows, s % rows); (PAD + c as f32 * (cw + gap), top + r as f32 * slot) };
         unsafe { ui.rt.PushAxisAlignedClip(&rect(0.0, LIST_TOP - 10.0, w, bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
         // Paso de página: los titulares viejos suben y se apagan; los nuevos llegan desde abajo, en cascada
         let e = self.prev.map(|(_, at)| at.elapsed().as_secs_f32() / SLIDE_S);
-        if e.is_some_and(|e| e >= 1.0 + 0.06 * rows as f32) { self.prev = None; }
+        if e.is_some_and(|e| e >= 1.0 + 0.06 * per as f32) { self.prev = None; }
         let stag = |e: f32, r: usize| popup::ease_out((e - 0.06 * r as f32).clamp(0.0, 1.0));
         if let (Some((old, _)), Some(e)) = (self.prev, e) {
-            for r in 0..rows {
-                let k = stag(e * 1.1, r);
-                let i = old * rows + r;
-                if i < n { self.row(ui, i, top + r as f32 * slot - 22.0 * k, 1.0 - k, w, false); }
+            for s in 0..per {
+                let k = stag(e * 1.1, s);
+                let i = old * per + s;
+                let (x, y) = place(s);
+                if i < n { self.row(ui, i, x, cw, y - 22.0 * k, rowh, lines, 1.0 - k, false); }
             }
             moving = true;
         }
-        for r in 0..rows {
-            let i = self.page * rows + r;
+        for s in 0..per {
+            let i = self.page * per + s;
             if i >= n { break; }
             // Al aparecer el widget, también en cascada
-            let k = match e { Some(e) => stag(e * 0.95 - 0.12, r), None => ez(t, 0.08 + 0.07 * r as f32, 0.5) };
-            let y = top + r as f32 * slot + 18.0 * (1.0 - k);
-            self.row(ui, i, y, k, w, k > 0.5);
-            // Línea fina entre titulares
+            let k = match e { Some(e) => stag(e * 0.95 - 0.12, s), None => ez(t, 0.08 + 0.07 * s as f32, 0.5) };
+            let (x, y) = place(s);
+            self.row(ui, i, x, cw, y + 18.0 * (1.0 - k), rowh, lines, k, k > 0.5);
+            // Línea fina entre titulares (y entre columnas)
+            let r = s % rows;
             if r + 1 < rows && i + 1 < n {
                 let ly = LIST_TOP + (r + 1) as f32 * slot - 7.5;
-                unsafe { ui.rt.FillRectangle(&rect(PAD, ly, w - PAD, ly + 1.0 / ui.s), &ui.wa(0.08 * k)); }
+                unsafe { ui.rt.FillRectangle(&rect(x, ly, x + cw, ly + 1.0 / ui.s), &ui.wa(0.08 * k)); }
+            }
+            if r == 0 && s / rows + 1 < cols && i + rows < n {
+                let lx = x + cw + gap / 2.0;
+                unsafe { ui.rt.FillRectangle(&rect(lx, LIST_TOP, lx + 1.0 / ui.s, bottom - 12.0), &ui.wa(0.08 * k)); }
             }
         }
         unsafe { ui.rt.PopAxisAlignedClip(); }
@@ -838,6 +876,7 @@ impl Widget for NewsW {
         page_dots(ui, self.pages(), self.dot, w / 2.0, h - 16.0);
         self.moving = moving || t < 1.2;
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         let id = id?;
         if right {
@@ -888,6 +927,15 @@ mod tests {
 <item><title>Sin fecha &#8220;citada&#8221; y &#x27;apóstrofo&#x27;</title><guid>https://ejemplo.org/guid</guid></item>
 <item><title></title><link>https://ejemplo.org/vacio</link></item>
 </channel></rss>"#;
+
+    #[test]
+    fn titulares_por_tamano() {
+        // Cada tamaño enseña al menos uno y una página nunca pide más de los que se guardan para enseñar
+        for s in desk::Sz::ALL { let (c, r) = news_grid(s); assert!(c * r >= 1 && c * r <= SHOW, "{s:?}"); }
+        assert_eq!(news_grid(desk::Sz::Pequeno), (1, 1));
+        assert_eq!(news_grid(desk::Sz::Columna), (1, 7));
+        assert_eq!(news_grid(desk::Sz::Extragrande), (2, 4));
+    }
 
     #[test]
     fn rss_de_google_news() {

@@ -10,7 +10,7 @@
 //! marca «Sin conexión». Un clic en una fila abre la página del valor en Yahoo Finance.
 
 use super::*;
-use desk::{size, DFonts, Kind};
+use desk::{DFonts, Kind};
 use deskw::{header, Widget};
 use news::{approach, ez, fit, fmt_ago, now, page_dots};
 use popup::Ui;
@@ -141,14 +141,13 @@ pub(crate) fn market_of(sym: &str) -> &'static str {
 const PAD: f32 = 20.0;
 const LIST_TOP: f32 = 52.0;
 const ROW: f32 = 56.0;
-const ROWS: usize = 4;
 const TURN_S: f32 = 12.0;
 const SLIDE_S: f32 = 0.6;
 /// Minigráfica: dónde empieza y lo ancha que es.
 const SPARK_X: f32 = 156.0;
 const SPARK_W: f32 = 92.0;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub(crate) struct Quote {
     pub sym: String,
     pub name: String,
@@ -161,6 +160,9 @@ pub(crate) struct Quote {
     pub time: i64,
     /// Cierres de cada 5 min de hoy
     pub closes: Vec<f32>,
+    /// Para el detalle de Extragrande (0 = Yahoo no lo da): apertura (la del periodo), máximo y mínimo
+    /// del día, volumen y máximo y mínimo de 52 semanas
+    pub open: f64, pub high: f64, pub low: f64, pub volume: f64, pub wk_high: f64, pub wk_low: f64,
 }
 
 impl Quote {
@@ -217,6 +219,8 @@ pub(crate) fn parse_chart(json: &str, sym: &str) -> Option<Quote> {
     let prev = num_after(meta, "chartPreviousClose").or_else(|| num_after(meta, "previousClose")).unwrap_or(0.0);
     let name = str_after(meta, "shortName").or_else(|| str_after(meta, "longName")).unwrap_or_else(|| sym.to_string());
     let closes = after(res, "indicators").and_then(|i| nums_after(i, "close")).unwrap_or_default();
+    let open = after(res, "indicators").and_then(|i| nums_after(i, "open")).and_then(|o| o.first().copied()).unwrap_or(0.0) as f64;
+    let pos = |k: &str| num_after(meta, k).filter(|v| *v > 0.0).unwrap_or(0.0);
     Some(Quote {
         sym: sym.to_string(),
         name: pretty_name(&name),
@@ -226,6 +230,8 @@ pub(crate) fn parse_chart(json: &str, sym: &str) -> Option<Quote> {
         prev,
         time: num_after(meta, "regularMarketTime").unwrap_or(0.0) as i64,
         closes,
+        open, high: pos("regularMarketDayHigh"), low: pos("regularMarketDayLow"), volume: pos("regularMarketVolume"),
+        wk_high: pos("fiftyTwoWeekHigh"), wk_low: pos("fiftyTwoWeekLow"),
     })
 }
 
@@ -335,12 +341,13 @@ pub(crate) fn edit_symbols() { settings::open_at_stocks(); }
 fn cache_path() -> String { sys::config_dir() + "\\bolsa_cache.txt" }
 
 /// «v1\t<pedido>\t<periodo>» y una línea por valor: símbolo, nombre, moneda, índice, precio, cierre
-/// anterior, hora y cierres. (Las cachés de antes no traen periodo: eran del día.)
+/// anterior, hora y cierres, y (desde los tamaños) apertura, máximo, mínimo, volumen y 52 semanas. (Las
+/// cachés de antes no traen periodo, que era el día, ni el detalle.)
 pub(crate) fn cache_to_text(fetched: i64, period: Period, qs: &[Quote]) -> String {
     let mut s = format!("v1\t{fetched}\t{}\n", period.key());
     for q in qs {
         let cl: Vec<String> = q.closes.iter().map(|c| c.to_string()).collect();
-        s += &format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", q.sym, q.name.replace(['\t', '\n', '\r'], " "), q.currency, q.index as u8, q.price, q.prev, q.time, cl.join(","));
+        s += &format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", q.sym, q.name.replace(['\t', '\n', '\r'], " "), q.currency, q.index as u8, q.price, q.prev, q.time, cl.join(","), q.open, q.high, q.low, q.volume, q.wk_high, q.wk_low);
     }
     s
 }
@@ -353,11 +360,13 @@ pub(crate) fn cache_from_text(s: &str) -> Option<(i64, Period, Vec<Quote>)> {
     let period = Period::from_key(h.next().unwrap_or(""));
     let qs = lines.filter_map(|l| {
         let p: Vec<&str> = l.split('\t').collect();
-        if p.len() != 8 { return None; }
+        if p.len() != 8 && p.len() != 14 { return None; }
+        let x = |i: usize| p.get(i).and_then(|v| v.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
         Some(Quote {
             sym: p[0].into(), name: p[1].into(), currency: p[2].into(), index: p[3] == "1",
             price: p[4].parse().ok()?, prev: p[5].parse().ok()?, time: p[6].parse().unwrap_or(0),
             closes: p[7].split(',').filter_map(|c| c.parse().ok()).collect(),
+            open: x(8), high: x(9), low: x(10), volume: x(11), wk_high: x(12), wk_low: x(13),
         })
     }).collect();
     Some((fetched, period, qs))
@@ -377,6 +386,8 @@ pub(crate) fn known_name(sym: &str) -> Option<String> {
 
 /// Un valor de muestra (precios de ejemplo y un día inventado, sin red).
 fn demo_quote(sym: &str, name: &str, cur: &str, index: bool, prev: f64, price: f64, seed: f32, now: i64) -> Quote {
+    // El volumen, inventado (los índices no lo traen)
+    let volume = if index { 0.0 } else { (seed as f64 * 7.3e6 + 2.1e7) * if price > 10_000.0 { 1000.0 } else { 1.0 } };
     let n = 78;
     let closes = (0..n).map(|i| {
         let x = i as f32 / (n - 1) as f32;
@@ -385,7 +396,10 @@ fn demo_quote(sym: &str, name: &str, cur: &str, index: bool, prev: f64, price: f
         let wob = (x * 9.0 + seed).sin() * 0.45 + (x * 23.0 + seed * 2.0).sin() * 0.25 + (x * 51.0 + seed * 3.0).sin() * 0.12;
         if i == n - 1 { price as f32 } else { trend + wob * amp * (0.3 + 0.7 * (x * 3.1).sin().abs()) }
     }).collect();
-    Quote { sym: sym.into(), name: name.into(), currency: cur.into(), index, price, prev, time: now - 120, closes }
+    let closes: Vec<f32> = closes;
+    let (lo, hi) = closes.iter().fold((f32::MAX, f32::MIN), |(a, b), &c| (a.min(c), b.max(c)));
+    Quote { sym: sym.into(), name: name.into(), currency: cur.into(), index, price, prev, time: now - 120, open: closes[0] as f64, high: hi as f64, low: lo as f64, volume,
+        wk_high: hi as f64 * 1.21, wk_low: lo as f64 * 0.78, closes }
 }
 
 /// Valores de muestra para el modo demo.
@@ -531,18 +545,51 @@ fn sparkline(ui: &Ui, q: &Quote, x0: f32, y0: f32, w: f32, h: f32, k: f32, day: 
 }
 
 // ================================================================ widget
+/// Cómo se enseña cada valor según el tamaño.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Look {
+    /// Ficha: símbolo y variación, precio grande y gráfica debajo (Pequeño, Mediano y Banda, en línea)
+    Tile,
+    /// Fila de siempre: símbolo y nombre, minigráfica, precio y variación (listas de Columna y Extragrande)
+    Row,
+    /// Fila estrecha de dos líneas (Alto)
+    Narrow,
+    /// Fila de una línea bajo la gráfica grande (Grande)
+    Mini,
+}
+
+/// Valores por página y cómo se ven en cada tamaño.
+fn stocks_grid(s: desk::Sz) -> (usize, Look) {
+    use desk::Sz::*;
+    match s { Pequeno => (1, Look::Tile), Mediano => (2, Look::Tile), Banda => (4, Look::Tile), Alto => (4, Look::Narrow), Grande => (5, Look::Mini), Columna => (6, Look::Row), Extragrande => (5, Look::Row) }
+}
+
+/// Volumen corto: «28,4 M», «1,2 mil M» («28.4M», «1.2B» en inglés).
+pub(crate) fn fmt_volume(v: f64, en: bool) -> String {
+    let (n, u) = match v {
+        v if v >= 1e9 => (v / 1e9, if en { "B" } else { " mil M" }),
+        v if v >= 1e6 => (v / 1e6, if en { "M" } else { " M" }),
+        v if v >= 1e3 => (v / 1e3, if en { "K" } else { " mil" }),
+        v => (v, ""),
+    };
+    let dec = if n >= 100.0 || u.is_empty() { 0 } else { 1 };
+    format!("{}{u}", fmt_num(n, dec, en))
+}
+
 pub struct StocksW {
     ver: u64, quotes: Vec<Quote>, fetched: i64, offline: bool,
     page: usize, prev: Option<(usize, Instant)>, turned: Instant,
     dot: f32, hovering: bool, moving: bool, minute: i64,
     cfg: Cfg, cfg_ver: u64,
+    /// Valor de la gráfica grande (Grande y Extragrande) y cuándo se eligió (la gráfica se redibuja)
+    sel: usize, sel_at: Option<Instant>,
 }
 
 impl Default for StocksW {
     fn default() -> Self {
         ensure_started();
         SEEN.store(now(), Ordering::Relaxed);
-        StocksW { ver: u64::MAX, quotes: Vec::new(), fetched: 0, offline: false, page: 0, prev: None, turned: Instant::now(), dot: 0.0, hovering: false, moving: false, minute: 0, cfg: cfg(), cfg_ver: cfg_ver() }
+        StocksW { ver: u64::MAX, quotes: Vec::new(), fetched: 0, offline: false, page: 0, prev: None, turned: Instant::now(), dot: 0.0, hovering: false, moving: false, minute: 0, cfg: cfg(), cfg_ver: cfg_ver(), sel: 0, sel_at: None }
     }
 }
 
@@ -558,9 +605,11 @@ impl StocksW {
         self.fetched = sh.fetched;
         self.offline = sh.offline;
         if self.page >= self.pages() { self.page = 0; self.prev = None; }
+        if self.sel >= self.quotes.len() { self.sel = self.page * self.per(); }
         true
     }
-    fn pages(&self) -> usize { self.quotes.len().div_ceil(ROWS).max(1) }
+    fn per(&self) -> usize { stocks_grid(desk::sz(Kind::Stocks)).0 }
+    fn pages(&self) -> usize { self.quotes.len().div_ceil(self.per()).max(1) }
     fn turn(&mut self, to: usize) {
         let to = to % self.pages();
         if to == self.page { return; }
@@ -568,37 +617,165 @@ impl StocksW {
         self.page = to;
         self.turned = Instant::now();
         self.moving = true;
+        // La gráfica grande pasa al primero de la página nueva
+        self.sel = to * self.per();
+        self.sel_at = Some(Instant::now());
+    }
+    /// Variación como se eligió (% o importe).
+    fn change(&self, q: &Quote, en: bool) -> String { if self.cfg.amount { fmt_change(q, en) } else { fmt_pct(q.change_pct(), en) } }
+    /// Variación alineada a la derecha en `right` con su ▲▼ delante (en gris: sin color).
+    fn change_r(&self, ui: &Ui, q: &Quote, right: f32, y: f32, bh: f32) {
+        let en = i18n::en();
+        let up = q.price >= q.prev;
+        let pct = self.change(q, en);
+        ui.text_r(&ui.f.sub, &pct, right, y, bh, &ui.dim);
+        let px = right - ui.p.width(&ui.f.sub, &pct) - 5.0;
+        ui.text_r(&ui.f.small, if up { "▲" } else { "▼" }, px, y, bh, &ui.wa(if up { 0.7 } else { 0.45 }));
     }
 
     /// Una fila: símbolo y nombre, minigráfica, precio y variación (▲▼ y el signo, en gris).
-    fn row(&self, ui: &mut Ui, i: usize, y: f32, a: f32, spark: f32, w: f32, live: bool) {
+    fn row(&self, ui: &mut Ui, i: usize, x0: f32, x1: f32, y: f32, a: f32, spark: f32, live: bool) {
         let Some(q) = self.quotes.get(i) else { return };
         let id = 100 + i as u32;
-        let r = rect(PAD - 10.0, y - 4.0, w - PAD + 10.0, y + ROW - 6.0);
-        if live { ui.hit(r, id); ui.card_k(r, ui.heat(id) * a); }
+        let r = rect(x0 - 10.0, y - 4.0, x1 + 10.0, y + ROW - 6.0);
+        // Con gráfica grande encima o al lado, la fila del valor que enseña va resaltada
+        let on = i == self.sel && matches!(desk::sz(Kind::Stocks), desk::Sz::Columna | desk::Sz::Extragrande);
+        if on { unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 10.0), &ui.wa(0.07 * a)); } }
+        if live { ui.hit(r, id); if !on { ui.card_k(r, ui.heat(id) * a); } }
         if a < 0.01 { return; }
         let en = i18n::en();
         popup::push_alpha(ui.rt, a);
         // Sin gráfica, el nombre se alarga hasta el precio
         let price = fmt_price(q, en);
-        let name_w = if self.cfg.chart { SPARK_X - PAD - 12.0 } else { w - 2.0 * PAD - ui.p.width(&ui.f.name, &price) - 16.0 };
-        ui.text(&ui.f.name, &fit(ui, &ui.f.name, &display_symbol(&q.sym), name_w), PAD, y + 3.0, 20.0, &ui.white);
-        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &q.name, name_w), PAD, y + 24.0, 18.0, &ui.dim);
-        if self.cfg.chart { sparkline(ui, q, SPARK_X, y + 6.0, SPARK_W, 32.0, spark, self.cfg.period == Period::Day); }
-        let up = q.price >= q.prev;
-        ui.text_r(&ui.f.name, &price, w - PAD, y + 3.0, 20.0, &ui.white);
-        let pct = if self.cfg.amount { fmt_change(q, en) } else { fmt_pct(q.change_pct(), en) };
-        ui.text_r(&ui.f.sub, &pct, w - PAD, y + 24.0, 18.0, &ui.dim);
-        let tri = if up { "▲" } else { "▼" };
-        let px = w - PAD - ui.p.width(&ui.f.sub, &pct) - 5.0;
-        ui.text_r(&ui.f.small, tri, px, y + 24.0, 18.0, &ui.wa(if up { 0.7 } else { 0.45 }));
+        let spark_x = x0 + SPARK_X - PAD;
+        let name_w = if self.cfg.chart { SPARK_X - PAD - 12.0 } else { x1 - x0 - ui.p.width(&ui.f.name, &price) - 16.0 };
+        ui.text(&ui.f.name, &fit(ui, &ui.f.name, &display_symbol(&q.sym), name_w), x0, y + 3.0, 20.0, &ui.white);
+        ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &q.name, name_w), x0, y + 24.0, 18.0, &ui.dim);
+        if self.cfg.chart { sparkline(ui, q, spark_x, y + 6.0, SPARK_W.min(x1 - spark_x - 112.0), 32.0, spark, self.cfg.period == Period::Day); }
+        ui.text_r(&ui.f.name, &price, x1, y + 3.0, 20.0, &ui.white);
+        self.change_r(ui, q, x1, y + 24.0, 18.0);
         unsafe { ui.rt.PopLayer(); }
+    }
+
+    /// Ficha (Pequeño, Mediano, Banda): símbolo y variación, nombre si cabe, precio grande y la gráfica.
+    fn tile(&self, ui: &mut Ui, d: &DFonts, i: usize, r: D2D_RECT_F, a: f32, spark: f32, live: bool) {
+        let Some(q) = self.quotes.get(i) else { return };
+        let id = 100 + i as u32;
+        let hr = rect(r.left - 10.0, r.top - 6.0, r.right + 10.0, r.bottom + 4.0);
+        if live { ui.hit(hr, id); ui.card_k(hr, ui.heat(id) * a); }
+        if a < 0.01 { return; }
+        let en = i18n::en();
+        popup::push_alpha(ui.rt, a);
+        let pw = ui.p.width(&ui.f.sub, &self.change(q, en)) + 18.0;
+        ui.text(&ui.f.name, &fit(ui, &ui.f.name, &display_symbol(&q.sym), r.right - r.left - pw), r.left, r.top, 20.0, &ui.white);
+        self.change_r(ui, q, r.right, r.top + 1.0, 20.0);
+        let mut y = r.top + 22.0;
+        let with_name = r.bottom - r.top >= 112.0 || !self.cfg.chart;
+        if with_name { ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &q.name, r.right - r.left), r.left, y, 18.0, &ui.dim); y += 18.0; }
+        let price = fmt_price(q, en);
+        let pf = if ui.p.width(&d.big, &price) <= r.right - r.left { &d.big } else { &ui.f.val };
+        ui.text(pf, &price, r.left, y, 30.0, &ui.white);
+        y += 34.0;
+        if self.cfg.chart && r.bottom - y >= 18.0 { sparkline(ui, q, r.left, y, r.right - r.left, r.bottom - y, spark, self.cfg.period == Period::Day); }
+        unsafe { ui.rt.PopLayer(); }
+    }
+
+    /// Fila estrecha (Alto): símbolo y precio; debajo, una minigráfica corta y la variación.
+    fn narrow(&self, ui: &mut Ui, i: usize, x0: f32, x1: f32, y: f32, sh: f32, a: f32, spark: f32, live: bool) {
+        let Some(q) = self.quotes.get(i) else { return };
+        let id = 100 + i as u32;
+        let r = rect(x0 - 10.0, y - 4.0, x1 + 10.0, y + sh - 6.0);
+        if live { ui.hit(r, id); ui.card_k(r, ui.heat(id) * a); }
+        if a < 0.01 { return; }
+        let en = i18n::en();
+        popup::push_alpha(ui.rt, a);
+        let price = fmt_price(q, en);
+        let pw = ui.p.width(&ui.f.name, &price) + 8.0;
+        ui.text(&ui.f.name, &fit(ui, &ui.f.name, &display_symbol(&q.sym), x1 - x0 - pw), x0, y + 3.0, 20.0, &ui.white);
+        ui.text_r(&ui.f.name, &price, x1, y + 3.0, 20.0, &ui.white);
+        let cw = ui.p.width(&ui.f.sub, &self.change(q, en)) + 22.0;
+        if self.cfg.chart { sparkline(ui, q, x0, y + 28.0, (x1 - x0 - cw).min(70.0), 14.0, spark, self.cfg.period == Period::Day); }
+        else { ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &q.name, x1 - x0 - cw), x0, y + 24.0, 18.0, &ui.dim); }
+        self.change_r(ui, q, x1, y + 24.0, 18.0);
+        unsafe { ui.rt.PopLayer(); }
+    }
+
+    /// Fila de una línea (Grande): símbolo, minigráfica, precio y variación; la elegida, resaltada.
+    fn mini(&self, ui: &mut Ui, i: usize, x0: f32, x1: f32, y: f32, sh: f32, a: f32, spark: f32, live: bool) {
+        let Some(q) = self.quotes.get(i) else { return };
+        let id = 200 + i as u32;
+        let r = rect(x0 - 10.0, y, x1 + 10.0, y + sh - 2.0);
+        let on = i == self.sel;
+        if live { ui.hit(r, id); }
+        if on { unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 8.0), &ui.wa(0.07 * a)); } }
+        else if live { ui.card_k(r, ui.heat(id) * a); }
+        if a < 0.01 { return; }
+        let en = i18n::en();
+        popup::push_alpha(ui.rt, a);
+        let my = y + (sh - 2.0) / 2.0 - 10.0;
+        let cx = x1 - 66.0;
+        ui.text(&ui.f.name, &fit(ui, &ui.f.name, &display_symbol(&q.sym), 78.0), x0, my, 20.0, &ui.white);
+        if self.cfg.chart { sparkline(ui, q, x0 + 86.0, my + 3.0, (cx - 96.0 - (x0 + 86.0)).max(20.0) - 18.0, 14.0, spark, self.cfg.period == Period::Day); }
+        ui.text_r(&ui.f.name, &fmt_price(q, en), cx - 8.0, my, 20.0, &ui.white);
+        self.change_r(ui, q, x1, my + 1.0, 20.0);
+        unsafe { ui.rt.PopLayer(); }
+    }
+
+    /// Valor elegido en grande: símbolo y nombre, precio, variación y gráfica de `ch` de alto. Con
+    /// `detail`, debajo, apertura, máximo y mínimo, cierre anterior y volumen (si Yahoo los da).
+    fn feature(&self, ui: &mut Ui, d: &DFonts, x0: f32, x1: f32, y: f32, ch: f32, k: f32, detail: bool) -> f32 {
+        let Some(q) = self.quotes.get(self.sel).or_else(|| self.quotes.first()) else { return y };
+        let i = self.quotes.iter().position(|x| x.sym == q.sym).unwrap_or(0);
+        let en = i18n::en();
+        let id = 100 + i as u32;
+        let hot = ui.heat(id);
+        let pw = ui.p.width(&ui.f.sub, &self.change(q, en)) + 18.0;
+        let sym = display_symbol(&q.sym);
+        ui.text(&ui.f.name, &sym, x0, y, 20.0, &ui.white);
+        let sx = x0 + ui.p.width(&ui.f.name, &sym) + 8.0;
+        if q.name != sym { ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &q.name, x1 - sx - pw), sx, y + 1.0, 20.0, &ui.dim); }
+        self.change_r(ui, q, x1, y + 1.0, 20.0);
+        let price = fmt_price(q, en);
+        let pf = if detail { &d.huge } else { &d.big };
+        ui.text(pf, &price, x0, y + 24.0, if detail { 44.0 } else { 30.0 }, &ui.white);
+        let y0 = y;
+        let mut y = y + if detail { 74.0 } else { 58.0 };
+        if self.cfg.chart || detail {
+            sparkline(ui, q, x0, y, x1 - x0, ch, k, self.cfg.period == Period::Day);
+            y += ch + 12.0;
+        }
+        // Un clic en el valor grande abre su página
+        ui.hit(rect(x0 - 10.0, y0 - 6.0, x1 + 10.0, y - 6.0), id);
+        if hot > 0.01 { ui.card_k(rect(x0 - 10.0, y0 - 6.0, x1 + 10.0, y - 6.0), hot * 0.6); }
+        if detail {
+            // Dos columnas de datos (rótulo en gris y valor): lo que no da Yahoo no sale
+            let num = |v: f64| if v > 0.0 { Some(fmt_num(v, if v.abs() < 1.0 { 4 } else { 2 }, en)) } else { None };
+            let open_lbl = if self.cfg.period == Period::Day { i18n::t("Apertura") } else { i18n::t("Inicio del periodo") };
+            let hl = match (num(q.high), num(q.low)) { (Some(h), Some(l)) => Some(format!("{h} / {l}")), _ => None };
+            let wk = match (num(q.wk_high), num(q.wk_low)) { (Some(h), Some(l)) => Some(format!("{h} / {l}")), _ => None };
+            let cells: Vec<(&str, String)> = [
+                (open_lbl, num(q.open)),
+                (i18n::t("Máx. / mín. del día"), hl),
+                (i18n::t("Cierre anterior"), num(q.prev)),
+                (i18n::t("Volumen"), (q.volume > 0.0).then(|| fmt_volume(q.volume, en))),
+                (i18n::t("52 semanas"), wk),
+            ].into_iter().filter_map(|(l, v)| v.map(|v| (l, v))).take(4).collect();
+            let cw = (x1 - x0 - 20.0) / 2.0;
+            for (j, (lbl, val)) in cells.iter().enumerate() {
+                let (cx, cy) = (x0 + (j % 2) as f32 * (cw + 20.0), y + (j / 2) as f32 * 40.0);
+                ui.text(&ui.f.small, &fit(ui, &ui.f.small, lbl, cw), cx, cy, 15.0, &ui.dim);
+                ui.text(&ui.f.name, &fit(ui, &ui.f.name, val, cw), cx, cy + 16.0, 20.0, &ui.white);
+            }
+            y += cells.len().div_ceil(2) as f32 * 40.0;
+        }
+        y
     }
 }
 
 impl Widget for StocksW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, t: f32, dt: f32) {
-        let (w, h) = size(Kind::Stocks);
+        let l = desk::lay(Kind::Stocks);
+        let (w, h) = (l.w, l.h);
         SEEN.store(now(), Ordering::Relaxed);
         self.sync();
         self.hovering = ui.hover.is_some_and(|id| id >= 100);
@@ -614,6 +791,10 @@ impl Widget for StocksW {
             (p, true) => i18n::t(p.label()).to_string(),
             (p, false) => format!("{} · {status}", i18n::t(p.label())),
         };
+        // En Pequeño y Alto, solo la hora de los datos (o «Sin conexión»): no cabe más
+        let status = if (l.sz == desk::Sz::Pequeno || l.sz == desk::Sz::Alto) && ui.p.width(&ui.f.sub, &status) > w - 2.0 * PAD - 60.0 {
+            if self.offline { i18n::t("Sin conexión").to_string() } else { String::new() }
+        } else { status };
         header(ui, d, i18n::t("Bolsa"), &status, w);
         ui.hit(rect(0.0, 0.0, w, LIST_TOP - 8.0), 1);
         if self.quotes.is_empty() {
@@ -625,42 +806,95 @@ impl Widget for StocksW {
         }
         let n = self.quotes.len();
         let mut moving = false;
-        let bottom = LIST_TOP + ROWS as f32 * ROW - 4.0;
-        unsafe { ui.rt.PushAxisAlignedClip(&rect(0.0, LIST_TOP - 8.0, w, bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
+        let (per, look) = stocks_grid(l.sz);
+        let pages = self.pages();
+        let dots_h = if pages > 1 { 22.0 } else { 6.0 };
+        // Zona de la lista (y, en Grande y Extragrande, la gráfica grande del valor elegido)
+        let sel_k = self.sel_at.map(|a| popup::ease_out((a.elapsed().as_secs_f32() / 0.7).min(1.0))).unwrap_or_else(|| ez(t, 0.3, 0.9));
+        moving |= sel_k < 1.0;
+        let (lx0, lx1, ltop, lbottom) = match l.sz {
+            desk::Sz::Grande | desk::Sz::Columna => {
+                let ch = 62.0;
+                let y = self.feature(ui, d, PAD, w - PAD, LIST_TOP - 2.0, ch, sel_k, false);
+                if l.sz == desk::Sz::Columna { unsafe { ui.rt.FillRectangle(&rect(PAD, y - 6.0, w - PAD, y - 6.0 + 1.0 / ui.s), &ui.wa(0.08)); } }
+                (PAD, w - PAD, y + if l.sz == desk::Sz::Columna { 6.0 } else { -4.0 }, h - dots_h)
+            }
+            desk::Sz::Extragrande => {
+                let split = 360.0;
+                self.feature(ui, d, split + 2.0 * PAD, w - PAD, LIST_TOP - 2.0, 118.0, sel_k, true);
+                unsafe { ui.rt.FillRectangle(&rect(split + PAD, LIST_TOP, split + PAD + 1.0 / ui.s, h - PAD), &ui.wa(0.08)); }
+                (PAD, split, LIST_TOP, h - dots_h)
+            }
+            _ => (PAD, w - PAD, LIST_TOP, h - dots_h),
+        };
+        // Hueco de cada valor
+        let tile_gap = 2.0 * PAD;
+        let slot_h = match look { Look::Tile => lbottom - ltop - 8.0, Look::Row => ROW, Look::Narrow | Look::Mini => (lbottom - ltop) / per.min(n).max(1) as f32 };
+        let tile_w = (lx1 - lx0 - tile_gap * (per - 1) as f32) / per as f32;
+        let place = |s: usize| -> (f32, f32) {
+            match look { Look::Tile => (lx0 + s as f32 * (tile_w + tile_gap), ltop), Look::Narrow => (lx0, ltop + s as f32 * slot_h + ((slot_h - 50.0) / 2.0).max(0.0)), _ => (lx0, ltop + s as f32 * slot_h) }
+        };
+        let draw = |me: &Self, ui: &mut Ui, i: usize, s: usize, dy: f32, a: f32, spark: f32, live: bool| {
+            let (x, y) = place(s);
+            match look {
+                Look::Tile => me.tile(ui, d, i, rect(x, y + dy, x + tile_w, y + dy + slot_h), a, spark, live),
+                Look::Row => me.row(ui, i, lx0, lx1, y + dy, a, spark, live),
+                Look::Narrow => me.narrow(ui, i, lx0, lx1, y + dy, slot_h, a, spark, live),
+                Look::Mini => me.mini(ui, i, lx0, lx1, y + dy, slot_h, a, spark, live),
+            }
+        };
+        unsafe { ui.rt.PushAxisAlignedClip(&rect(0.0, ltop - 8.0, if l.sz == desk::Sz::Extragrande { lx1 + PAD / 2.0 } else { w }, lbottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE); }
         let e = self.prev.map(|(_, at)| at.elapsed().as_secs_f32() / SLIDE_S);
-        if e.is_some_and(|e| e >= 1.0 + 0.06 * ROWS as f32) { self.prev = None; }
+        if e.is_some_and(|e| e >= 1.0 + 0.06 * per as f32) { self.prev = None; }
         let stag = |e: f32, r: usize| popup::ease_out((e - 0.06 * r as f32).clamp(0.0, 1.0));
         if let (Some((old, _)), Some(e)) = (self.prev, e) {
-            for r in 0..ROWS {
-                let k = stag(e * 1.1, r);
-                let i = old * ROWS + r;
-                if i < n { self.row(ui, i, LIST_TOP + r as f32 * ROW - 20.0 * k, 1.0 - k, 1.0, w, false); }
+            for s in 0..per {
+                let k = stag(e * 1.1, s);
+                let i = old * per + s;
+                if i < n { draw(self, ui, i, s, -20.0 * k, 1.0 - k, 1.0, false); }
             }
             moving = true;
         }
-        for r in 0..ROWS {
-            let i = self.page * ROWS + r;
+        for s in 0..per {
+            let i = self.page * per + s;
             if i >= n { break; }
-            let k = match e { Some(e) => stag(e * 0.95 - 0.12, r), None => ez(t, 0.08 + 0.07 * r as f32, 0.5) };
+            let k = match e { Some(e) => stag(e * 0.95 - 0.12, s), None => ez(t, 0.08 + 0.07 * s as f32, 0.5) };
             // La minigráfica se dibuja de izquierda a derecha al entrar
-            let spark = match e { Some(_) => k, None => ez(t, 0.25 + 0.08 * r as f32, 0.9) };
-            self.row(ui, i, LIST_TOP + r as f32 * ROW + 16.0 * (1.0 - k), k, spark, w, k > 0.5);
-            if r + 1 < ROWS && i + 1 < n {
-                let ly = LIST_TOP + (r + 1) as f32 * ROW - 5.5;
-                unsafe { ui.rt.FillRectangle(&rect(PAD, ly, w - PAD, ly + 1.0 / ui.s), &ui.wa(0.08 * k)); }
+            let spark = match e { Some(_) => k, None => ez(t, 0.25 + 0.08 * s as f32, 0.9) };
+            draw(self, ui, i, s, 16.0 * (1.0 - k), k, spark, k > 0.5);
+            // Línea fina entre filas (las fichas van sin ella)
+            if look == Look::Row && s + 1 < per && i + 1 < n {
+                let ly = ltop + (s + 1) as f32 * slot_h - 5.5;
+                unsafe { ui.rt.FillRectangle(&rect(lx0, ly, lx1, ly + 1.0 / ui.s), &ui.wa(0.08 * k)); }
+            }
+            if look == Look::Narrow && s + 1 < per && i + 1 < n {
+                let ly = ltop + (s + 1) as f32 * slot_h - 5.0;
+                unsafe { ui.rt.FillRectangle(&rect(lx0, ly, lx1, ly + 1.0 / ui.s), &ui.wa(0.08 * k)); }
             }
         }
         unsafe { ui.rt.PopAxisAlignedClip(); }
         moving |= approach(&mut self.dot, self.page as f32, dt, 0.09);
-        page_dots(ui, self.pages(), self.dot, w / 2.0, h - 14.0);
+        page_dots(ui, pages, self.dot, (lx0 + lx1) / 2.0, h - 14.0);
         self.moving = moving || t < 1.4;
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         let id = id?;
         if right { return (id == 1).then(|| Box::new(edit_symbols) as Box<dyn FnOnce()>); }
         match id {
+            // Filas de Grande: pasan ese valor a la gráfica grande
+            i if i >= 200 => {
+                let s = (i - 200) as usize;
+                if s < self.quotes.len() && s != self.sel { self.sel = s; self.sel_at = Some(Instant::now()); self.turned = Instant::now(); self.moving = true; }
+            }
             i if i >= 100 => {
-                let url = quote_page(&self.quotes.get((i - 100) as usize)?.sym);
+                let s = (i - 100) as usize;
+                // En Columna y Extragrande, la primera vez la fila pasa a la gráfica grande; ya elegida, abre Yahoo
+                if matches!(desk::sz(Kind::Stocks), desk::Sz::Columna | desk::Sz::Extragrande) && s != self.sel && s < self.quotes.len() {
+                    self.sel = s; self.sel_at = Some(Instant::now()); self.turned = Instant::now(); self.moving = true;
+                    return None;
+                }
+                let url = quote_page(&self.quotes.get(s)?.sym);
                 return Some(Box::new(move || sys::open(&url)));
             }
             i if i >= 10 => self.turn((i - 10) as usize),
@@ -707,6 +941,11 @@ mod tests {
         assert_eq!(q.time, 1795192531);
         assert_eq!(q.closes, vec![19005.25, 18990.0], "los null se saltan y no se lee «open»");
         assert!((q.change_pct() + 1.6319).abs() < 0.001);
+        // Detalle: la apertura es el primer «open»; lo que no trae la respuesta queda a 0 (no se enseña)
+        assert_eq!((q.open, q.high, q.low, q.volume), (19000.5, 0.0, 0.0, 0.0));
+        let j = r#"{"chart":{"result":[{"meta":{"regularMarketPrice":10,"regularMarketDayHigh":11.5,"regularMarketDayLow":9.25,"regularMarketVolume":28400000,"fiftyTwoWeekHigh":14,"fiftyTwoWeekLow":7}}]}}"#;
+        let q = parse_chart(j, "X").unwrap();
+        assert_eq!((q.high, q.low, q.volume, q.wk_high, q.wk_low, q.open), (11.5, 9.25, 28_400_000.0, 14.0, 7.0, 0.0));
         // Acción con nombre escapado y sin cierre anterior en la gráfica
         let j = r#"{"chart":{"result":[{"meta":{"currency":"USD","instrumentType":"EQUITY","regularMarketPrice":228.41,"previousClose":227.23,"shortName":"Café \"Co\" INC."},"indicators":{"quote":[{"close":[1.5e2,2.0E2]}],"adjclose":[{"adjclose":[9,9]}]}}],"error":null}}"#;
         let q = parse_chart(j, "CAFE").unwrap();
@@ -729,7 +968,7 @@ mod tests {
         assert_eq!(fmt_num(0.123456, 4, false), "0,1235");
         assert_eq!(fmt_num(-5.5, 2, false), "\u{2212}5,50");
         assert_eq!(fmt_num(-0.001, 2, false), "0,00");
-        let q = |p: f64, cur: &str, index: bool| Quote { sym: "X".into(), name: String::new(), currency: cur.into(), index, price: p, prev: p, time: 0, closes: vec![] };
+        let q = |p: f64, cur: &str, index: bool| Quote { sym: "X".into(), currency: cur.into(), index, price: p, prev: p, ..Default::default() };
         assert_eq!(fmt_price(&q(6.92, "EUR", false), false), "6,92 €");
         assert_eq!(fmt_price(&q(228.41, "USD", false), true), "$228.41");
         assert_eq!(fmt_price(&q(228.41, "USD", false), false), "228,41 $");
@@ -798,8 +1037,22 @@ mod tests {
     }
 
     #[test]
+    fn volumen_y_tamanos() {
+        assert_eq!(fmt_volume(28_400_000.0, false), "28,4 M");
+        assert_eq!(fmt_volume(28_400_000.0, true), "28.4M");
+        assert_eq!(fmt_volume(1_234_000_000.0, false), "1,2 mil M");
+        assert_eq!(fmt_volume(5_600.0, true), "5.6K");
+        assert_eq!(fmt_volume(950.0, false), "950");
+        assert_eq!(fmt_volume(250_000_000.0, false), "250 M");
+        // Cada tamaño enseña al menos un valor y nunca más de los que caben en la lista
+        for s in desk::Sz::ALL { let (n, _) = stocks_grid(s); assert!((1..=MAX_SYMBOLS).contains(&n), "{s:?}"); }
+        assert_eq!(stocks_grid(desk::Sz::Pequeno), (1, Look::Tile));
+        assert_eq!(stocks_grid(desk::Sz::Grande), (5, Look::Mini));
+    }
+
+    #[test]
     fn variacion_en_importe() {
-        let q = |p: f64, prev: f64, cur: &str, index: bool| Quote { sym: "X".into(), name: String::new(), currency: cur.into(), index, price: p, prev, time: 0, closes: vec![] };
+        let q = |p: f64, prev: f64, cur: &str, index: bool| Quote { sym: "X".into(), currency: cur.into(), index, price: p, prev, ..Default::default() };
         assert_eq!(fmt_change(&q(6.92, 6.998, "EUR", false), false), "\u{2212}0,08 €");
         assert_eq!(fmt_change(&q(228.41, 227.23, "USD", false), true), "+$1.18");
         assert_eq!(fmt_change(&q(11842.3, 11744.6, "EUR", true), false), "+97,70");
@@ -818,6 +1071,10 @@ mod tests {
             assert_eq!((&a.sym, &a.name, &a.currency, a.index, a.price, a.prev, a.time), (&b.sym, &b.name, &b.currency, b.index, b.price, b.prev, b.time));
             assert_eq!(a.closes, b.closes);
         }
+        for (a, b) in back.iter().zip(&qs) { assert_eq!((a.open, a.high, a.low, a.volume, a.wk_high, a.wk_low), (b.open, b.high, b.low, b.volume, b.wk_high, b.wk_low)); }
+        // Las de antes (8 campos, sin detalle) siguen valiendo
+        let old = cache_from_text("v1\t7\tdia\nAAPL\tApple\tUSD\t0\t228.41\t227.23\t5\t1,2\n").unwrap();
+        assert_eq!((old.2[0].price, old.2[0].open, old.2[0].volume), (228.41, 0.0, 0.0));
         // El último punto del día de muestra es el precio
         assert!(qs.iter().all(|q| (*q.closes.last().unwrap() as f64 - q.price).abs() < 0.01 * q.price));
     }

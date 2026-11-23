@@ -37,13 +37,22 @@ Reglas:
 | Almacenamiento | unidad principal (anillo) | 2 unidades (anillos) | todas en línea + papelera | todas en columna + papelera | todas + tamaño + papelera + lo más grande + liberar espacio | + usado por unidad + total | anillos + total + papelera + lo más grande + liberar espacio |
 | Proyectos | último proyecto | 3 recientes | 4 en tarjetas | 5 recientes | pestañas local/GitHub con rama y cambios | local y GitHub a la vez | dos columnas (local y GitHub) |
 | Móvil | batería + conexión | foto del móvil + estado + nº de avisos | — | foto + estado + accesos | + accesos + fotos recientes | + avisos por app | — |
-| Fotos | foto | foto horizontal | tira de 4 | foto vertical | foto grande | 2 fotos | collage |
-| Visualizador | espectro mini | espectro | espectro ancho | espectro vertical | espectro + título | + carátula | espectro grande + título |
-| Relojes | 1 reloj | 2 relojes | 4 relojes | 3 en columna | 4 en rejilla | 6 | 8 + diferencia horaria |
-| Tareas | nº pendientes + 1 tarea | 3 tareas | 4 en línea | 5 tareas | 7 + añadir | 12 + añadir | dos columnas |
-| Cuenta atrás | días | días + nombre | varias en línea | 2 cuentas | 3 cuentas | 5 cuentas | 4 en rejilla |
-| Noticias | 1 titular | 2 titulares | 3 titulares en línea | 4 titulares | 4 + fuente | 7 titulares | 2 columnas de 4 |
-| Bolsa | 1 valor + gráfica | 2 valores | 4 valores en línea | 4 valores | 5 + gráfica grande del primero | 8 valores | 4 + gráfica grande + detalle |
+| Fotos | foto | foto horizontal | tira de 4 | foto vertical | foto grande | 2 fotos | collage de 5 (una grande y 4) |
+| Visualizador | espectro mini | espectro + canción en la cabecera | espectro ancho + canción y artista | espectro vertical en espejo + canción | espectro + título | + carátula | espectro grande + título |
+| Relojes | 1 reloj | 2 relojes | 4 relojes | 3 en lista (esfera, hora y diferencia) | 4 en rejilla | 6 | 8 (con la diferencia horaria) |
+| Tareas | nº pendientes + 1 tarea | 3 tareas + añadir | 3 columnas + añadir | 8 tareas + añadir | 8 + añadir | 14 + añadir | dos columnas + añadir |
+| Cuenta atrás | días + nombre | días + nombre | 4 en línea | 2 cuentas | destacada + 3 en lista | destacada + 6 en lista | 4 en rejilla |
+| Noticias | 1 titular | 2 titulares en columnas | 3 titulares en línea | 3 titulares | 4 + fuente | 7 titulares | 2 columnas de 4 |
+| Bolsa | 1 valor + gráfica | 2 valores + gráfica | 4 valores en línea | 4 valores | 5 + gráfica grande del elegido | gráfica grande + 6 valores | 5 + gráfica grande + detalle |
+
+Ajustes de la tabla al hacer los clásicos (F4):
+- **Tareas**: el «+» de añadir está en todos los tamaños menos Pequeño (cabe en la cabecera y es lo que más se usa). Las listas llenan el alto (con rueda si hay más) y las pendientes van primero: una tarea que se marca se tacha y luego baja deslizándose al final.
+- **Relojes**: por defecto hay 8 ciudades (cada tamaño enseña las primeras). Si hay menos que huecos, se reparten el sitio y las esferas crecen.
+- **Cuenta atrás**: Pequeño también lleva el nombre (sin él no se sabe qué se cuenta). En Grande y Columna, la destacada arriba y las siguientes en lista (un clic la pasa arriba). Las rejillas pasan de página con puntos si hay más fechas que cajas.
+- **Noticias**: Alto, 3 (con 130 DIP de ancho, 4 titulares no caben con un título legible). Las líneas de cada titular salen del alto que le toca (de 1 a 4). «Titulares por página» ofrece 2, 3 o «Todos» (los que caben en el tamaño).
+- **Bolsa**: Columna lleva gráfica grande + 6 valores en vez de 8 filas iguales; Extragrande, 5 en la lista (cabe uno más que 4). En Grande, Columna y Extragrande un clic en una fila pasa ese valor a la gráfica grande (en Columna y Extragrande, un segundo clic abre Yahoo). El detalle enseña los 4 primeros que dé Yahoo de: apertura, máximo/mínimo del día, cierre anterior, volumen y 52 semanas.
+- **Visualizador**: con más barras que bandas de audio (los anchos) se interpola entre bandas para que las barras no salgan gordas.
+
 
 **Ajustes al hacerlo (lote de los siete clásicos de `deskw.rs`):** la tabla de arriba ya es la que se hizo; cambia respecto a la primera idea en lo que los datos no dan o no tenía sentido:
 - **Tiempo:** la previsión (Open-Meteo) trae 6 días (`forecast_days=6`) y no trae viento ni índice UV, así que no hay «7 días» y los detalles son lluvia, sol (amanecer y anochecer), mañana y el margen de las próximas 24 h.

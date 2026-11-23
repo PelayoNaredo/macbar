@@ -17,17 +17,89 @@ pub(crate) fn tint() -> [f32; 3] {
 }
 
 // ---------------------------------------------------------------- visualizador de audio
-/// Barras del espectro de lo que suena, con el color de la carátula y su reflejo debajo.
-pub struct VisualW { levels: [f32; audioviz::BANDS], alive: f32 }
+/// Barras del espectro de lo que suena, con el color de la carátula y su reflejo debajo. Responsive:
+/// el espectro ocupa lo que deja cada tamaño (en Alto, de lado y en espejo), y los grandes añaden la
+/// canción (Grande y Extragrande) y la carátula (Columna).
+pub struct VisualW { levels: [f32; audioviz::BANDS], alive: f32, art: Option<(u64, ID2D1Bitmap)>, rt: crate::RtKey }
 
-impl Default for VisualW { fn default() -> Self { VisualW { levels: [0.0; audioviz::BANDS], alive: 0.0 } } }
+impl Default for VisualW { fn default() -> Self { VisualW { levels: [0.0; audioviz::BANDS], alive: 0.0, art: None, rt: crate::RtKey::default() } } }
+
+impl VisualW {
+    /// Nivel de la barra `j` de `n`: con menos barras que bandas, cada una junta las suyas; con más (los
+    /// anchos), se interpola entre bandas vecinas para que las barras no salgan gordas.
+    fn level(&self, j: usize, n: usize) -> f32 {
+        let b = audioviz::BANDS;
+        if n > b {
+            let x = j as f32 * (b - 1) as f32 / (n - 1).max(1) as f32;
+            let (i, f) = (x.floor() as usize, x.fract());
+            return self.levels[i.min(b - 1)] * (1.0 - f) + self.levels[(i + 1).min(b - 1)] * f;
+        }
+        let (a, z) = (j * b / n, ((j + 1) * b / n).max(j * b / n + 1));
+        self.levels[a..z.min(b)].iter().copied().fold(0.0, f32::max)
+    }
+    /// Barras verticales en `r`: crecen desde una base con su reflejo debajo (el reflejo cabe en `r`).
+    fn bars(&self, ui: &Ui, r: D2D_RECT_F, tn: [f32; 3]) {
+        let gap = 3.0;
+        // Barras de unos 6,5 DIP con su hueco, las que quepan en el ancho
+        let n = (((r.right - r.left + gap) / 9.5).round() as usize).clamp(8, 96);
+        let bw = ((r.right - r.left) - gap * (n as f32 - 1.0)) / n as f32;
+        let base = r.bottom - (r.bottom - r.top) * 0.2;
+        let maxh = base - r.top;
+        unsafe {
+            for j in 0..n {
+                let v = self.level(j, n);
+                let x = r.left + j as f32 * (bw + gap);
+                // En silencio quedan puntos que respiran despacio, como un ecualizador dormido
+                let idle = 2.5 + 1.5 * (0.5 + 0.5 * (ui_time() * 1.6 + j as f32 * 0.35 * 36.0 / n as f32).sin());
+                let bh = (v * maxh).max(idle * (1.0 - self.alive) + 3.0 * self.alive);
+                let fill = ui.brush(rgba(tn[0], tn[1], tn[2], 0.55 + 0.45 * v));
+                ui.rt.FillRoundedRectangle(&rrect(rect(x, base - bh, x + bw, base), bw / 2.0), &fill);
+                // Reflejo tenue bajo la línea base
+                let refl = ui.brush(rgba(tn[0], tn[1], tn[2], 0.12 * v));
+                let rh = (bh * 0.28).min(r.bottom - base - 4.0).max(0.0);
+                ui.rt.FillRoundedRectangle(&rrect(rect(x, base + 4.0, x + bw, base + 4.0 + rh), bw / 2.0), &refl);
+            }
+        }
+    }
+    /// Espectro de lado (Alto): una barra por fila, en espejo desde el eje del centro; los graves arriba.
+    fn bars_side(&self, ui: &Ui, r: D2D_RECT_F, n: usize, tn: [f32; 3]) {
+        let gap = 3.0;
+        let bh = ((r.bottom - r.top) - gap * (n as f32 - 1.0)) / n as f32;
+        let cx = (r.left + r.right) / 2.0;
+        let half = (r.right - r.left) / 2.0;
+        unsafe {
+            for j in 0..n {
+                let v = self.level(j, n);
+                let y = r.top + j as f32 * (bh + gap);
+                let idle = 2.5 + 1.5 * (0.5 + 0.5 * (ui_time() * 1.6 + j as f32 * 0.35 * 36.0 / n as f32).sin());
+                let len = (v * half).max(idle * (1.0 - self.alive) + 3.0 * self.alive);
+                let fill = ui.brush(rgba(tn[0], tn[1], tn[2], 0.55 + 0.45 * v));
+                ui.rt.FillRoundedRectangle(&rrect(rect(cx - len, y, cx + len, y + bh), bh / 2.0), &fill);
+            }
+        }
+    }
+    /// Título y artista (o la invitación a poner música) con la primera línea en `f`.
+    fn song(ui: &Ui, f: &IDWriteTextFormat, m: &Option<MediaInfo>, x: f32, y: f32, maxw: f32, lines: bool) {
+        match m {
+            Some(m) => {
+                ui.text(f, &crate::news::fit(ui, f, &m.title, maxw), x, y, 24.0, &ui.white);
+                let sub = if lines && !m.album.is_empty() { format!("{} · {}", m.artist, m.album) } else { m.artist.clone() };
+                ui.text(&ui.f.sub, &crate::news::fit(ui, &ui.f.sub, &sub, maxw), x, y + 24.0, 18.0, &ui.dim);
+            }
+            None => {
+                ui.text(f, i18n::t("Nada sonando"), x, y, 24.0, &ui.dim);
+                ui.text(&ui.f.sub, i18n::t("Pon algo de música"), x, y + 24.0, 18.0, &ui.faint);
+            }
+        }
+    }
+}
 
 impl Widget for VisualW {
     fn paint(&mut self, ui: &mut Ui, d: &DFonts, _t: f32, dt: f32) {
-        let (w, h) = size(Kind::Visual);
+        let l = desk::lay(Kind::Visual);
+        let (w, h) = (l.w, l.h);
+        if self.rt.fresh(ui.rt) { self.art = None; }
         let m = MEDIA.lock().unwrap().clone();
-        let right = m.as_ref().map(|m| trunc(&m.title, 30)).unwrap_or_default();
-        header(ui, d, i18n::t("Sonido"), &right, w);
         let src = *audioviz::LEVELS.lock().unwrap();
         // Lo que llega del hilo se suaviza aún un poco al pintar (sin saltos entre fotogramas)
         let k = 1.0 - (-dt / 0.05).exp();
@@ -36,29 +108,74 @@ impl Widget for VisualW {
         let on = energy / audioviz::BANDS as f32 > 0.02;
         self.alive += ((if on { 1.0 } else { 0.0 }) - self.alive) * (1.0 - (-dt / 0.3).exp());
         let tn = tint();
-        let (x0, x1, base) = (PAD, w - PAD, h - 48.0);
-        let n = audioviz::BANDS as f32;
-        let gap = 3.0;
-        let bw = ((x1 - x0) - gap * (n - 1.0)) / n;
-        let maxh = base - 62.0;
-        unsafe {
-            for (i, v) in self.levels.iter().enumerate() {
-                let x = x0 + i as f32 * (bw + gap);
-                // En silencio quedan puntos que respiran despacio, como un ecualizador dormido
-                let idle = 2.5 + 1.5 * (0.5 + 0.5 * (ui_time() * 1.6 + i as f32 * 0.35).sin());
-                let bh = (v * maxh).max(idle * (1.0 - self.alive) + 3.0 * self.alive);
-                let top = base - bh;
-                let fill = ui.brush(rgba(tn[0], tn[1], tn[2], 0.55 + 0.45 * v));
-                ui.rt.FillRoundedRectangle(&rrect(rect(x, top, x + bw, base), bw / 2.0), &fill);
-                // Reflejo tenue bajo la línea base
-                let refl = ui.brush(rgba(tn[0], tn[1], tn[2], 0.12 * v));
-                ui.rt.FillRoundedRectangle(&rrect(rect(x, base + 4.0, x + bw, base + 4.0 + bh * 0.28), bw / 2.0), &refl);
+        let idle_msg = m.is_none() && !on;
+        // La canción, a la derecha de la cabecera (en los que no la enseñan aparte)
+        let head = |ui: &Ui, maxc: usize| {
+            let right = m.as_ref().map(|m| trunc(&m.title, maxc)).unwrap_or_default();
+            header(ui, d, i18n::t("Sonido"), &right, w);
+        };
+        use desk::Sz::*;
+        match l.sz {
+            Pequeno => {
+                self.bars(ui, rect(PAD, PAD + 8.0, w - PAD, h - PAD + 4.0), tn);
+                if idle_msg { ui.text_c(&ui.f.sub, i18n::t("Sin sonido"), w / 2.0, h - 38.0, 18.0, &ui.dim); }
+            }
+            Mediano | Banda => {
+                if l.sz == Banda {
+                    let right = m.as_ref().map(|m| trunc(&format!("{} · {}", m.title, m.artist), 70)).unwrap_or_default();
+                    header(ui, d, i18n::t("Sonido"), &right, w);
+                } else { head(ui, 30); }
+                self.bars(ui, rect(PAD, 58.0, w - PAD, h - 14.0), tn);
+                if idle_msg { ui.text_c(&ui.f.sub, i18n::t("Pon algo de música"), w / 2.0, h - 36.0, 18.0, &ui.dim); }
+            }
+            Alto => {
+                header(ui, d, i18n::t("Sonido"), "", w);
+                self.bars_side(ui, rect(PAD, 58.0, w - PAD, h - 62.0), 24, tn);
+                // La canción, abajo y en dos líneas cortas
+                Self::song(ui, &ui.f.name, &m, PAD, h - PAD - 40.0, w - 2.0 * PAD, false);
+            }
+            Grande => {
+                header(ui, d, i18n::t("Sonido"), "", w);
+                self.bars(ui, rect(PAD, 62.0, w - PAD, h - 82.0), tn);
+                Self::song(ui, &d.title, &m, PAD, h - PAD - 44.0, w - 2.0 * PAD, false);
+            }
+            Columna => {
+                header(ui, d, i18n::t("Sonido"), "", w);
+                // Carátula grande arriba, la canción debajo y el espectro hasta el final
+                let side = w - 2.0 * PAD;
+                let (ax, ay) = (PAD, 58.0);
+                let ver = m.as_ref().map(|m| m.art_ver);
+                if self.art.as_ref().map(|a| a.0) != ver {
+                    self.art = ver.and_then(|v| ART_BIG.lock().unwrap().as_ref().filter(|a| a.0 == v).and_then(|(v, px)| deskw::bitmap(ui.rt, px, ART_BIG_PX).map(|b| (*v, b))));
+                }
+                let side = side.min(h - ay - 190.0);
+                let ax = ax + (w - 2.0 * PAD - side) / 2.0;
+                unsafe {
+                    match &self.art {
+                        Some((_, b)) => {
+                            let s = side / ART_BIG_PX as f32;
+                            let props = D2D1_BRUSH_PROPERTIES { opacity: 1.0, transform: Matrix3x2 { M11: s, M12: 0.0, M21: 0.0, M22: s, M31: ax, M32: ay } };
+                            if let Ok(br) = ui.rt.CreateBitmapBrush(b, None, Some(&props)) { ui.rt.FillRoundedRectangle(&rrect(rect(ax, ay, ax + side, ay + side), 14.0), &br); }
+                            ui.rt.DrawRoundedRectangle(&rrect(rect(ax + 0.5, ay + 0.5, ax + side - 0.5, ay + side - 0.5), 13.5), &ui.wa(0.12), 1.0, None);
+                        }
+                        None => {
+                            ui.rt.FillRoundedRectangle(&rrect(rect(ax, ay, ax + side, ay + side), 14.0), &ui.wa(0.06));
+                            ui.glyph(&d.glyph_l, "\u{E8D6}", ax, ay, side, side, &ui.faint);
+                        }
+                    }
+                }
+                let ty = ay + side + 14.0;
+                Self::song(ui, &d.title, &m, PAD, ty, w - 2.0 * PAD, true);
+                self.bars(ui, rect(PAD, ty + 54.0, w - PAD, h - 8.0), tn);
+            }
+            Extragrande => {
+                header(ui, d, i18n::t("Sonido"), m.as_ref().map(|m| m.app.trim_end_matches(".exe")).unwrap_or(""), w);
+                self.bars(ui, rect(PAD, 62.0, w - PAD, h - 84.0), tn);
+                Self::song(ui, &d.big, &m, PAD, h - PAD - 46.0, w - 2.0 * PAD, true);
             }
         }
-        if m.is_none() && !on {
-            ui.text_c(&ui.f.sub, i18n::t("Pon algo de música"), w / 2.0, h - 36.0, 18.0, &ui.dim);
-        }
     }
+    fn layouts(&self) -> bool { true }
     fn click(&mut self, _id: Option<u32>, _right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> { None }
     fn tick(&mut self) -> bool {
         // Solo captura mientras se ve (tapado por ventanas no gasta nada)
@@ -188,10 +305,34 @@ fn deskdata_rand() -> u64 {
 }
 
 /// Foto en pantalla: imagen, cuándo apareció y su recorrido lento (zoom y desplazamiento, efecto Ken Burns).
-struct Shown { ver: u64, bmp: ID2D1Bitmap, w: f32, h: f32, at: Instant, path: String, z: (f32, f32), pan: (f32, f32, f32, f32) }
+struct Shown { bmp: ID2D1Bitmap, w: f32, h: f32, at: Instant, path: String, z: (f32, f32), pan: (f32, f32, f32, f32) }
 
+/// Un hueco del marco: la foto que se ve y la que se va (fundido).
 #[derive(Default)]
-pub struct PhotosW { cur: Option<Shown>, prev: Option<Shown>, rt: crate::RtKey, asked_at: Option<Instant> }
+struct Slot { cur: Option<Shown>, prev: Option<Shown> }
+
+/// Marco de fotos. Responsive: una foto que llena el marco (Pequeño, Mediano, Alto, Grande), una tira
+/// de 4 (Banda), 2 apiladas (Columna) o un collage de 5 (Extragrande). Cada hueco cambia a su ritmo.
+#[derive(Default)]
+pub struct PhotosW { slots: Vec<Slot>, rt: crate::RtKey, used: u64, want: Option<usize> }
+
+/// Huecos de cada tamaño (DIP del widget) y su radio.
+fn photo_slots(l: desk::Lay) -> (Vec<D2D_RECT_F>, f32) {
+    let (w, h, g) = (l.w, l.h, 6.0);
+    match l.sz {
+        desk::Sz::Banda => { let cw = (w - 3.0 * g) / 4.0; ((0..4).map(|i| rect(i as f32 * (cw + g), 0.0, i as f32 * (cw + g) + cw, h)).collect(), 14.0) }
+        desk::Sz::Columna => { let ch = (h - g) / 2.0; (vec![rect(0.0, 0.0, w, ch), rect(0.0, ch + g, w, h)], 14.0) }
+        desk::Sz::Extragrande => {
+            // La grande a la izquierda y cuatro pequeñas en rejilla a la derecha
+            let big = h;
+            let (x0, cw, ch) = (big + g, (w - big - 2.0 * g) / 2.0, (h - g) / 2.0);
+            let mut v = vec![rect(0.0, 0.0, big, h)];
+            for r in 0..2 { for c in 0..2 { let (x, y) = (x0 + c as f32 * (cw + g), r as f32 * (ch + g)); v.push(rect(x, y, x + cw, y + ch)); } }
+            (v, 14.0)
+        }
+        _ => (vec![rect(0.0, 0.0, w, h)], 16.0),
+    }
+}
 
 /// Recorrido de cada foto: acerca o aleja un 8 % y se desplaza un poco en una dirección al azar.
 fn ken_burns(seed: u64) -> ((f32, f32), (f32, f32, f32, f32)) {
@@ -203,8 +344,9 @@ fn ken_burns(seed: u64) -> ((f32, f32), (f32, f32, f32, f32)) {
 }
 
 impl PhotosW {
-    fn draw(ui: &Ui, s: &Shown, w: f32, h: f32, alpha: f32) {
-        let t = (s.at.elapsed().as_secs_f32() / (SHOW_S + FADE_S)).clamp(0.0, 1.0);
+    fn draw(ui: &Ui, s: &Shown, r: D2D_RECT_F, rad: f32, show: f32, alpha: f32) {
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        let t = (s.at.elapsed().as_secs_f32() / (show + FADE_S)).clamp(0.0, 1.0);
         let z = s.z.0 + (s.z.1 - s.z.0) * t;
         // Cubrir el marco (como «rellenar» en un fondo de pantalla)
         let cover = (w / s.w).max(h / s.h) * z;
@@ -212,65 +354,88 @@ impl PhotosW {
         let (sx, sy) = ((dw - w) / 2.0, (dh - h) / 2.0);
         let px = s.pan.0 + (s.pan.2 - s.pan.0) * t;
         let py = s.pan.1 + (s.pan.3 - s.pan.1) * t;
-        let (ox, oy) = (-sx + px * sx, -sy + py * sy);
+        let (ox, oy) = (r.left - sx + px * sx, r.top - sy + py * sy);
         unsafe {
             let props = D2D1_BRUSH_PROPERTIES { opacity: alpha, transform: Matrix3x2 { M11: cover, M12: 0.0, M21: 0.0, M22: cover, M31: ox, M32: oy } };
             if let Ok(br) = ui.rt.CreateBitmapBrush(&s.bmp, None, Some(&props)) {
-                ui.rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, w, h), 16.0), &br);
+                ui.rt.FillRoundedRectangle(&rrect(r, rad), &br);
             }
         }
     }
 }
 
+/// Lo que dura cada foto en el hueco `i` (los huecos no cambian todos a la vez).
+fn show_s(i: usize) -> f32 { SHOW_S + 3.7 * i as f32 }
+
 impl Widget for PhotosW {
     fn paint(&mut self, ui: &mut Ui, _d: &DFonts, _t: f32, _dt: f32) {
         photo_start();
-        let (w, h) = size(Kind::Photos);
-        if self.rt.fresh(ui.rt) { self.cur = None; self.prev = None; }
-        // ¿Hay una foto nueva preparada? Entra con un fundido sobre la anterior
+        let l = desk::lay(Kind::Photos);
+        let (w, h) = (l.w, l.h);
+        let (rects, rad) = photo_slots(l);
+        if self.rt.fresh(ui.rt) { self.slots.clear(); self.used = 0; self.want = None; }
+        self.slots.resize_with(rects.len(), Slot::default);
+        // ¿Hay una foto nueva preparada? Entra con un fundido sobre la anterior, en el hueco que la pidió
+        // (o en el primero vacío)
         let ready = PHOTO.lock().unwrap().clone();
         if let Some((ver, px, pw, ph, path)) = ready {
-            if self.cur.as_ref().is_none_or(|c| c.ver != ver) {
+            let to = self.want.or_else(|| self.slots.iter().position(|s| s.cur.is_none()));
+            if let Some(i) = to.filter(|_| ver != self.used) {
                 let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0, dpiY: 96.0 };
                 if let Ok(bmp) = unsafe { ui.rt.CreateBitmap(D2D_SIZE_U { width: pw, height: ph }, Some(px.as_ptr() as _), pw * 4, &bp) } {
                     let (z, pan) = ken_burns(deskdata_rand());
-                    let had = self.cur.is_some();
-                    self.prev = self.cur.take();
+                    let s = &mut self.slots[i];
+                    let had = s.cur.is_some();
+                    s.prev = s.cur.take();
                     // Al arrancar, sin fundido desde la nada
                     let at = if had { Instant::now() } else { Instant::now() - Duration::from_secs_f32(FADE_S) };
-                    self.cur = Some(Shown { ver, bmp, w: pw as f32, h: ph as f32, at, path, z, pan });
-                    self.asked_at = None;
+                    s.cur = Some(Shown { bmp, w: pw as f32, h: ph as f32, at, path, z, pan });
+                    self.used = ver;
+                    self.want = None;
                 }
             }
         }
-        match &self.cur {
-            None => {
-                unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, w, h), 16.0), &ui.wa(0.06)); }
-                ui.glyph(&ui.f.icon_xl, "\u{EB9F}", w / 2.0 - 20.0, h / 2.0 - 40.0, 40.0, 40.0, &ui.dim);
-                ui.text_c(&ui.f.sub, i18n::t("Clic derecho para elegir una carpeta de fotos"), w / 2.0, h / 2.0 + 8.0, 18.0, &ui.dim);
-            }
-            Some(c) => {
-                let k = (c.at.elapsed().as_secs_f32() / FADE_S).clamp(0.0, 1.0);
-                if let Some(p) = &self.prev { if k < 1.0 { Self::draw(ui, p, w, h, 1.0); } }
-                Self::draw(ui, c, w, h, popup::ease_out(k));
-                if k >= 1.0 { self.prev = None; }
-                // Pide la siguiente un poco antes de que toque cambiar
-                if c.at.elapsed().as_secs_f32() > SHOW_S - 2.0 && self.asked_at.is_none() { NEXT_ASKED.store(true, Ordering::Relaxed); self.asked_at = Some(Instant::now()); }
-                // Borde fino de cristal
-                unsafe { ui.rt.DrawRoundedRectangle(&rrect(rect(0.5, 0.5, w - 0.5, h - 0.5), 15.5), &ui.wa(0.14), 1.0, None); }
-            }
+        // Se pide la siguiente para un hueco vacío o para el que ya casi ha cumplido su tiempo
+        if self.want.is_none() {
+            let due = self.slots.iter().position(|s| s.cur.is_none())
+                .or_else(|| (0..self.slots.len()).find(|&i| self.slots[i].cur.as_ref().is_some_and(|c| c.at.elapsed().as_secs_f32() > show_s(i) - 2.0)));
+            if let Some(i) = due { self.want = Some(i); NEXT_ASKED.store(true, Ordering::Relaxed); }
         }
-        ui.hit(rect(0.0, 0.0, w, h), 1);
+        if self.slots.iter().all(|s| s.cur.is_none()) {
+            unsafe { ui.rt.FillRoundedRectangle(&rrect(rect(0.0, 0.0, w, h), 16.0), &ui.wa(0.06)); }
+            ui.glyph(&ui.f.icon_xl, "\u{EB9F}", w / 2.0 - 20.0, h / 2.0 - 40.0, 40.0, 40.0, &ui.dim);
+            let msg = if l.sz == desk::Sz::Pequeno || l.sz == desk::Sz::Alto { i18n::t("Clic derecho: carpeta") } else { i18n::t("Clic derecho para elegir una carpeta de fotos") };
+            ui.text_c(&ui.f.sub, msg, w / 2.0, h / 2.0 + 8.0, 18.0, &ui.dim);
+            ui.hit(rect(0.0, 0.0, w, h), 1);
+            return;
+        }
+        for (i, r) in rects.iter().enumerate() {
+            let s = &mut self.slots[i];
+            match &s.cur {
+                None => unsafe { ui.rt.FillRoundedRectangle(&rrect(*r, rad), &ui.wa(0.06)); },
+                Some(c) => {
+                    let k = (c.at.elapsed().as_secs_f32() / FADE_S).clamp(0.0, 1.0);
+                    if let Some(p) = &s.prev { if k < 1.0 { Self::draw(ui, p, *r, rad, show_s(i), 1.0); } }
+                    Self::draw(ui, c, *r, rad, show_s(i), popup::ease_out(k));
+                    if k >= 1.0 { s.prev = None; }
+                }
+            }
+            // Borde fino de cristal
+            unsafe { ui.rt.DrawRoundedRectangle(&rrect(rect(r.left + 0.5, r.top + 0.5, r.right - 0.5, r.bottom - 0.5), rad - 0.5), &ui.wa(0.14), 1.0, None); }
+            ui.hit(*r, 1 + i as u32);
+        }
     }
     fn click(&mut self, id: Option<u32>, right: bool, _pt: POINT) -> Option<Box<dyn FnOnce()>> {
         if right { return Some(Box::new(pick_folder)); }
-        // Clic: abre la foto que se ve
-        let p = self.cur.as_ref().map(|c| c.path.clone()).filter(|_| id.is_some())?;
+        // Clic: abre la foto de ese hueco
+        let i = id?.checked_sub(1)? as usize;
+        let p = self.slots.get(i)?.cur.as_ref()?.path.clone();
         Some(Box::new(move || sys::open(&p)))
     }
     fn tick(&mut self) -> bool { true }
-    fn animating(&self, _t: f32) -> bool { self.cur.is_some() }
+    fn animating(&self, _t: f32) -> bool { self.slots.iter().any(|s| s.cur.is_some()) }
     fn frame_ms(&self) -> u32 { 33 }
+    fn layouts(&self) -> bool { true }
 }
 
 /// Elegir la carpeta de las fotos (se guarda en widgets.ini como `fotos_carpeta`).
@@ -294,6 +459,22 @@ pub(crate) fn pick_folder() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huecos_del_marco() {
+        use desk::{Lay, Sz};
+        for sz in Sz::ALL {
+            let (w, h) = sz.dims();
+            let (v, _) = photo_slots(Lay { w, h, sz });
+            let n = match sz { Sz::Banda => 4, Sz::Columna => 2, Sz::Extragrande => 5, _ => 1 };
+            assert_eq!(v.len(), n, "{sz:?}");
+            // Dentro del widget, con tamaño y sin pisarse
+            for (i, a) in v.iter().enumerate() {
+                assert!(a.left >= 0.0 && a.top >= 0.0 && a.right <= w + 0.01 && a.bottom <= h + 0.01 && a.right - a.left > 100.0 && a.bottom - a.top > 100.0, "{sz:?} {i}");
+                for b in &v[i + 1..] { assert!(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top, "{sz:?}"); }
+            }
+        }
+    }
 
     #[test]
     fn recorrido_de_las_fotos() {
