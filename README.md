@@ -32,7 +32,8 @@
 - **Weather panel** powered by [Open‑Meteo](https://open-meteo.com) (no API key): current conditions, hourly and 6‑day forecast, animated icons.
 - **Calendar & clock** with month navigation and a quick timer.
 - **Search** (the magnifier): Start-menu apps (Store apps too), files and folders from the Windows Search index, Settings pages, a calculator and web search. Keyboard driven: type, ↑/↓, Enter; Ctrl+Enter opens a file's folder.
-- **System tray** icons, battery and user avatar. macbar's own icon in the hidden-icons panel opens its menu.
+- **System tray** icons, battery and user avatar. macbar's own icon in the hidden-icons panel opens Settings.
+- **Bluetooth** icon next to Wi‑Fi with a devices panel and an island notice when a device connects.
 - **Cascading entrance animations** in the panels.
 - **Auto-hides with fullscreen apps** (games, video, F11) and comes back afterwards.
 - **Native & tiny**: a single small `.exe`, Direct2D/DirectWrite rendering, per-monitor DPI aware, near-zero idle CPU.
@@ -70,7 +71,7 @@ Click the island and it widens, drops down and turns into a card; the album art 
   <img src="docs/macbar-phone-widget.png" alt="macbar phone widget for Phone Link: battery, latest photos and phone notifications" width="200">
 </p>
 
-Large, animated widgets that sit on the desktop (under your windows), rendered with Direct2D + DirectComposition on the GPU. Drag them anywhere — their positions are saved — and pick floating (no background) or glass-card style. Turn each one on or off from the bar's right-click menu.
+Large, animated widgets that sit on the desktop (under your windows), rendered with Direct2D + DirectComposition on the GPU. Drag them anywhere — their positions are saved — resize them to one of 7 sizes, pick an alternative design and floating (no background) or glass-card style. Turn each one on or off in Settings.
 
 - **Calendar** with timers and day details.
 - **Weather** with an animated hourly curve, sunrise/sunset and 6-day forecast.
@@ -80,11 +81,106 @@ Large, animated widgets that sit on the desktop (under your windows), rendered w
 - **Projects**: local Git repos and your GitHub repos, opened in Explorer, VS Code or a terminal.
 - **Phone (Phone Link)**: a Phone Link–style header (phone frame with your wallpaper, name, battery, connection), shortcuts to messages, calls and photos, your phone's 3 latest photos and the phone notifications Phone Link mirrors to Windows.
 
+## User guide
+
+> The interface is in Spanish (English if Windows is in English). Labels below are given in English with the Spanish name in *italics* where it helps.
+
+### The bar
+
+| Where | Click | Right-click / other |
+|---|---|---|
+| Logo (left) | Control Center | — |
+| App menus | Menus of the active window (File, Edit, View…) | Hover across menus to hop between them |
+| Island (centre) | Opens the **island card** | Middle-click: play/pause · Horizontal swipe (touchpad / tilt wheel): next/previous track |
+| Search (magnifier) | Search panel | — |
+| Tray arrow | Hidden tray icons (blue dot = an icon wants attention) | macbar's own icon there opens **Settings** |
+| Wi‑Fi | Networks, one-click connect | — |
+| Bluetooth | Radio switch, paired devices (type, status, battery), *Add device…* | — |
+| Weather | Hourly and 6-day forecast | — |
+| Clock | Calendar and quick timer | — |
+| Empty part of the bar | — | Short menu: *Configuración…*, widgets, desktop face, presentation mode, caffeine, Pomodoro, color picker, quick note, quit |
+
+When a window is maximized the bar turns solid and joins it (can be turned off in Settings). With fullscreen apps it hides itself.
+
+### The island
+
+The pill in the middle shows what is going on: music, timers, calls (with mute), downloads, charging time, volume/brightness, Wi‑Fi and Bluetooth connections, camera/mic in use, low battery, disk almost full, high CPU…
+
+Click it to open the **card**:
+
+- **Music**: big artwork, draggable progress, ±15 s, controls.
+- **Timer & Pomodoro**: ring, +1 min, pause, skip phase, *Repeat*.
+- **Call**: mute and go back to the call app.
+- **Audio**: choose the output device, volume and mute.
+- **Shelf**: drop files on the island (or **shake the mouse while dragging a file** to get a drop basket next to the cursor). Open, share, drag out, **ZIP**, **convert to PNG/JPG**, **copy text from an image (OCR)**.
+- **Glance** (optional): clock, weather, battery and shortcuts.
+
+Card keys: `Space` play/pause · `←`/`→` ±5 s · `↑`/`↓` volume · `Esc` close.
+
+### Search
+
+Open it with the magnifier and type. `↑`/`↓` to move, `Enter` to run, `Ctrl+Enter` opens a file's folder. With the box empty you see recent items and the last copied texts.
+
+| Type | What it does |
+|---|---|
+| an app, file, folder or setting name | Opens it (Start menu apps, Windows Search index, Settings pages) |
+| `2*(3+4)` | Calculator (`Enter` copies the result) |
+| `10 km to mi`, `5 kg en lb`, `30 c to f` | Unit conversion |
+| `5 min`, `timer 90s`, `1h 30m` | Starts a timer in the island |
+| `yt cats`, `gh macbar`, `w Madrid`, `maps cafe`, `tr hello`, `r rust`, `img dogs`, `so borrow`, `crates serde`, `npm react` | Searches that site |
+| `:fire` | Emoji picker |
+| `#ff8800`, `rgb(255,136,0)` | Colour preview |
+| `left`, `right`, `top`, `bottom`, `max`, `almost`, `center`, `min` (or *izquierda*, *maximizar*…) | Snaps the window you were using |
+| `uuid` · `password 24` · `b64 text` · `ts 1700000000` · `ip` · `lorem` | Dev tools (`Enter` copies) |
+| `lock`, `sleep`, `dark`, `mute`, `shot`, `desktop`, `trash`, `taskmgr`, `restart`, `shutdown` | System commands |
+| `caffeine`, `pomodoro`, `picker`, `note`, `face`, `present`, `settings` | macbar tools |
+| anything else | Web search |
+
+The clipboard history lives only in memory and skips passwords and anything password managers mark as private.
+
+### Desktop and widgets
+
+- **Two desktop faces**: one for widgets, one for your icons. **Double-click an empty spot of the desktop** or press **`Win+Alt+W`** to switch.
+- **Turn widgets on/off** in *Configuración → Escritorio y widgets*. New widgets start hidden.
+- **Move**: drag the widget. Positions are saved; widgets never overlap.
+- **Size**: drag the handle in the bottom-right corner (it snaps to the nearest size), or right-click → *Tamaño*, or choose it in Settings. Sizes: Small, Medium, Strip, Tall, Large, Column, Extra large. The content changes with the size.
+- **Design**: right-click → *Diseño*, or in Settings. Each widget has alternative designs (e.g. Weather *Sky*/*Minimal*, Music *Artwork*/*Vinyl*/*Cassette*, Clocks *Eye*, Storage *Tubes*); each design offers only the sizes where it makes sense.
+- **Style**: floating (no background) or glass card.
+
+Widgets: Calendar, Weather, Music, System, Storage, Projects, Phone (Phone Link), Visualizer, Photos, World clocks, To-do, Countdown, **News** and **Stocks**.
+
+- **News**: in *Configuración → Noticias* pick Google News topics, country and language, add your own RSS/Atom feeds (checked when you add them), mute words and hide outlets.
+- **Stocks**: in *Configuración → Bolsa* search a company by name (`santander` → `SAN.MC`), reorder by dragging, and choose the chart period, % or amount and refresh rate. Data from Yahoo Finance.
+- **To-do / Countdown / Clocks**: edit them directly in the widget.
+
+### Tools
+
+| Tool | How |
+|---|---|
+| **Caffeine** (keep the PC awake) | Bar menu, search `caffeine` or `caffeine 2h` |
+| **Pomodoro** | Bar menu or search `pomodoro`; controls in the island card |
+| **Color picker** | Bar menu or search `picker`; click a pixel to copy its HEX |
+| **Quick note** | Bar menu or search `note`. Hidden from screenshots and screen sharing |
+| **Presentation mode** | Bar menu or search `present`. Hides widgets and notices |
+| **Profiles and themes** | *Configuración → Perfiles y temas*: Work / Leisure / Personal, accent colour, export/import `.macbartema` |
+
+### Settings
+
+Open them from macbar's icon among the hidden tray icons, from the bar's right-click menu (*Configuración…*) or by searching `settings`. Everything is there: bar (position top/bottom, solid bar, Bluetooth icon), island and card (open on click/hover, glance, which notices to show), desktop and widgets (on/off, size, design, style), News, Stocks, weather location, profiles and themes, and *Iniciar con Windows*.
+
+### Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| `Win+Alt+W` | Switch desktop face (widgets ↔ icons) |
+| `Space` / `←` `→` / `↑` `↓` / `Esc` | In the island card: play-pause / ±5 s / volume / close |
+| `↑` `↓` `Enter` / `Ctrl+Enter` | In search: move / open / open containing folder |
+
 ## Download
 
 Grab `macbar.exe` from the [latest release](https://github.com/PelayoNaredo/macbar/releases/latest) and run it. No installer, no dependencies.
 
-To start it with Windows, right-click the bar (or click macbar's icon in the hidden-icons panel) and tick **Iniciar con Windows**.
+To start it with Windows, open Settings (macbar's icon in the hidden-icons panel, or right-click the bar → *Configuración…*) and turn on **Iniciar con Windows**.
 
 Requirements: Windows 11 (Windows 10 may work but is untested), x64.
 
