@@ -722,4 +722,9 @@ pub static EN: &[(&str, &str)] = &[
     ("SEMANA {}", "WEEK {}"),
     ("DÍA {} DE {}", "DAY {} OF {}"),
     ("TOTAL", "TOTAL"),
+    ("EN LOCAL", "LOCAL"),
+    ("mañana", "tomorrow"),
+    ("Sin previsión por ahora", "No forecast yet"),
+    ("Se vuelve a pedir en unos minutos", "Trying again in a few minutes"),
+    ("Máx {}°  Mín {}°", "H {}°  L {}°"),
 ];

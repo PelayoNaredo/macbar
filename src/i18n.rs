@@ -35,6 +35,12 @@ pub fn en() -> bool {
     e
 }
 
+/// Fija el idioma solo en memoria, sin guardarlo (render fuera de pantalla de los widgets).
+pub fn force(en: bool) {
+    MODE.store(if en { 2 } else { 1 }, Ordering::Relaxed);
+    EN.store(en as i8, Ordering::Relaxed);
+}
+
 /// Cambia el idioma (menú de macbar) y lo guarda en config.ini como `idioma`.
 pub fn set_mode(m: i8) {
     MODE.store(m, Ordering::Relaxed);

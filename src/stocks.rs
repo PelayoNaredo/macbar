@@ -435,7 +435,8 @@ pub(crate) fn warm() { ensure_started(); }
 
 fn ensure_started() {
     STARTED.call_once(|| {
-        if sys::demo() { demo_fill(); return; }
+        // (render de estados vacíos: sin red)
+        if sys::demo() { if desk::shot_empty() { let mut sh = SHARED.lock().unwrap(); sh.offline = true; sh.ver += 1; } else { demo_fill(); } return; }
         let mut last_try = 0;
         let mut last_period = Period::Day;
         if let Some((f, p, qs)) = std::fs::read_to_string(cache_path()).ok().and_then(|s| cache_from_text(&s)) {
@@ -814,7 +815,9 @@ impl Widget for StocksW {
         moving |= sel_k < 1.0;
         let (lx0, lx1, ltop, lbottom) = match l.sz {
             desk::Sz::Grande | desk::Sz::Columna => {
-                let ch = 62.0;
+                // En Columna, con menos valores que filas, la gráfica se queda con el sitio que sobra
+                // (con 4 valores quedaba un hueco de dos filas al pie)
+                let ch = if l.sz == desk::Sz::Columna { 62.0 + per.saturating_sub(n) as f32 * ROW } else { 62.0 };
                 let y = self.feature(ui, d, PAD, w - PAD, LIST_TOP - 2.0, ch, sel_k, false);
                 if l.sz == desk::Sz::Columna { unsafe { ui.rt.FillRectangle(&rect(PAD, y - 6.0, w - PAD, y - 6.0 + 1.0 / ui.s), &ui.wa(0.08)); } }
                 (PAD, w - PAD, y + if l.sz == desk::Sz::Columna { 6.0 } else { -4.0 }, h - dots_h)

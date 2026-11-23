@@ -407,7 +407,8 @@ impl Widget for PosterW {
         let acc = crate::profiles::accent(1.0);
         let x = 14.0;
         // Arriba del número (su caja), según el tamaño; el número ocupa ~124 de alto
-        let (wy, ny) = match l.sz { Sz::Pequeno => (12.0, 4.0), Sz::Mediano => (54.0, 6.0), _ => (14.0, 30.0) };
+        // (en el pequeño, el número baja lo justo para no pisar el día de la semana ni el mes)
+        let (wy, ny) = match l.sz { Sz::Pequeno => (10.0, 18.0), Sz::Mediano => (54.0, 6.0), _ => (14.0, 30.0) };
         let wd = spaced(&i18n::weekday(now.wDayOfWeek as usize).to_uppercase());
         let day = now.wDay.to_string();
         let dw = ui.p.width(&f.day, &day);
@@ -430,7 +431,7 @@ impl Widget for PosterW {
         match l.sz {
             Sz::Pequeno => {
                 // El mes al pie; el año, si cabe
-                let my = h - 38.0 + 6.0 * (1.0 - k2);
+                let my = h - 35.0 + 6.0 * (1.0 - k2);
                 ui.text(&f.word, month, x + 1.0, my, 28.0, &ui.white);
                 if x + mw + 60.0 < w { ui.text(&f.word, &year, x + mw + 10.0, my, 28.0, &ui.dim); }
             }
@@ -461,6 +462,10 @@ impl Widget for PosterW {
                 let my = 158.0 + 6.0 * (1.0 - k2);
                 ui.text(&f.word, month, x + 1.0, my, 28.0, &ui.white);
                 ui.text(&f.word, &year, x + mw + 10.0, my, 28.0, &ui.dim);
+                // Entre el mes y la semana, la semana del año y el día (sin esto quedaba un hueco)
+                let (doy, ndays) = day_of_year(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
+                let wk = iso_week(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
+                ui.text(&f.spaced, &spaced(&format!("{} · {}", i18n::tf("SEMANA {}", &[&wk]), i18n::tf("DÍA {} DE {}", &[&doy, &ndays]))), x + 2.0, my + 44.0, 18.0, &ui.faint);
                 let today = deskw3::days_from_civil(now.wYear as i32, now.wMonth as u32, now.wDay as u32);
                 let monday = today - (now.wDayOfWeek as i64 + 6) % 7;
                 let letters = i18n::weekday_letters();
@@ -537,13 +542,15 @@ fn local_offset_min() -> i64 {
 fn local_ymd(unix_s: i64, offset_min: i64) -> (i32, u32, u32) { deskw3::civil_from_days((unix_s + offset_min * 60).div_euclid(86_400)) }
 
 /// Fecha de la foto (la de modificación del archivo), o vacía si no se puede leer.
-fn photo_date(path: &str) -> String {
-    let Some(s) = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) else { return String::new() };
+/// Fecha de la foto, larga («23 noviembre 2026») y corta («23 nov 2026», para las polaroids pequeñas).
+fn photo_date(path: &str) -> (String, String) {
+    let Some(s) = std::fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()) else { return (String::new(), String::new()) };
     let (y, m, d) = local_ymd(s.as_secs() as i64, local_offset_min());
-    fmt_photo_date(y, m, d)
+    let mes = i18n::month_short(m.saturating_sub(1) as usize);
+    (fmt_photo_date(y, m, d), if i18n::en() { format!("{mes} {d}, {y}") } else { format!("{d} {mes} {y}") })
 }
 
-struct Snap { ver: u64, bmp: ID2D1Bitmap, w: f32, h: f32, path: String, date: String, at: Instant }
+struct Snap { ver: u64, bmp: ID2D1Bitmap, w: f32, h: f32, path: String, date: (String, String), at: Instant }
 
 /// Las fotos del montón (la más nueva al final) y si ya se pidió la siguiente.
 #[derive(Default)]
@@ -579,8 +586,10 @@ impl PolaroidW {
                     let props = D2D1_BRUSH_PROPERTIES { opacity: 1.0, transform: tm };
                     if let Ok(br) = ui.rt.CreateBitmapBrush(&s.bmp, None, Some(&props)) { ui.rt.FillRectangle(&area, &br); }
                     ui.rt.DrawRectangle(&area, &ui.brush(rgba(0.0, 0.0, 0.0, 0.14)), 0.8, None);
-                    if !s.date.is_empty() {
-                        let txt = fit(ui, script, &s.date, PC_W - 2.0 * PC_B - 8.0);
+                    if !s.date.0.is_empty() {
+                        // Si la larga no cabe, la corta (antes salía «23 noviembr…»)
+                        let room = PC_W - 2.0 * PC_B - 8.0;
+                        let txt = fit(ui, script, if ui.p.width(script, &s.date.0) <= room { &s.date.0 } else { &s.date.1 }, room);
                         ui.text_c(script, &txt, 0.0, b - PC_STRIP, PC_STRIP - 2.0, &ui.brush(rgba(0.20, 0.21, 0.26, 0.88)));
                     }
                 }

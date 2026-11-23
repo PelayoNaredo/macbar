@@ -642,9 +642,15 @@ impl Widget for CalendarW {
                     ui.text(&ui.f.sub, i18n::t("Sin fechas a la vista · añádelas en Cuenta atrás"), x0, 128.0, 18.0, &ui.dim);
                     ui.hit(rect(x0, 104.0, W - PAD, H - PAD), 39);
                 }
-                let cw = (W - PAD - x0) / 3.0;
+                // Cada fecha, con el ancho que pide (nombre y cuánto falta): con tres columnas iguales, un
+                // nombre largo se cortaba aunque a las otras les sobrara sitio
+                let avail = W - PAD - x0;
+                let want: Vec<f32> = self.events.iter().take(3).map(|(name, day)| ui.p.width(&ui.f.lbl, name) + ui.p.width(&ui.f.sub, &days_left(day - today)) + 40.0).collect();
+                let sum: f32 = want.iter().sum();
+                let cws: Vec<f32> = if n == 0 { Vec::new() } else if sum <= avail { want.iter().map(|w| w + (avail - sum) / n as f32).collect() } else { want.iter().map(|w| w * avail / sum).collect() };
                 for (i, (name, day)) in self.events.iter().take(3).enumerate() {
-                    let x = x0 + i as f32 * cw;
+                    let x = x0 + cws[..i].iter().sum::<f32>();
+                    let cw = cws[i];
                     let k = ez(t, 0.35 + i as f32 * 0.06, 0.35);
                     let hk = ui.heat(40 + i as u32);
                     let r = rect(x - 8.0, 124.0, x + cw - 12.0, H - PAD + 4.0);
@@ -1055,6 +1061,20 @@ impl Widget for WeatherW {
         // Pequeño (o sin previsión aún): ciudad, temperatura con icono, cielo y máx/mín
         let Some(f) = fc.as_ref().filter(|_| l.sz != Sz::Pequeno) else {
             self.compact(ui, d, &cur, fc.as_ref(), &city, t, PAD, if l.sz == Sz::Pequeno { W - PAD } else { 150.0 });
+            // Sin previsión en un tamaño grande: se dice (si no, el resto del widget era un hueco)
+            if l.sz != Sz::Pequeno {
+                // (al lado en Mediano y Banda; debajo, a todo el ancho, en los altos)
+                let beside = matches!(l.sz, Sz::Mediano | Sz::Banda);
+                let (x0, y0) = if beside { (180.0, PAD) } else { (PAD, 150.0) };
+                let (cx, cy) = ((x0 + W - PAD) / 2.0, (y0 + H - PAD) / 2.0);
+                let k = ez(t, 0.2, 0.5);
+                popup::push_alpha(ui.rt, k);
+                let narrow = l.sz == Sz::Alto;
+                let f1 = if narrow { &ui.f.sub } else { &ui.f.lbl };
+                ui.text_c(f1, &fit(ui, f1, i18n::t("Sin previsión por ahora"), W - PAD - x0), cx, cy - 18.0, 18.0, &ui.dim);
+                if !narrow { ui.text_c(&ui.f.sub, &fit(ui, &ui.f.sub, i18n::t("Se vuelve a pedir en unos minutos"), W - PAD - x0), cx, cy + 2.0, 18.0, &ui.faint); }
+                ui.rt_pop();
+            }
             return;
         };
         match (l.sz, Some(f)) {
@@ -1409,7 +1429,9 @@ impl Widget for MusicW {
         if !desk::floating() {
             unsafe { ui.rt.FillRectangle(&rect(0.0, 0.0, W, H), &ui.p.vgrad(0.0, H, rgba(r * 0.55, g * 0.55, b * 0.55, 0.55), rgba(r * 0.2, g * 0.2, b * 0.2, 0.15))); }
         }
-        let accent = ui.brush(rgba((r * 0.6 + 0.4).min(1.0), (g * 0.6 + 0.4).min(1.0), (b * 0.6 + 0.4).min(1.0), 1.0));
+        // (con tinta oscura, el color de la carátula oscurecido: aclarado no se leía sobre fondos claros)
+        let lift = |c: f32| (c * 0.6 + 0.4).min(1.0) * (1.0 - ui.ink) + c * 0.55 * ui.ink;
+        let accent = ui.brush(rgba(lift(r), lift(g), lift(b), 1.0));
         let secs = media_secs(m.playing);
 
         match l.sz {
@@ -1459,7 +1481,19 @@ impl Widget for MusicW {
                 self.timeline(ui, secs, PAD, W - PAD, PAD + s + 24.0, false);
                 self.controls(ui, d, dt, W / 2.0, PAD + s + 76.0, true);
                 hline(ui, PAD - 4.0, W - PAD + 4.0, PAD + s + 106.0);
-                self.queue(ui, d, &m, secs, since, PAD, W - PAD, PAD + s + 114.0, H - PAD + 4.0);
+                let top = PAD + s + 114.0;
+                // Columna con la cola corta (o sin cola): lo que sobra abajo lo llena el espectro
+                let rows = upcoming(&m.title).len();
+                let used = if rows == 0 { 130.0 } else { 24.0 + rows as f32 * 38.0 };
+                let spare = H - PAD - (top + used);
+                if l.sz == Sz::Columna && spare >= 70.0 {
+                    let sh = (spare - 26.0).min(90.0);
+                    self.queue(ui, d, &m, secs, since, PAD, W - PAD, top, H - PAD - sh - 18.0);
+                    self.spectrum(ui, PAD, W - PAD, H - PAD - sh, H - PAD, t, dt);
+                    self.live_view = true;
+                } else {
+                    self.queue(ui, d, &m, secs, since, PAD, W - PAD, top, H - PAD + 4.0);
+                }
             }
             // Como el widget de siempre: carátula grande, canción y cola, el espectro, y debajo el progreso y los controles
             Sz::Extragrande => {
@@ -1584,7 +1618,7 @@ fn uptime_text(s: u64) -> String {
 }
 
 /// Batería del equipo: (porcentaje, enchufado). None si no tiene (en la demo, una inventada).
-fn pc_battery() -> Option<(u8, bool)> { if sys::demo() { Some((72, true)) } else { crate::battery() } }
+pub(crate) fn pc_battery() -> Option<(u8, bool)> { if sys::demo() { Some((72, true)) } else { crate::battery() } }
 
 /// Disco principal (el primero): fracción usada, letra y espacio libre.
 fn main_disk() -> Option<(f32, String, u64)> {
@@ -1917,7 +1951,7 @@ impl Widget for SystemW {
 /// `fills`: relleno que se ve de cada disco (va hacia el real); `shake`: sacudida de la papelera
 /// cuando cambia lo que tiene.
 #[derive(Default)]
-struct StorageW { fills: Vec<f32>, r_bin: Roll, r_free: Vec<Roll>, last_items: Option<u64>, shake: Option<Instant>, moving: bool }
+pub(crate) struct StorageW { fills: Vec<f32>, r_bin: Roll, r_free: Vec<Roll>, last_items: Option<u64>, shake: Option<Instant>, moving: bool }
 
 /// «Windows (C:)» / «Disco (D:)».
 fn drive_name(dr: &Drive) -> String {
@@ -1978,7 +2012,7 @@ impl StorageW {
 
     /// Papelera: el cubo (se sacude cuando cambia lo que tiene), cuánto tiene y, con `buttons`,
     /// Abrir y Vaciar a la derecha.
-    fn bin(&mut self, ui: &mut Ui, d: &DFonts, st: &StoreData, x0: f32, x1: f32, by: f32, buttons: bool) {
+    pub(crate) fn bin(&mut self, ui: &mut Ui, d: &DFonts, st: &StoreData, x0: f32, x1: f32, by: f32, buttons: bool) {
         let sh = self.shake.map(|s| s.elapsed().as_secs_f32()).filter(|s| *s < 0.7);
         unsafe {
             ui.rt.FillRoundedRectangle(&rrect(rect(x0, by + 4.0, x0 + 44.0, by + 48.0), 12.0), &ui.wa(0.09));
@@ -2013,26 +2047,29 @@ impl StorageW {
             let vr = rect(x1 - 80.0, by + 12.0, x1, by + 42.0);
             let k = ui.heat(11);
             unsafe { ui.rt.FillRoundedRectangle(&rrect(vr, 10.0), &ui.brush(rgba(1.0, 0.35, 0.35, 0.12 + 0.10 * k))); }
-            let red = ui.brush(rgba(1.0, 0.55, 0.55, if st.bin_items == 0 { 0.4 } else { 1.0 }));
+            let red = ui.brush(Self::bin_red(ui.ink, if st.bin_items == 0 { 0.4 } else { 1.0 }));
             ui.text_c(&ui.f.lbl, i18n::t("Vaciar…"), (vr.left + vr.right) / 2.0, vr.top, vr.bottom - vr.top, &red);
             if st.bin_items > 0 { ui.hit(vr, 11); }
         }
     }
 
-    /// Abrir y Vaciar (en rojo suave; Windows pide confirmación antes de borrar) de `x0` a `x1`.
-    fn bin_buttons(&mut self, ui: &mut Ui, st: &StoreData, x0: f32, x1: f32, y: f32) {
+    /// Rojo de «Vaciar…»: suave sobre tinta clara y más oscuro con tinta oscura (si no, no se leía).
+fn bin_red(ink: f32, a: f32) -> D2D1_COLOR_F { rgba(1.0 - 0.22 * ink, 0.55 - 0.37 * ink, 0.55 - 0.37 * ink, a) }
+
+/// Abrir y Vaciar (en rojo suave; Windows pide confirmación antes de borrar) de `x0` a `x1`.
+    pub(crate) fn bin_buttons(&mut self, ui: &mut Ui, st: &StoreData, x0: f32, x1: f32, y: f32) {
         let mid = x0 + (x1 - x0) * 0.44;
         pbutton(ui, rect(x0, y, mid - 4.0, y + 30.0), None, i18n::t("Abrir"), 10, false);
         let r = rect(mid + 4.0, y, x1, y + 30.0);
         let k = ui.heat(11);
         unsafe { ui.rt.FillRoundedRectangle(&rrect(r, 10.0), &ui.brush(rgba(1.0, 0.35, 0.35, 0.12 + 0.10 * k))); }
-        let red = ui.brush(rgba(1.0, 0.55, 0.55, if st.bin_items == 0 { 0.4 } else { 1.0 }));
+        let red = ui.brush(Self::bin_red(ui.ink, if st.bin_items == 0 { 0.4 } else { 1.0 }));
         ui.text_c(&ui.f.lbl, i18n::t("Vaciar…"), (r.left + r.right) / 2.0, r.top, r.bottom - r.top, &red);
         if st.bin_items > 0 { ui.hit(r, 11); }
     }
 
     /// Lo más grande de la papelera (si tiene algo) desde `fy`; devuelve dónde acaba.
-    fn biggest(&self, ui: &Ui, st: &StoreData, t: f32, x0: f32, x1: f32, fy: f32, bottom: f32) -> f32 {
+    pub(crate) fn biggest(&self, ui: &Ui, st: &StoreData, t: f32, x0: f32, x1: f32, fy: f32, bottom: f32) -> f32 {
         if st.bin_big.is_empty() { return fy; }
         caption(ui, i18n::t("LO MÁS GRANDE"), x0, fy);
         let mut end = fy + 20.0;
@@ -2052,7 +2089,7 @@ impl StorageW {
     }
 
     /// Liberar espacio (Sensor de almacenamiento de Windows) en `fy`, si cabe antes de `bottom`.
-    fn free_up(&self, ui: &mut Ui, st: &StoreData, x0: f32, x1: f32, fy: f32, bottom: f32) {
+    pub(crate) fn free_up(&self, ui: &mut Ui, st: &StoreData, x0: f32, x1: f32, fy: f32, bottom: f32) {
         if fy + 34.0 > bottom + 4.0 { return; }
         let k = ui.heat(12);
         let r = rect(x0 - 8.0, fy - 4.0, x1 + 8.0, fy + 34.0);
@@ -2140,6 +2177,8 @@ impl Widget for StorageW {
             Sz::Alto => {
                 header(ui, d, i18n::t("Almacenamiento"), "", W);
                 let mut y = PAD + 36.0;
+                // Con pocas unidades, más aire entre ellas (si no, quedaba un hueco sobre la papelera)
+                let step = ((H - PAD - 98.0 - 8.0 - y) / drives.len().max(1) as f32).clamp(66.0, 84.0);
                 for (i, dr) in drives.iter().enumerate() {
                     let id = 40 + i as u32;
                     let hk = ui.heat(id);
@@ -2149,7 +2188,7 @@ impl Widget for StorageW {
                     ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, &i18n::tf("{} libres", &[&fmt_bytes(dr.free)]), W - PAD * 2.0), PAD, y + 18.0, 16.0, &ui.dim);
                     bar(ui, PAD, y + 40.0, W - PAD * 2.0, 8.0, frac, &fill_brush(ui, frac));
                     ui.hit(rect(PAD - 8.0, y - 4.0, W - PAD + 8.0, y + 54.0), id);
-                    y += 66.0;
+                    y += step;
                 }
                 let by = (y + 2.0).max(H - PAD - 98.0);
                 hline(ui, PAD - 4.0, W - PAD + 4.0, by - 8.0);
@@ -2160,15 +2199,22 @@ impl Widget for StorageW {
             Sz::Grande | Sz::Columna => {
                 header(ui, d, i18n::t("Almacenamiento"), &count, W);
                 let used = l.sz == Sz::Columna;
+                // Lo que sobra abajo se reparte entre los bloques (si no, la columna con dos unidades
+                // dejaba un hueco entre «liberar espacio» y el total)
+                let row = if used { 76.0 } else { 56.0 };
+                let big_h = if st.bin_big.is_empty() { 0.0 } else { 32.0 + 20.0 * st.bin_big.len() as f32 };
+                let end = PAD + 36.0 + drives.len() as f32 * row + 6.0 + 62.0 + big_h + 34.0;
+                let limit = if used { H - PAD - 64.0 } else { H - PAD };
+                let gap = ((limit - end) / 3.0).clamp(0.0, 22.0);
                 let mut y = PAD + 36.0;
                 for (i, dr) in drives.iter().enumerate() {
                     self.drive_row(ui, i, dr, PAD, W - PAD, y, used);
-                    y += if used { 76.0 } else { 56.0 };
+                    y += row;
                 }
-                let by = y + 6.0;
-                hline(ui, PAD - 4.0, W - PAD + 4.0, by - 10.0);
+                let by = y + 6.0 + gap;
+                hline(ui, PAD - 4.0, W - PAD + 4.0, by - 10.0 - gap / 2.0);
                 self.bin(ui, d, &st, PAD, W - PAD, by, true);
-                let fy = self.biggest(ui, &st, t, PAD, W - PAD, by + 62.0, H - PAD);
+                let fy = self.biggest(ui, &st, t, PAD, W - PAD, by + 62.0 + gap, H - PAD) + gap;
                 if used {
                     self.free_up(ui, &st, PAD, W - PAD, fy, H - PAD - 64.0);
                     hline(ui, PAD - 4.0, W - PAD + 4.0, H - PAD - 50.0);
@@ -2462,7 +2508,10 @@ impl Widget for ProjectsW {
                     caption(ui, if isgh { "GITHUB" } else { i18n::t("EN LOCAL") }, x0, y0);
                     let n = ((y1 - y0 - 22.0) / ROW_H) as usize;
                     if rows.is_empty() { let (a, b) = wrap2(ui, &ui.f.sub, empty_msg(&p, isgh), x1 - x0); ui.text(&ui.f.sub, &a, x0, y0 + 26.0, 18.0, &ui.dim); ui.text(&ui.f.sub, &b, x0, y0 + 44.0, 18.0, &ui.dim); }
-                    self.rows(ui, rows, isgh, 0, n, x0, x1, y0 + 22.0, ROW_H, t);
+                    // Si la lista llena la sección, las filas se reparten el alto (antes sobraba casi una
+                    // fila de hueco al pie)
+                    let rh = if n > 0 && rows.len() >= n { ((y1 - y0 - 22.0) / n as f32).min(ROW_H * 1.2) } else { ROW_H };
+                    self.rows(ui, rows, isgh, 0, n, x0, x1, y0 + 22.0, rh, t);
                     if rows.len() > n { ui.text_r(&ui.f.small, &i18n::tf("{} de {}", &[&n, &rows.len()]), x1, y0, 16.0, &ui.faint); }
                 }
             }

@@ -674,6 +674,8 @@ fn proj_thread() {
         let r = |name: &str, br: &str, dirty, lang, color, h: u64| Repo { name: name.into(), path: format!("C:\\Proyectos\\{name}"), branch: br.into(), dirty, lang, color, modified: now - h * 3600, remote: None };
         let g = |name: &str, private, stars, h: u64, lang: &str, color| GhRepo { name: name.into(), private, stars, pushed: now - h * 3600, url: format!("https://github.com/alex/{name}"), lang: lang.into(), color };
         let mut p = PROJ.lock().unwrap();
+        // Render de estados vacíos: sin proyectos en local y GitHub sin configurar
+        if desk::shot_empty() { p.gh_ok = Some(false); p.scanned = true; return; }
         p.local = vec![
             r("macbar", "main", Some(3), "Rust", [0.87, 0.65, 0.52], 1), r("portfolio-web", "main", Some(0), "TypeScript", [0.19, 0.47, 0.78], 20),
             r("api-tareas", "dev", Some(7), "Go", [0.0, 0.68, 0.85], 52), r("juego-plataformas", "main", Some(0), "C#", [0.4, 0.75, 0.3], 140),

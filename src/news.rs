@@ -314,9 +314,23 @@ pub(crate) fn approach(x: &mut f32, target: f32, dt: f32, tau: f32) -> bool {
 
 pub(crate) fn ez(t: f32, delay: f32, dur: f32) -> f32 { popup::ease_out(((t - delay) / dur).clamp(0.0, 1.0)) }
 
+/// Más páginas que esto y los puntos pasan a «n / total».
+const MAX_DOTS: usize = 7;
+
 /// Puntos de página (el de ahora es una píldora que se desliza). Zonas `10 + i`.
 pub(crate) fn page_dots(ui: &mut Ui, n: usize, dot: f32, cx: f32, cy: f32) {
     if n < 2 { return; }
+    // Muchas páginas (Noticias en Pequeño llegaba a 12 puntos): «3 / 12»; pulsar a la izquierda o a la
+    // derecha del número pasa a la anterior o a la siguiente
+    if n > MAX_DOTS {
+        let cur = (dot.round() as usize).min(n - 1);
+        let s = format!("{} / {}", cur + 1, n);
+        let tw = ui.p.width(&ui.f.small, &s);
+        ui.text_c(&ui.f.small, &s, cx, cy - 8.0, 16.0, &ui.faint);
+        ui.hit(rect(cx - tw / 2.0 - 22.0, cy - 9.0, cx, cy + 9.0), 10 + ((cur + n - 1) % n) as u32);
+        ui.hit(rect(cx, cy - 9.0, cx + tw / 2.0 + 22.0, cy + 9.0), 10 + ((cur + 1) % n) as u32);
+        return;
+    }
     let gap = 12.0;
     let x_of = |i: f32| cx - (n as f32 - 1.0) * gap / 2.0 + i * gap;
     unsafe {
@@ -625,6 +639,8 @@ fn ensure_started() {
     STARTED.call_once(|| {
         if sys::demo() {
             let mut sh = SHARED.lock().unwrap();
+            // Render de estados vacíos: sin red
+            if desk::shot_empty() { sh.offline = true; sh.ver += 1; return; }
             sh.items = demo_items(now());
             sh.fetched = now() - 3 * 60;
             sh.ver += 1;

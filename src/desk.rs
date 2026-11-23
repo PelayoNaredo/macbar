@@ -6,6 +6,9 @@ use super::*;
 use deskw::Widget;
 use popup::Ui;
 
+/// Render fuera de pantalla de los widgets para comprobarlos (`MACBAR_WIDGETSHOT`).
+pub mod shot;
+
 const GAP: f32 = 16.0;
 const SNAP: f32 = 8.0;
 const TIMER_SEC: usize = 1;
@@ -60,7 +63,7 @@ pub fn toggle_style() {
     let line = format!("estilo = {}", if fl { "flotante" } else { "tarjeta" });
     let mut out: Vec<String> = txt.lines().filter(|l| !l.trim_start().starts_with("estilo")).map(str::to_string).collect();
     out.push(line);
-    let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
+    ini_write(out.join("\n") + "\n");
     let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
     for h in all { apply_style(h); unsafe { let _ = InvalidateRect(Some(h), None, false); } }
 }
@@ -183,7 +186,22 @@ const DIE_S: f32 = 0.24;
 
 fn ini_path() -> String { sys::config_dir() + "\\widgets.ini" }
 
-fn ini() -> String { std::fs::read_to_string(ini_path()).unwrap_or_default() }
+/// Render fuera de pantalla en curso (`MACBAR_WIDGETSHOT`, ver `shot.rs`): widgets.ini ni se lee (cada
+/// widget sale con lo de por defecto) ni, sobre todo, se escribe.
+static SHOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn shot() -> bool { SHOT.load(Ordering::Relaxed) }
+/// En el render fuera de pantalla, pasada de estados vacíos (`MACBAR_WIDGETSHOT_VACIO=1`): nada sonando,
+/// sin fechas, sin proyectos, sin previsión y sin red en Bolsa y Noticias.
+pub fn shot_empty() -> bool { shot() && std::env::var_os("MACBAR_WIDGETSHOT_VACIO").is_some() }
+
+fn ini() -> String { if shot() { return String::new(); } std::fs::read_to_string(ini_path()).unwrap_or_default() }
+
+/// Escribe widgets.ini (nunca durante el render fuera de pantalla).
+fn ini_write(s: String) {
+    if shot() { return; }
+    let _ = std::fs::create_dir_all(sys::config_dir());
+    let _ = std::fs::write(ini_path(), s);
+}
 
 fn ini_get(txt: &str, k: &str) -> Option<String> {
     txt.lines().find_map(|l| Some(l.trim().strip_prefix(k)?.trim().strip_prefix('=')?.trim().to_string()))
@@ -219,8 +237,7 @@ fn save(enabled: bool) {
         out += l;
         out.push('\n');
     }
-    let _ = std::fs::create_dir_all(sys::config_dir());
-    let _ = std::fs::write(ini_path(), out);
+    ini_write(out);
 }
 
 fn is_hidden_in(txt: &str, k: Kind) -> bool { ini_get(txt, "ocultos").is_some_and(|v| v.split(',').any(|s| s.trim() == k.key())) }
@@ -242,8 +259,7 @@ pub fn set_ini_value(k: &str, v: &str) {
     // Un valor nunca puede partir la línea y colar otra clave
     let v: String = v.chars().map(|c| if c == '\r' || c == '\n' || c.is_control() { ' ' } else { c }).collect();
     out.push(format!("{k} = {v}"));
-    let _ = std::fs::create_dir_all(sys::config_dir());
-    let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
+    ini_write(out.join("\n") + "\n");
 }
 
 /// Modo presentación: los widgets se esconden (sin quitarlos) y vuelven igual al salir.
@@ -359,11 +375,11 @@ pub fn toggle_kind(i: usize) {
         hidden.push(k.key().to_string());
         retire(h);
         let new = ini().lines().map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
-        let _ = std::fs::write(ini_path(), new + "\n");
+        ini_write(new + "\n");
     } else {
         let hidden: Vec<String> = ini_get(&txt, "ocultos").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty() && s != k.key()).collect()).unwrap_or_default();
         let new = txt.lines().map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
-        let _ = std::fs::write(ini_path(), new + "\n");
+        ini_write(new + "\n");
         if !any_live() { save(true); start(); } else { place(k, 0); save(true); }
     }
 }
@@ -458,7 +474,7 @@ pub fn start() {
         }
         let new = txt.lines().filter(|l| ini_get(l, "nuevos_v2").is_none() && ini_get(l, "nuevos_v3").is_none()).map(|l| if l.trim_start().starts_with("ocultos") { format!("ocultos = {}", hidden.join(",")) } else { l.to_string() }).collect::<Vec<_>>().join("\n");
         let new = if txt.lines().any(|l| l.trim_start().starts_with("ocultos")) { new } else { format!("{new}\nocultos = {}", hidden.join(",")) };
-        let _ = std::fs::write(ini_path(), new + "\nnuevos_v4 = 1\n");
+        ini_write(new + "\nnuevos_v4 = 1\n");
     }
     let txt = ini();
     // Prueba visual: MACBAR_WIDGETS=clave,clave enseña solo esos (por encima de todo, ver WM_WINDOWPOSCHANGING)
@@ -978,7 +994,30 @@ fn create(kind: Kind, x: i32, y: i32, wpx: i32, hpx: i32, order: usize) {
         // Sin desenfoque: el fondo de pantalla se ve nítido a través de un tinte oscuro
         // (Windows no permite elegir la intensidad del desenfoque, solo tenerlo o no)
         let dw: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).unwrap();
-        let mk = |fam, size, wt| make_format(&dw, fam, size, wt);
+        let (f, d) = fonts(&dw);
+        let w = deskw::new(kind);
+        RESPONSIVE[kind as usize].store(w.layouts(), Ordering::Relaxed);
+        let (dims, ldims) = (size(kind), layout_size(kind));
+        // Aparecen en cascada al arrancar
+        let born = Instant::now() + Duration::from_millis(90 * order as u64);
+        DESKS.with(|ds| ds.borrow_mut().push(Dw { hwnd, kind, target: None, dw, cache: RefCell::new(Caches::default()), f, d, hits: Vec::new(), hover: None,
+            glow: HashMap::new(), last_paint: Instant::now(), born, w, drag: None, rdown: false,
+            pressed: None, press: HashMap::new(), lift: 0.0, glide: None, dying: None,
+            layer: None, lcache: RefCell::new(Caches::default()), layer_hits: Vec::new(), mouse: (-1.0, -1.0),
+            light: ink_mode() == 1, ink: if ink_mode() == 1 { 1.0 } else { 0.0 }, lum_n: 0,
+            dims, ldims, morph: None, grip_on: false, grip: 0.0, resize: None }));
+        // En la cara de iconos se crea escondido (aparecerá al volver a la de widgets)
+        let show = if faces::AWAY.load(Ordering::Relaxed) { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
+        let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | show);
+        SetTimer(Some(hwnd), TIMER_SEC, 1000, None);
+        SetTimer(Some(hwnd), TIMER_FADE, 15, None);
+    }
+}
+
+/// Tipos de letra de los widgets (los de los paneles, más grandes, y los propios).
+fn fonts(dw: &IDWriteFactory) -> (popup::Fonts, DFonts) {
+    {
+        let mk = |fam, size, wt| make_format(dw, fam, size, wt);
         let f = popup::Fonts {
             big: mk(FONT, 30.0, DWRITE_FONT_WEIGHT_SEMI_BOLD),
             name: mk(FONT, 14.0, DWRITE_FONT_WEIGHT_SEMI_BOLD),
@@ -998,22 +1037,7 @@ fn create(kind: Kind, x: i32, y: i32, wpx: i32, hpx: i32, order: usize) {
             glyph_m: mk(ICONS, 20.0, DWRITE_FONT_WEIGHT_NORMAL),
             glyph_l: mk(ICONS, 24.0, DWRITE_FONT_WEIGHT_NORMAL),
         };
-        let w = deskw::new(kind);
-        RESPONSIVE[kind as usize].store(w.layouts(), Ordering::Relaxed);
-        let (dims, ldims) = (size(kind), layout_size(kind));
-        // Aparecen en cascada al arrancar
-        let born = Instant::now() + Duration::from_millis(90 * order as u64);
-        DESKS.with(|ds| ds.borrow_mut().push(Dw { hwnd, kind, target: None, dw, cache: RefCell::new(Caches::default()), f, d, hits: Vec::new(), hover: None,
-            glow: HashMap::new(), last_paint: Instant::now(), born, w, drag: None, rdown: false,
-            pressed: None, press: HashMap::new(), lift: 0.0, glide: None, dying: None,
-            layer: None, lcache: RefCell::new(Caches::default()), layer_hits: Vec::new(), mouse: (-1.0, -1.0),
-            light: ink_mode() == 1, ink: if ink_mode() == 1 { 1.0 } else { 0.0 }, lum_n: 0,
-            dims, ldims, morph: None, grip_on: false, grip: 0.0, resize: None }));
-        // En la cara de iconos se crea escondido (aparecerá al volver a la de widgets)
-        let show = if faces::AWAY.load(Ordering::Relaxed) { SET_WINDOW_POS_FLAGS(0) } else { SWP_SHOWWINDOW };
-        let _ = SetWindowPos(hwnd, Some(HWND_BOTTOM), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | show);
-        SetTimer(Some(hwnd), TIMER_SEC, 1000, None);
-        SetTimer(Some(hwnd), TIMER_FADE, 15, None);
+        (f, d)
     }
 }
 
@@ -1170,7 +1194,7 @@ pub fn set_ink_mode(m: i8) {
     let txt = ini();
     let mut out: Vec<String> = txt.lines().filter(|l| !l.trim_start().starts_with("texto")).map(str::to_string).collect();
     out.push(format!("texto = {}", match m { 1 => "oscuro", 2 => "claro", _ => "auto" }));
-    let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
+    ini_write(out.join("\n") + "\n");
     let all: Vec<HWND> = DESKS.with(|d| d.borrow().iter().map(|w| w.hwnd).collect());
     for h in all { refresh_ink(h, true); }
 }
@@ -1338,17 +1362,8 @@ fn paint_real(hwnd: HWND) {
             // obligaban a Windows a copiar cada fotograma por la CPU)
             // Cara de iconos: el widget se aparta hacia su lado de la pantalla y se desvanece
             popup::push_alpha(&rt, fade_alpha(w));
-            if !fl {
-                // Tarjeta: algo más tapada que los paneles, encima del fondo de pantalla hace falta contraste
-                // (con la composición por GPU, Windows ya no redondea la ventana: la tarjeta lo hace sola)
-                // Con tinta oscura, la tarjeta es clara (cristal blanco)
-                let mix = |a: f32, b: f32| a + (b - a) * ink;
-                let tint = ui.brush(rgba(mix(0.10, 0.96), mix(0.11, 0.96), mix(0.12, 0.97), mix(0.58, 0.62)));
-                // (al cambiar de tamaño, la tarjeta sigue al rectángulo animado)
-                let (x0, y0, x1, y1) = (mr[0], mr[1], mr[0] + mr[2], mr[1] + mr[3]);
-                rt.FillRoundedRectangle(&rrect(rect(x0, y0, x1, y1), 16.0), &tint);
-                rt.DrawRoundedRectangle(&rrect(rect(x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5), 15.5), &ui.wa(0.10), 1.0, None);
-            }
+            // (al cambiar de tamaño, la tarjeta sigue al rectángulo animado)
+            if !fl { draw_card(&ui, mr, ink); }
             // Entrada: sube 12 px mientras crece de 0,965 a 1 con un pelín de rebote (desde el centro)
             // (al cambiar de tamaño no: ya lo anima el muelle)
             let rise = if morphing { 0.0 } else { 1.0 - popup::ease_out((t / 0.55).min(1.0)) };
@@ -1396,6 +1411,19 @@ fn paint_real(hwnd: HWND) {
         }).unwrap_or(false);
         let _ = EndPaint(hwnd, &ps);
         if anim && !covered_w(hwnd) { SetTimer(Some(hwnd), TIMER_FRAME, FAST.with(|f| f.get()), None); }
+    }
+}
+
+/// Tarjeta de estilo «tarjeta» bajo el contenido, en el rectángulo `mr` (x, y, ancho, alto en DIP).
+/// Algo más tapada que los paneles: encima del fondo de pantalla hace falta contraste (con la composición
+/// por GPU, Windows ya no redondea la ventana: la tarjeta lo hace sola). Con tinta oscura es clara.
+fn draw_card(ui: &Ui, mr: [f32; 4], ink: f32) {
+    let mix = |a: f32, b: f32| a + (b - a) * ink;
+    let tint = ui.brush(rgba(mix(0.10, 0.96), mix(0.11, 0.96), mix(0.12, 0.97), mix(0.58, 0.62)));
+    let (x0, y0, x1, y1) = (mr[0], mr[1], mr[0] + mr[2], mr[1] + mr[3]);
+    unsafe {
+        ui.rt.FillRoundedRectangle(&rrect(rect(x0, y0, x1, y1), 16.0), &tint);
+        ui.rt.DrawRoundedRectangle(&rrect(rect(x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5), 15.5), &ui.wa(0.10), 1.0, None);
     }
 }
 

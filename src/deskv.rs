@@ -71,7 +71,7 @@ impl Widget for SkyW {
         let temp = format!("{:.0}°", cur.temp);
         ui.text(&d.huge, &temp, 16.0, 36.0 + 8.0 * (1.0 - k), 50.0, &white);
         let desc = crate::weather_desc(cur.code);
-        let mm = fc.as_ref().and_then(|f| f.days.first()).map(|d0| format!("Máx {:.0}°  Mín {:.0}°", d0.3, d0.2));
+        let mm = fc.as_ref().and_then(|f| f.days.first()).map(|d0| i18n::tf("Máx {}°  Mín {}°", &[&format!("{:.0}", d0.3), &format!("{:.0}", d0.2)]));
         match l.sz {
             // Ciudad, temperatura con el icono, y abajo el cielo y la máx./mín.
             Sz::Pequeno => {
@@ -86,14 +86,18 @@ impl Widget for SkyW {
                 ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, desc, 200.0), 18.0, h - 58.0, 18.0, &white);
                 if let Some(mm) = &mm { ui.text(&ui.f.sub, mm, 18.0, h - 38.0, 18.0, &soft); }
                 unsafe { ui.rt.FillRectangle(&rect(236.0, 22.0, 237.0, h - 22.0), &ui.brush(rgba(1.0, 1.0, 1.0, 0.18))); }
-                if let Some(f) = &fc { sky_hours(ui, f, 250.0, w - 18.0, h / 2.0 - 30.0, 12, t, &white, &soft); }
+                match &fc {
+                    Some(f) => sky_hours(ui, f, 250.0, w - 18.0, h / 2.0 - 30.0, 12, t, &white, &soft),
+                    None => ui.text_c(&ui.f.sub, i18n::t("Sin previsión por ahora"), (250.0 + w - 18.0) / 2.0, h / 2.0 - 9.0, 18.0, &soft),
+                }
             }
             // Arriba como el mediano; debajo, seis horas y los próximos cinco días
             _ => {
                 weather::draw_icon_anim(ui.rt, &ui.p, &ui.f.icon_l, w - 42.0, 12.0, 26.0, 26.0, cur.code, cur.is_day, &white, Some(t));
                 ui.text_r(&ui.f.sub, desc, w - 18.0, 42.0, 18.0, &white);
                 if let Some(mm) = &mm { ui.text_r(&ui.f.sub, mm, w - 18.0, 60.0, 18.0, &soft); }
-                let Some(f) = &fc else { return };
+                // Sin previsión: se dice abajo (si no, media tarjeta vacía)
+                let Some(f) = &fc else { ui.text(&ui.f.sub, &fit(ui, &ui.f.sub, i18n::t("Sin previsión por ahora"), w - 36.0), 18.0, h - 40.0, 18.0, &soft); return };
                 if l.sz != Sz::Grande { sky_hours(ui, f, 18.0, w - 18.0, h - 66.0, 6, t, &white, &soft); return; }
                 sky_hours(ui, f, 18.0, w - 18.0, 96.0, 6, t, &white, &soft);
                 unsafe { ui.rt.FillRectangle(&rect(18.0, 166.0, w - 18.0, 167.0), &ui.brush(rgba(1.0, 1.0, 1.0, 0.18))); }
@@ -282,9 +286,11 @@ impl Widget for TodayW {
         match l.sz {
             Sz::Mediano => {
                 unsafe { ui.rt.FillRectangle(&rect(w, 22.0, w + 1.0 / ui.s.max(0.5), l.h - 22.0), &ui.card_edge); }
-                next_dates(ui, w + 18.0, l.w - 18.0, 18.0, 36.0, 3, false, t);
+                // En dos líneas (nombre y cuándo): en una, los nombres se cortaban
+                next_dates(ui, w + 18.0, l.w - 18.0, 18.0, 40.0, 3, true, t);
             }
-            Sz::Alto => next_dates(ui, 18.0, l.w - 18.0, h + 8.0, 44.0, 4, true, t),
+            // Las que caben enteras (con su segunda línea) hasta el borde de abajo
+            Sz::Alto => next_dates(ui, 18.0, l.w - 18.0, h + 8.0, 44.0, ((l.h - 14.0 - h - 8.0) / 44.0).floor().max(1.0) as usize, true, t),
             _ => {}
         }
     }
@@ -304,7 +310,7 @@ impl Widget for RingsW {
         let (w, h) = (l.w, l.h);
         let sys = deskdata::SYS.lock().unwrap().clone();
         let disk = deskdata::STORE.lock().unwrap().as_ref().and_then(|s| s.drives.first().map(|dv| 1.0 - dv.free as f32 / dv.total.max(1) as f32));
-        let bat = crate::battery();
+        let bat = deskw::pc_battery();
         let vals = [sys.as_ref().and_then(|s| s.cpu.last().copied()).unwrap_or(0.0) / 100.0, sys.as_ref().and_then(|s| s.ram.last().copied()).unwrap_or(0.0) / 100.0, disk.unwrap_or(0.0), bat.map(|b| b.0 as f32 / 100.0).unwrap_or(0.0)];
         // Los anillos se llenan desde cero al aparecer y luego siguen al dato con suavidad
         let kin = ez(t, 0.0, 0.9);

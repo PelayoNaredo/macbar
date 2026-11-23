@@ -253,12 +253,15 @@ fn dial(ui: &Ui, cx: f32, cy: f32, r: f32, day: f32, ang: Option<(f32, f32, Opti
     let mix = |a: f32, b: f32| a + (b - a) * day;
     let c0 = rgba(mix(0.20, 0.99), mix(0.22, 0.99), mix(0.29, 1.0), 0.94);
     let c1 = rgba(mix(0.07, 0.86), mix(0.08, 0.88), mix(0.11, 0.92), 0.94);
-    let ink = mix(0.94, 0.13);
+    // La tinta salta pronto de clara a oscura: si siguiera a la esfera, al amanecer y al anochecer las
+    // agujas grises quedaban sobre una esfera gris (sin contraste)
+    let ink = 0.94 + (0.13 - 0.94) * smoothstep(0.38, 0.52, day);
     let st = round_stroke(ui.rt);
     unsafe {
         let face = ui.p.dgrad(cx - r, cy - r, cx + r, cy + r, c0, c1);
         ui.rt.FillEllipse(&ellipse(cx, cy, r), &face);
-        ui.rt.DrawEllipse(&ellipse(cx, cy, r - 0.5), &ui.brush(rgba(ink, ink, ink, 0.10 + 0.06 * day)), 1.0, None);
+        // (de noche el canto, algo más marcado: la esfera oscura se perdía sobre fondos oscuros)
+        ui.rt.DrawEllipse(&ellipse(cx, cy, r - 0.5), &ui.brush(rgba(ink, ink, ink, 0.18 - 0.02 * day)), 1.0, None);
         for i in 0..12 {
             let a = i as f32 / 12.0 * TAU;
             let (s, c) = a.sin_cos();
@@ -861,6 +864,8 @@ fn progress(today: i64, from: i64, date: i64) -> f32 {
 
 /// Fechas de muestra para el modo demo (relativas a hoy).
 fn demo_countdowns(today: i64) -> String {
+    // Render de estados vacíos: sin fechas
+    if desk::shot_empty() { return String::new(); }
     let (y, _, _) = civil_from_days(today);
     let l = [
         Cd { name: i18n::t("Vacaciones").into(), date: today + 28, from: Some(today - 40) },

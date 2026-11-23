@@ -272,7 +272,8 @@ fn photo_thread() {
         let d = photo_dir();
         if d != dir || all.is_empty() { all = list_photos(&d); dir = d; recent.clear(); }
         if all.is_empty() { *PHOTO.lock().unwrap() = None; continue; }
-        let s = scale_of(bar_hwnd()) * desk::ZOOM;
+        // (sin barra, como en el render fuera de pantalla, la escala del 150 %)
+        let s = if desk::shot() { 1.5 } else { scale_of(bar_hwnd()).max(1.0) } * desk::ZOOM;
         let (w, h) = size(Kind::Photos);
         // Algo más grande que el widget: el zoom lento no pierde nitidez
         let (tw, th) = ((w * s * 1.15) as u32, (h * s * 1.15) as u32);

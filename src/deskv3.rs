@@ -730,7 +730,7 @@ impl Widget for TermW {
             let key: &str = if letter.eq_ignore_ascii_case("C:") { i18n::t("Disco C:") } else { i18n::t("Disco") };
             rows.push((key, format!("{} / {} ({:.0} %)", deskdata::fmt_bytes(used), deskdata::fmt_bytes(dr.total), used as f32 * 100.0 / dr.total.max(1) as f32)));
         }
-        if let Some((p, ch)) = crate::battery() { rows.push((i18n::t("Batería"), if ch { i18n::tf("{} % · cargando", &[&p]) } else { format!("{p} %") })); }
+        if let Some((p, ch)) = deskw::pc_battery() { rows.push((i18n::t("Batería"), if ch { i18n::tf("{} % · cargando", &[&p]) } else { format!("{p} %") })); }
         if !info.model.is_empty() { rows.push((i18n::t("Modelo"), info.model.clone())); }
         rows.push((i18n::t("Sonando"), media.as_ref().map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }).unwrap_or_else(|| "—".into())));
         let kx = x0 + 80.0;
@@ -750,14 +750,18 @@ impl Widget for TermW {
         if l.sz == Sz::Columna {
             if let Some(s) = sd.as_ref().filter(|s| s.cpu.len() > 1) {
                 let (gx0, gx1, gy0, gy1) = (20.0, w - 20.0, y + 30.0, h - 76.0);
-                ui.text(&ui.f.small, &format!("{} · 60 s", i18n::t("Procesador")), gx0, y + 6.0, 18.0, &ui.faint);
-                unsafe { rt.FillRectangle(&rect(gx0, gy1, gx1, gy1 + 1.0 / ui.s.max(0.5)), &ui.track); }
                 let pts: Vec<f32> = s.cpu.iter().rev().take(60).rev().copied().collect();
+                // Escala según lo que marca (de 20 en 20 %): con el procesador tranquilo, a escala de 100 %
+                // la línea iba pegada al suelo y la gráfica parecía un hueco
+                let top = ((pts.iter().copied().fold(0.0f32, f32::max) * 1.25 / 20.0).ceil() * 20.0).clamp(20.0, 100.0);
+                ui.text(&ui.f.small, &format!("{} · 60 s · {:.0} %", i18n::t("Procesador"), top), gx0, y + 6.0, 18.0, &ui.faint);
+                unsafe { rt.FillRectangle(&rect(gx0, gy1, gx1, gy1 + 1.0 / ui.s.max(0.5)), &ui.track); }
+                unsafe { rt.FillRectangle(&rect(gx0, gy0, gx1, gy0 + 1.0 / ui.s.max(0.5)), &ui.wa(0.06)); }
                 let n = pts.len();
                 let kg = ez(t, 0.3, 0.6);
                 let st = round_stroke(rt);
                 let line = ui.wa(q(0.8 * kg, 20.0));
-                let py = |v: f32| gy1 - (v / 100.0).clamp(0.0, 1.0) * (gy1 - gy0) * kg;
+                let py = |v: f32| gy1 - (v / top).clamp(0.0, 1.0) * (gy1 - gy0) * kg;
                 for i in 1..n {
                     let (xa, xb) = (gx1 - (n - i) as f32 * (gx1 - gx0) / 59.0, gx1 - (n - 1 - i) as f32 * (gx1 - gx0) / 59.0);
                     unsafe { rt.DrawLine(v2(xa, py(pts[i - 1])), v2(xb, py(pts[i])), &line, 1.3, st.as_ref()); }
@@ -1390,7 +1394,8 @@ impl Widget for TapeW {
 /// barra blanca que va dentro de un tubo de cristal: el tubo dobla en sus cantos la barra y el fondo de
 /// pantalla que tiene detrás.
 #[derive(Default)]
-pub struct DriveDotsW { fills: Vec<f32>, moving: bool, lens: Lens }
+pub struct DriveDotsW { fills: Vec<f32>, moving: bool, lens: Lens, /// La papelera, lo más grande y liberar espacio (los del clásico)
+    store: deskw::StorageW }
 
 impl Widget for DriveDotsW {
     fn layouts(&self) -> bool { true }
@@ -1409,7 +1414,11 @@ impl Widget for DriveDotsW {
         let tr = 9.0;
         // Filas que caben (en la columna se reserva el pie para el total) y su alto: en el alto, el
         // «libres de» va en su propia línea, bajo el nombre
-        let (rh, foot) = (if narrow { 70.0 } else { 54.0 }, if l.sz == Sz::Columna { 44.0 } else { 0.0 });
+        let rh0 = if narrow { 70.0 } else { 54.0 };
+        let (mut rh, foot) = (rh0, if l.sz == Sz::Columna { 44.0 } else { 0.0 });
+        // Columna con pocas unidades: filas más holgadas (la papelera y lo demás van debajo; si no, sobraba
+        // un hueco al pie)
+        if l.sz == Sz::Columna { rh = ((h - 56.0 - foot - 6.0 - 214.0) / n.max(1) as f32).clamp(54.0, 84.0); }
         let fit_n = (((h - 56.0 - foot - 6.0) / rh).floor() as usize).max(1);
         let shown = st.drives.len().min(fit_n).min(10);
         self.fills.resize(shown, 0.0);
@@ -1424,7 +1433,8 @@ impl Widget for DriveDotsW {
             let name = if dr.label.is_empty() { i18n::tf("Disco ({})", &[&letter]) } else { format!("{} ({letter})", dr.label) };
             let id = 40 + i as u32;
             let hk = ui.heat(id);
-            let card = rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + rh - 8.0);
+            // (la fila es la de siempre; si sobra sitio, va entre filas)
+            let card = rect(pad - 8.0, y - 4.0, w - pad + 8.0, y + rh0 - 8.0);
             ui.card_k(card, hk);
             ui.glyph(&ui.f.icon_l, "\u{EDA2}", pad + 3.0 * hk, y, 20.0, 20.0, &ui.wa(0.72 + 0.25 * hk));
             let free = i18n::tf("{} libres de {}", &[&deskdata::fmt_bytes(dr.free), &deskdata::fmt_bytes(dr.total)]);
@@ -1440,10 +1450,25 @@ impl Widget for DriveDotsW {
             let k = ez(t, 0.15 + i as f32 * 0.12, 0.9);
             if t < 1.1 { self.fills[i] = frac * k; } else { self.moving |= approach(&mut self.fills[i], frac, dt, 0.4); }
             // El tubo, debajo de los textos (nunca encima)
-            let cy = y + rh - 21.0;
+            let cy = y + rh0 - 21.0;
             pieces.push(Piece::slab(pad, cy - tr, w - pad, cy + tr, tr, tr, 0.85));
             rows.push((cy, self.fills[i], frac >= 0.9));
             ui.hit(card, id);
+        }
+        // Con sitio debajo de los tubos (alto, grande y columna con pocas unidades), lo del clásico: la
+        // papelera y, si cabe, lo más grande y liberar espacio (antes era un hueco)
+        let y_end = 56.0 + shown as f32 * rh;
+        let bottom = h - foot - if foot > 0.0 { 8.0 } else { 0.0 };
+        if bottom - y_end >= if narrow { 110.0 } else { 70.0 } {
+            let by = y_end + 10.0;
+            ui.sep(by - 8.0);
+            self.store.bin(ui, d, &st, pad, w - pad, by, !narrow);
+            if narrow {
+                if by + 60.0 + 30.0 <= bottom { self.store.bin_buttons(ui, &st, pad, w - pad, bottom - 34.0); }
+            } else {
+                let fy = self.store.biggest(ui, &st, t, pad, w - pad, by + 62.0, bottom);
+                self.store.free_up(ui, &st, pad, w - pad, fy, bottom - 4.0);
+            }
         }
         // Columna: el total de todas las unidades al pie
         if foot > 0.0 && !st.drives.is_empty() {
@@ -1480,6 +1505,8 @@ impl Widget for DriveDotsW {
                 let root = deskdata::STORE.lock().unwrap().as_ref().and_then(|s| s.drives.get((i - 40) as usize).map(|d| d.root.clone()))?;
                 Some(Box::new(move || sys::open(&root)))
             }
+            // Papelera y liberar espacio: como en el clásico
+            10..=12 => self.store.click(id, _right, _pt),
             _ => None,
         }
     }

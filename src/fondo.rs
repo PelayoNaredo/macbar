@@ -36,7 +36,17 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
     /// Recorte ya subido a la GPU por ventana: (huella, lienzo, imagen)
     static CROPS: RefCell<HashMap<isize, (u64, windows::core::IUnknown, ID2D1Bitmap)>> = RefCell::new(HashMap::new());
+    /// Render fuera de pantalla (`desk::shot`): sitio de la ventana imaginaria y monitor, en píxeles
+    static SHOT_WIN: std::cell::Cell<Option<(R, R)>> = const { std::cell::Cell::new(None) };
+    /// Render fuera de pantalla con un fondo liso en vez del de pantalla (p. ej. claro, para la tinta oscura)
+    static SHOT_PLAIN: std::cell::Cell<Option<[u8; 3]>> = const { std::cell::Cell::new(None) };
 }
+
+/// Para el render fuera de pantalla: fondo liso de ese color en vez del fondo de pantalla.
+pub(crate) fn set_shot_plain(c: Option<[u8; 3]>) { SHOT_PLAIN.with(|p| p.set(c)); }
+
+/// Para el render fuera de pantalla: el widget que se pinta «está» en `win` dentro del monitor `mon`.
+pub(crate) fn set_shot_window(v: Option<(R, R)>) { SHOT_WIN.with(|c| c.set(v)); }
 
 fn hash(parts: &[u64]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -211,26 +221,31 @@ fn image(path: &str) -> Option<Rc<Img>> {
 /// no se está pintando un widget.
 pub fn under(ui: &Ui) -> Option<(ID2D1Bitmap, u64)> {
     use windows::core::Interface;
-    let hwnd = desk::current_hwnd()?;
     let (cfg, stamp) = current();
-    let mut wr = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut wr).ok()?; }
-    let win: R = (wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top);
-    if win.2 <= 0 || win.3 <= 0 { return None; }
-    let area: R = if cfg.fit == Fit::Span {
-        unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) }
+    let span = || unsafe { (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN), GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN)) };
+    let (win, area, k): (R, R, isize) = if let Some((win, mon)) = SHOT_WIN.with(|c| c.get()) {
+        // Render fuera de pantalla: una ventana imaginaria en ese sitio del monitor
+        (win, if cfg.fit == Fit::Span { span() } else { mon }, -1)
     } else {
-        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-        unsafe { let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi); }
-        let m = mi.rcMonitor;
-        (m.left, m.top, m.right - m.left, m.bottom - m.top)
+        let hwnd = desk::current_hwnd()?;
+        let mut wr = RECT::default();
+        unsafe { GetWindowRect(hwnd, &mut wr).ok()?; }
+        let win: R = (wr.left, wr.top, wr.right - wr.left, wr.bottom - wr.top);
+        let area: R = if cfg.fit == Fit::Span { span() } else {
+            let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+            unsafe { let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi); }
+            let m = mi.rcMonitor;
+            (m.left, m.top, m.right - m.left, m.bottom - m.top)
+        };
+        (win, area, hwnd.0 as isize)
     };
-    let key = hash(&[stamp, win.0 as u64, win.1 as u64, win.2 as u64, win.3 as u64, area.0 as u64, area.1 as u64, area.2 as u64, area.3 as u64]);
+    if win.2 <= 0 || win.3 <= 0 { return None; }
+    let key = hash(&[stamp ^ SHOT_PLAIN.with(|p| p.get()).map(|c| 1 + c[0] as u64).unwrap_or(0), win.0 as u64, win.1 as u64, win.2 as u64, win.3 as u64, area.0 as u64, area.1 as u64, area.2 as u64, area.3 as u64]);
     let unk = ui.rt.cast::<windows::core::IUnknown>().ok()?;
-    let k = hwnd.0 as isize;
     if let Some(b) = CROPS.with(|c| c.borrow().get(&k).filter(|e| e.0 == key && e.1 == unk).map(|e| e.2.clone())) { return Some((b, key)); }
-    let img = image(&cfg.path);
-    let px = crop(img.as_deref(), cfg.fit, cfg.bg, area, win);
+    let plain = if k == -1 { SHOT_PLAIN.with(|p| p.get()) } else { None };
+    let img = if plain.is_some() { None } else { image(&cfg.path) };
+    let px = crop(img.as_deref(), cfg.fit, plain.unwrap_or(cfg.bg), area, win);
     let s = ui.s.max(0.5);
     let bp = D2D1_BITMAP_PROPERTIES { pixelFormat: D2D1_PIXEL_FORMAT { format: DXGI_FORMAT_B8G8R8A8_UNORM, alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED }, dpiX: 96.0 * s, dpiY: 96.0 * s };
     let bmp = unsafe { ui.rt.CreateBitmap(D2D_SIZE_U { width: win.2 as u32, height: win.3 as u32 }, Some(px.as_ptr() as _), win.2 as u32 * 4, &bp).ok()? };
