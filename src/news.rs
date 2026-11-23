@@ -99,7 +99,12 @@ pub(crate) struct Cfg {
 impl Default for Cfg { fn default() -> Self { cfg_from(|_| None) } }
 
 /// ¿Es una dirección web (lo único que se pide)?
-pub(crate) fn is_web_url(s: &str) -> bool { (s.starts_with("https://") || s.starts_with("http://")) && net::split_url(s).is_some() }
+/// Solo direcciones http(s) sin espacios, caracteres de control ni «|» (separador en widgets.ini).
+pub(crate) fn is_web_url(s: &str) -> bool {
+    (s.starts_with("https://") || s.starts_with("http://"))
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace() || c == '|')
+        && net::split_url(s).is_some()
+}
 
 /// Configuración a partir de widgets.ini. Quien venía de antes (solo `noticias_fuentes`, que por defecto
 /// era la portada de Google Noticias) conserva lo que veía.
@@ -1076,5 +1081,16 @@ mod tests {
         assert_eq!(fmt_ago(3 * 3600 + 5), "hace 3 h");
         assert_eq!(fmt_ago(30 * 3600), "ayer");
         assert_eq!(fmt_ago(4 * 86400), "hace 4 días");
+    }
+}
+
+#[cfg(test)]
+mod tests_url_segura {
+    #[test]
+    fn url_con_saltos_o_barra_no_vale() {
+        assert!(super::is_web_url("https://example.com/feed.xml"));
+        assert!(!super::is_web_url("https://example.com/a\nbolsa_simbolos = X"));
+        assert!(!super::is_web_url("https://example.com/a|b"));
+        assert!(!super::is_web_url("https://example.com/a b"));
     }
 }

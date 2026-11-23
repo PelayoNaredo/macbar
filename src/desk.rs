@@ -239,6 +239,8 @@ fn retire(h: HWND) {
 /// Cambia (o añade) `k = v` en widgets.ini (lo usa el importador de temas).
 pub fn set_ini_value(k: &str, v: &str) {
     let mut out: Vec<String> = ini().lines().filter(|l| l.trim().strip_prefix(k).is_none_or(|r| !r.trim_start().starts_with('='))).map(str::to_string).collect();
+    // Un valor nunca puede partir la línea y colar otra clave
+    let v: String = v.chars().map(|c| if c == '\r' || c == '\n' || c.is_control() { ' ' } else { c }).collect();
     out.push(format!("{k} = {v}"));
     let _ = std::fs::create_dir_all(sys::config_dir());
     let _ = std::fs::write(ini_path(), out.join("\n") + "\n");
